@@ -1,7 +1,6 @@
 // Gabbar — intake scribe. Writes feedback rows at status=pending. Executes nothing.
 // Socket Mode: outbound websocket only, no public endpoint.
-import pkg from '@slack/bolt';
-const { App } = pkg;
+import { App } from '@slack/bolt';
 
 const API = process.env.MC_API || 'http://localhost:4899/api';
 const BASE_URL = process.env.BASE_URL || 'http://localhost:4899';
@@ -14,6 +13,10 @@ const app = new App({
 });
 
 const TASK_REF = /\b([A-Z]{2,10}-\d+)\b/i;
+
+// skip our own replies, not everything bot-flavored: messages sent via the app's
+// own user token carry a bot_id but user = the real human
+let SELF_USER = '';
 
 async function mc(path: string, init?: RequestInit) {
   const r = await fetch(`${API}${path}`, {
@@ -50,7 +53,7 @@ async function pullFiles(files: any[]): Promise<string[]> {
 
 async function handle({ message, event, client, say }: any) {
   const m = message ?? event;
-  if (m.subtype || m.bot_id) return; // edits, joins, our own replies
+  if (m.subtype || m.user === SELF_USER || (!m.user && m.bot_id)) return; // edits, joins, our own replies
   const text: string = (m.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
   const threadTs = m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : null;
 
@@ -104,4 +107,5 @@ app.message(async (args: any) => { if (args.message.channel_type === 'im') await
 app.event('app_mention', async (args: any) => { await handle(args); });
 
 await app.start();
-console.log('gabbar (scribe) connected via socket mode');
+SELF_USER = (await app.client.auth.test()).user_id as string;
+console.log(`gabbar (scribe) connected via socket mode as ${SELF_USER}`);
