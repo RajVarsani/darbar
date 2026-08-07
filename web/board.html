@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Mission Control</title>
+<style>
+  :root{
+    --bg:#0c110e;--panel:#141b16;--panel2:#101610;--line:#26332a;
+    --ink:#e7efe9;--muted:#8ba394;--faint:#5c7263;
+    --green:#46d492;--amber:#e5b44f;--blue:#7ea8f0;--red:#e57373;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;padding:36px clamp(14px,3.5vw,48px) 80px}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+  h1{font-size:24px;letter-spacing:-.02em;margin:4px 0 2px}
+  .sub{color:var(--muted);font-size:13px;font-family:var(--mono)}
+  .live{display:inline-flex;align-items:center;gap:6px;margin-left:10px;font-family:var(--mono);font-size:11px;color:var(--green)}
+  .live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+  @keyframes pulse{50%{opacity:.3}}
+  h2{font-size:12px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--faint);margin:36px 0 10px}
+  .card{border:1px solid var(--line);border-radius:12px;background:var(--panel2);overflow:hidden}
+  .row{display:grid;grid-template-columns:92px 1fr auto;gap:12px;padding:11px 16px;border-bottom:1px solid var(--line);align-items:baseline}
+  .row:last-child{border-bottom:none}
+  .row.child{grid-template-columns:92px 1fr auto;background:rgba(255,255,255,.015)}
+  .row.child .tid::before{content:"└ ";color:var(--faint)}
+  .tid{font-family:var(--mono);font-size:12px;color:var(--muted);white-space:nowrap}
+  .ttl{color:var(--ink)}
+  .meta{color:var(--faint);font-size:12px;font-family:var(--mono)}
+  .meta b{color:var(--muted);font-weight:500}
+  .pill{font-family:var(--mono);font-size:10.5px;padding:2px 9px;border-radius:99px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .pill.done{color:var(--green);border-color:var(--green)}
+  .pill.in_progress,.pill.qa,.pill.review{color:var(--amber);border-color:var(--amber)}
+  .pill.blocked{color:var(--red);border-color:var(--red)}
+  .pill.pending{color:var(--amber);border-color:var(--amber)}
+  .pill.resolved{color:var(--green);border-color:var(--green)}
+  .pill.rejected{color:var(--faint)}
+  .fb{padding:10px 16px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:92px 1fr auto;gap:12px;align-items:baseline}
+  .fb:last-child{border-bottom:none}
+  .fb .who{font-family:var(--mono);font-size:11px}
+  .fb .who.human{color:var(--amber)} .fb .who.agent{color:var(--green)}
+  .fb .body{color:var(--muted)}
+  .fb .body a{color:var(--blue)}
+  .events{font-family:var(--mono);font-size:11.5px;color:var(--faint);display:flex;flex-direction:column;gap:6px;padding:14px 16px}
+  .empty{padding:18px 16px;color:var(--faint);font-family:var(--mono);font-size:12px}
+  .err{color:var(--red);font-family:var(--mono);padding:40px}
+</style>
+</head>
+<body>
+  <div id="app"><div class="empty">loading…</div></div>
+<script>
+const capId = location.pathname.split('/').pop();
+const el = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function load(){
+  const r = await fetch(`/api/p/${capId}`);
+  if(!r.ok){ el.innerHTML = '<div class="err">board not found</div>'; return; }
+  render(await r.json());
+}
+
+function taskRow(t, child){
+  return `<div class="row${child?' child':''}">
+    <span class="tid">${esc(t.shortId)}</span>
+    <span><span class="ttl">${esc(t.title)}</span>
+      <div class="meta">${t.assignee?`<b>${esc(t.assignee)}</b> · ${esc(t.assigneeType)}`:'unassigned'}${t.blocker?` · blocked: ${esc(t.blocker)}`:''}${(t.commits||[]).length?` · ${t.commits.length} commit${t.commits.length>1?'s':''}`:''}</div></span>
+    <span class="pill ${esc(t.status)}">${esc(t.status)}</span>
+  </div>`;
+}
+
+function fbRow(f){
+  const shots=(f.attachments||[]).map(a=>` <a href="${esc(a)}" target="_blank">[img]</a>`).join('');
+  return `<div class="fb">
+    <span class="tid">${esc(f.shortId)}</span>
+    <span><span class="who ${esc(f.authorType)}">${esc(f.author)}</span> · <span class="tid">${esc(f.type)}</span>${f.taskShortId?` · <span class="tid">${esc(f.taskShortId)}</span>`:''}
+      <div class="body">${esc(f.body)}${shots}${f.resolution?`<div class="meta">↳ ${esc(f.resolution)}</div>`:''}</div></span>
+    <span class="pill ${esc(f.status)}">${esc(f.status)}</span>
+  </div>`;
+}
+
+function render(d){
+  const roots = d.tasks.filter(t=>!t.parentTaskId);
+  const kids = p => d.tasks.filter(t=>t.parentTaskId===p._id);
+  const open = d.feedback.filter(f=>!['resolved','rejected'].includes(f.status));
+  const closed = d.feedback.filter(f=>['resolved','rejected'].includes(f.status));
+  el.innerHTML = `
+    <div class="eyebrow">mission control · live board</div>
+    <h1>${esc(d.project.name)}<span class="live">live</span></h1>
+    <div class="sub">${esc(d.project.prefix)} · repos: ${esc((d.project.repos||[]).join(' · '))||'none'}</div>
+
+    <h2>feedback queue · ${open.length} open</h2>
+    <div class="card">${open.map(fbRow).join('')||'<div class="empty">nothing pending — the manager’s inbox is clear</div>'}</div>
+
+    <h2>tasks · ${d.tasks.filter(t=>t.status==='done').length}/${d.tasks.length} done</h2>
+    <div class="card">${roots.map(t=>taskRow(t,false)+kids(t).map(k=>taskRow(k,true)).join('')).join('')||'<div class="empty">no tasks yet</div>'}</div>
+
+    ${closed.length?`<h2>closed feedback</h2><div class="card">${closed.map(fbRow).join('')}</div>`:''}
+
+    <h2>recent events</h2>
+    <div class="card"><div class="events">${d.events.map(e=>`<span>${new Date(e.at).toLocaleTimeString('en-GB')} · ${esc(e.text)}</span>`).join('')||'quiet'}</div></div>`;
+}
+
+let t;
+function scheduleReload(){ clearTimeout(t); t=setTimeout(load, 250); }
+new EventSource(`/api/p/${capId}/stream`).addEventListener('message', scheduleReload);
+load();
+</script>
+</body>
+</html>

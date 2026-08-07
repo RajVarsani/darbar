@@ -1,0 +1,17 @@
+{
+  "name": "mission-control",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "bun --env-file=.env src/server.ts",
+    "gabbar": "bun --env-file=.env gabbar/bot.ts",
+    "mcp": "bun --env-file=.env mcp/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@slack/bolt": "^4.0.0",
+    "hono": "^4.0.0",
+    "mongodb": "^6.0.0",
+    "zod": "^4.4.3"
+  }
+}
