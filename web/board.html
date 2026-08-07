@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Mission Control</title>
+<title>Houston</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
@@ -220,7 +220,7 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand"><span class="dot">M</span>MISSION CONTROL <span class="crumb">/</span>
+  <div class="brand"><span class="dot">H</span>HOUSTON <span class="crumb">/</span>
     <span id="pname">…</span> <span class="chip" id="pprefix"></span> <span class="live" id="livedot">live</span>
   </div>
   <div class="searchwrap">
@@ -285,7 +285,7 @@ const eventsForTask = t => (state.data?.events??[]).filter(e=>e.taskId===t._id |
 // ---------- rendering ----------
 function render(){
   const d = state.data; if(!d) return;
-  document.title = `${d.project.name} · Mission Control`;
+  document.title = `${d.project.name} · Houston`;
   $('pname').textContent = d.project.name;
   $('pprefix').textContent = d.project.prefix;
   $('ptitle').textContent = d.project.name;

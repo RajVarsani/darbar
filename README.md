@@ -1,7 +1,8 @@
-# Mission Control
+# Houston
 
-Self-hosted tracker + human feedback pipe for agent-orchestrated projects.
-Plan: https://claude.ai/code/artifact/6be911e7-772f-4c96-baf3-5994fe48207f
+Mission control for agent-orchestrated projects.
+
+Self-hosted tracker + human feedback pipe: live boards, Gabbar Slack intake, MCP tools for agents.Plan: https://claude.ai/code/artifact/6be911e7-772f-4c96-baf3-5994fe48207f
 
 ## Pieces
 - `src/server.ts` — Hono API + SSE + capability-URL boards (`/p/:capId`) on :4899
@@ -21,5 +22,5 @@ Mongo: reuses the saturn-v2 docker container (db `mission_control`).
 
 ## MCP registration (orchestrator sessions)
 ```json
-{ "mcpServers": { "mission-control": { "command": "bun", "args": ["--env-file=/Users/rajvarsani/all-things-saturn/mission-control/.env", "/Users/rajvarsani/all-things-saturn/mission-control/mcp/server.ts"] } } }
+{ "mcpServers": { "houston": { "command": "bun", "args": ["--env-file=/Users/rajvarsani/fafo/houston/.env", "/Users/rajvarsani/fafo/houston/mcp/server.ts"] } } }
 ```
