@@ -2,8 +2,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { config } from '../src/config';
 
-const API = process.env.MC_API || 'http://localhost:4899/api';
+const API = config.apiUrl;
 
 async function call(path: string, method = 'GET', body?: unknown) {
   const r = await fetch(`${API}${path}`, {

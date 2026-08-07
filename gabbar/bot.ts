@@ -1,14 +1,11 @@
 // Gabbar — intake scribe. Writes feedback rows at status=pending. Executes nothing.
 // Socket Mode: outbound websocket only, no public endpoint.
 import { App } from '@slack/bolt';
-
-const API = process.env.MC_API || 'http://localhost:4899/api';
-const BASE_URL = process.env.BASE_URL || 'http://localhost:4899';
-const FILES_DIR = new URL('../data/files/', import.meta.url).pathname;
+import { config } from '../src/config';
 
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  appToken: process.env.SLACK_APP_TOKEN,
+  token: config.slackBotToken,
+  appToken: config.slackAppToken,
   socketMode: true,
 });
 
@@ -19,11 +16,15 @@ const TASK_REF = /\b([A-Z]{2,10}-\d+)\b/i;
 let SELF_USER = '';
 
 async function mc(path: string, init?: RequestInit) {
-  const r = await fetch(`${API}${path}`, {
-    headers: { 'content-type': 'application/json' },
-    ...init,
-  });
-  return { ok: r.ok, body: await r.json().catch(() => ({})) };
+  try {
+    const r = await fetch(`${config.apiUrl}${path}`, {
+      headers: { 'content-type': 'application/json' },
+      ...init,
+    });
+    return { ok: r.ok, status: r.status, body: (await r.json().catch(() => ({}))) as any };
+  } catch (e) {
+    return { ok: false, status: 0, body: { error: `houston unreachable: ${String(e)}` } as any };
+  }
 }
 
 async function authorName(client: any, userId: string): Promise<string> {
@@ -40,13 +41,15 @@ async function pullFiles(files: any[]): Promise<string[]> {
   const out: string[] = [];
   for (const f of files ?? []) {
     if (!f.url_private_download) continue;
-    const name = `${f.id}-${(f.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const r = await fetch(f.url_private_download, {
-      headers: { authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` },
-    });
-    if (!r.ok) continue;
-    await Bun.write(`${FILES_DIR}${name}`, await r.arrayBuffer());
-    out.push(`${BASE_URL}/files/${name}`);
+    try {
+      const name = `${f.id}-${(f.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const r = await fetch(f.url_private_download, {
+        headers: { authorization: `Bearer ${config.slackBotToken}` },
+      });
+      if (!r.ok) continue;
+      await Bun.write(`${config.filesDir}${name}`, await r.arrayBuffer());
+      out.push(`${config.baseUrl}/files/${name}`);
+    } catch { /* skip this file, keep the message */ }
   }
   return out;
 }
@@ -55,16 +58,14 @@ async function handle({ message, event, client, say }: any) {
   const m = message ?? event;
   if (m.subtype || m.user === SELF_USER || (!m.user && m.bot_id)) return; // edits, joins, our own replies
   const text: string = (m.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
-  const threadTs = m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : null;
+  const threadTs: string | null = m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : null;
 
-  // reply inside an existing feedback thread -> reopen that row, don't file a new one
+  // reply inside an existing feedback thread reopens that row (ANY status), never duplicates
   if (threadTs) {
-    const { body: pend } = await mc('/feedback/pending');
-    const all = Array.isArray(pend) ? pend : [];
-    const existing = all.find((f: any) => f.slack?.ts === threadTs && f.slack?.channel === m.channel);
-    if (existing) {
-      await mc(`/feedback/${existing.shortId}`, { method: 'PATCH', body: JSON.stringify({ status: 'pending', resolution: null }) });
-      await say({ thread_ts: threadTs, text: `noted — ${existing.shortId} back in the queue.` });
+    const found = await mc(`/feedback/by-slack?channel=${encodeURIComponent(m.channel)}&ts=${encodeURIComponent(threadTs)}`);
+    if (found.ok && found.body.shortId) {
+      await mc(`/feedback/${found.body.shortId}`, { method: 'PATCH', body: JSON.stringify({ status: 'pending' }) });
+      await say({ thread_ts: threadTs, text: `noted, *${found.body.shortId}* is back in the queue.` });
       return;
     }
   }
@@ -73,24 +74,32 @@ async function handle({ message, event, client, say }: any) {
   const attachments = await pullFiles(m.files);
   if (!text && attachments.length === 0) return;
 
-  const refMatch = text.match(TASK_REF);
-  const payload: any = {
+  const payload: Record<string, unknown> = {
     author,
     authorType: 'human',
     body: text,
     attachments,
-    slack: { channel: m.channel, ts: m.ts, user: m.user },
+    // thread ROOT ts, so later replies in the same thread match this row
+    slack: { channel: m.channel, ts: threadTs ?? m.ts, user: m.user },
   };
 
-  if (refMatch) {
-    payload.taskRef = refMatch[1].toUpperCase();
+  // a ref-looking token only counts if the task actually exists ("COVID-19" is not a task)
+  const refMatch = text.match(TASK_REF);
+  const taskRef = refMatch?.[1] ? refMatch[1].toUpperCase() : null;
+  const taskExists = taskRef ? (await mc(`/tasks/${taskRef}`)).ok : false;
+
+  if (taskExists) {
+    payload.taskRef = taskRef;
   } else {
-    // no task id: bind by channel, else fall back to the only/most recent project
     const { body: projects } = await mc('/projects');
     const list = Array.isArray(projects) ? projects : [];
     const byChannel = list.find((p: any) => p.slackChannel === m.channel);
-    const target = byChannel ?? (list.length === 1 ? list[0] : list[0]); // most recent first
-    if (!target) { await say({ thread_ts: m.ts, text: 'no projects registered yet — run /project-init first.' }); return; }
+    if (!byChannel && list.length > 1) {
+      await say({ thread_ts: m.ts, text: `which project is this for? include a task id (like \`${list[0].prefix}-1\`) or a project prefix: ${list.map((p: any) => `\`${p.prefix}\``).join(' ')}` });
+      return;
+    }
+    const target = byChannel ?? list[0];
+    if (!target) { await say({ thread_ts: m.ts, text: 'no projects registered yet. run /houston-project-init first.' }); return; }
     payload.project = target.capId;
   }
 
@@ -103,9 +112,20 @@ async function handle({ message, event, client, say }: any) {
   await say({ thread_ts: m.ts, text: `logged *${body.shortId}* ${where} · status pending. board: ${body.boardUrl}` });
 }
 
-app.message(async (args: any) => { if (args.message.channel_type === 'im') await handle(args); });
-app.event('app_mention', async (args: any) => { await handle(args); });
+// intake must never die silently: any unexpected failure still answers the human
+async function safeHandle(args: any) {
+  try {
+    await handle(args);
+  } catch (e) {
+    console.error('gabbar handler error:', e);
+    const m = args.message ?? args.event;
+    await args.say?.({ thread_ts: m?.ts, text: `something broke logging that (${String(e).slice(0, 120)}). send it again in a bit.` }).catch(() => {});
+  }
+}
 
+app.message(async (args: any) => { if (args.message.channel_type === 'im') await safeHandle(args); });
+app.event('app_mention', async (args: any) => { await safeHandle(args); });
+
+SELF_USER = ((await app.client.auth.test()) as { user_id?: string }).user_id ?? '';
 await app.start();
-SELF_USER = (await app.client.auth.test()).user_id as string;
 console.log(`gabbar (scribe) connected via socket mode as ${SELF_USER}`);

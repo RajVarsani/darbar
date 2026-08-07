@@ -271,6 +271,7 @@ const relTime = iso => {
   return new Date(iso).toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 };
 const nice = s => String(s||'').replace(/_/g,' ');
+const safeUrl = a => /^(https?:\/\/|\/)/i.test(String(a||'')); // block javascript:/data: schemes
 
 // ---------- data helpers ----------
 const tasks = () => state.data?.tasks ?? [];
@@ -280,7 +281,7 @@ const fbByShort = id => fbs().find(f=>f.shortId===id);
 const childrenOf = t => tasks().filter(x=>x.parentTaskId===t._id);
 const fbForTask = t => fbs().filter(f=>f.taskId===t._id);
 const openFb = f => !['resolved','rejected'].includes(f.status);
-const eventsForTask = t => (state.data?.events??[]).filter(e=>e.taskId===t._id || (e.text||'').includes(t.shortId));
+const eventsForTask = t => { const re = new RegExp('\\b'+t.shortId+'\\b'); return (state.data?.events??[]).filter(e=>e.taskId===t._id || re.test(e.text||'')); };
 
 // ---------- rendering ----------
 function render(){
@@ -478,7 +479,7 @@ function renderDrawer(){
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span>
         </div>
         <div class="quote">${esc(f.body)||'<i>screenshot only</i>'}</div>
-        ${f.attachments?.length?`<div class="shots">${f.attachments.map(a=>`<a href="${esc(a)}" target="_blank"><img src="${esc(a)}" alt="attachment"></a>`).join('')}</div>`:''}
+        ${f.attachments?.length?`<div class="shots">${f.attachments.filter(safeUrl).map(a=>`<a href="${esc(a)}" target="_blank"><img src="${esc(a)}" alt="attachment"></a>`).join('')}</div>`:''}
         ${f.slack?'<div class="note">came in via Slack. every status change below replies in that thread</div>':''}
         <div class="dsec"><h3>Lifecycle</h3><div class="flow">${flow}</div></div>
         ${f.resolution?`<div class="dsec"><h3>${f.status==='rejected'?'Reason':'Resolution'}</h3>
