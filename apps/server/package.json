@@ -1,0 +1,12 @@
+{
+  "name": "@houston/server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@houston/core": "workspace:*",
+    "hono": "^4.0.0"
+  },
+  "scripts": {
+    "dev": "bun --env-file=../../.env src/server.ts"
+  }
+}

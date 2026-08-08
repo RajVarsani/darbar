@@ -1,111 +1,73 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
+# Houston — Claude instructions
 
-Default to using Bun instead of Node.js.
+Mission control for agent-orchestrated projects: live boards + human feedback pipe
+(Slack via Gabbar) + MCP tools for orchestrator/builder sessions.
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
+## Monorepo map (Bun workspaces)
 
-## APIs
+| Workspace | What | Entry |
+|---|---|---|
+| `apps/server` | Hono API + SSE + capability-URL boards on `127.0.0.1:4899` | `src/server.ts` |
+| `apps/gabbar` | Slack Socket Mode intake bot (writes pending feedback, nothing else) | `src/bot.ts` |
+| `apps/proxy` | Dynamic front door on `127.0.0.1:4800`; ngrok fronts ONLY this | `src/server.ts` |
+| `apps/mcp` | stdio MCP tools wrapping the API (spawned by Claude sessions) | `src/server.ts` |
+| `packages/core` | Shared config + Mongo collections + types (`@houston/core`) | `src/index.ts` |
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+Each workspace has its own CLAUDE.md with specifics. Read the one for whatever you touch.
+Runtime is Bun everywhere: `bun install`, `bun run`, `bunx`, `Bun.file`, `bun test`.
 
-## Testing
+## Run
 
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
+```bash
+bun dev              # EVERYTHING: mongo check -> server + gabbar + proxy + ngrok tunnel
+bun run server|gabbar|proxy|tunnel   # individual pieces
+bun run mcp          # stdio; normally spawned via MCP registration (README)
+bun run typecheck    # tsc --noEmit; run before committing
 ```
 
-## Frontend
+## Config doctrine
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+Root `.env` (gitignored) drives every value through `packages/core/src/config.ts`.
+No default lives anywhere else; `.env.example` documents all vars. Never hardcode a
+port, URL, db name, or token in an app. `data/` holds runtime state (files, logs,
+routes.json) and is gitignored.
 
-Server:
+## Invariants (do not break)
 
-```ts#index.ts
-import index from "./index.html"
+- **Gabbar is intake-only.** It creates feedback rows at `pending` and confirms in
+  thread. It never creates tasks, never changes statuses, never executes anything.
+- **Only the orchestrator promotes feedback to tasks** (via MCP tools). Lanes and
+  humans file feedback; one promoter keeps the board coherent.
+- **Only the server touches Mongo and posts Slack replies.** Resolution replies live
+  in the server's feedback PATCH, not in the bot.
+- **Nothing binds beyond loopback.** Outside traffic comes through ngrok -> proxy,
+  and the proxy's per-route `public` regex list defines the exposed surface
+  (boards `/p/`, board API `/api/p/`, files `/files/` by default). Tunneled requests
+  carry `x-forwarded-host`; that header is the public/local switch.
+- **API bodies are string-typed** (guards in `apps/server/src/api.ts`). Keep them:
+  they block Mongo operator injection and untyped garbage reaching the board.
+- **Every feedback state change that matters replies in the original Slack thread**;
+  reply failures are logged as board events, never swallowed.
 
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
+## Task statuses (Jira-style)
 
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
+`backlog → todo → in_progress → in_review → qa → done`, plus `blocked` (with the
+free-text `blocker` field carrying why) and `cancelled`. Feedback lifecycle:
+`pending → triaged → accepted → in_progress → resolved | rejected | needs_clarification`
+(replies in-thread on resolved/rejected/needs_clarification; thread replies reopen
+rows to `pending`, never duplicate).
 
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
+## Test fixtures
 
-With the following `frontend.tsx`:
+Project TST ("Gabbar Test Project"), board `/p/PUNbf9U9VS4b7RBgiTtGg`,
+Raj↔Gabbar DM channel `D0AH8292D7Y`. Slack app "Gabbar Singh" `A0AHP0UKQMP`,
+Socket Mode on, bot user `U0AGUK6D207`.
 
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
+## Conventions
 
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+- `bun run typecheck` clean before any commit.
+- Commits: conventional-ish (`feat:`, `fix:`, `refactor:`); no session URLs in bodies.
+- Git pushes use the repo-local credential helper (reads `~/fafo/.envrc`); remotes
+  stay token-free.
+- The Claude skills for this system (`gabbar` persona, `houston-project-init`)
+  live in the separate public repo `RajVarsani/skills`, NOT here.

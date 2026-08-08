@@ -7,12 +7,12 @@
 //   are only allowed onto paths matching the route's `public` regex list. Local
 //   requests bypass the policy. Admin endpoints are never reachable from outside.
 // Routes live in data/routes.json (gitignored) and hot-reload on change.
-import { config } from '../src/config';
+import { config } from '@houston/core';
 
 type Route = { target: string; public: string[] };
 type Routes = { default: Route; prefixes: Record<string, Route> };
 
-const ROUTES_PATH = new URL('../data/routes.json', import.meta.url).pathname;
+const ROUTES_PATH = new URL('../../../data/routes.json', import.meta.url).pathname;
 const DEFAULT_ROUTES: Routes = {
   default: { target: `http://127.0.0.1:${config.port}`, public: ['^/p/', '^/api/p/', '^/files/'] },
   prefixes: {},

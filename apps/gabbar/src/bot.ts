@@ -1,7 +1,12 @@
 // Gabbar — intake scribe. Writes feedback rows at status=pending. Executes nothing.
 // Socket Mode: outbound websocket only, no public endpoint.
 import { App } from '@slack/bolt';
-import { config } from '../src/config';
+import { config } from '@houston/core';
+
+if (!config.slackBotToken || !config.slackAppToken) {
+  console.error('gabbar: SLACK_BOT_TOKEN / SLACK_APP_TOKEN missing in .env, not starting');
+  process.exit(0);
+}
 
 const app = new App({
   token: config.slackBotToken,

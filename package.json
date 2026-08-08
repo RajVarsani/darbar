@@ -2,21 +2,21 @@
   "name": "houston",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "server": "bun --env-file=.env src/server.ts",
-    "gabbar": "bun --env-file=.env gabbar/bot.ts",
-    "mcp": "bun --env-file=.env mcp/server.ts",
-    "proxy": "bun --env-file=.env proxy/server.ts",
-    "tunnel": "sh scripts/tunnel.sh"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "@slack/bolt": "^4.0.0",
-    "hono": "^4.0.0",
-    "mongodb": "^6.0.0",
-    "zod": "^4.4.3"
+    "dev": "sh scripts/dev.sh",
+    "server": "bun run --filter @houston/server dev",
+    "gabbar": "bun run --filter @houston/gabbar dev",
+    "proxy": "bun run --filter @houston/proxy dev",
+    "mcp": "bun --env-file=.env apps/mcp/src/server.ts",
+    "tunnel": "sh scripts/tunnel.sh",
+    "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "^1.2.0"
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.5.0"
   }
 }

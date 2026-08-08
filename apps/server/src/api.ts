@@ -1,14 +1,14 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from './db';
+import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@houston/core';
 import { emit, subscribe } from './sse';
-import { config } from './config';
-import type { FeedbackDoc, Task, TaskStatus, FeedbackStatus } from './types';
+import { config } from '@houston/core';
+import type { FeedbackDoc, Task, TaskStatus, FeedbackStatus } from '@houston/core';
 
 export const api = new Hono();
 
-export const TASK_STATUSES: TaskStatus[] = ['backlog', 'todo', 'in_progress', 'qa', 'review', 'blocked', 'done'];
+export const TASK_STATUSES: TaskStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'qa', 'blocked', 'done', 'cancelled'];
 export const FEEDBACK_STATUSES: FeedbackStatus[] = ['pending', 'triaged', 'needs_clarification', 'accepted', 'in_progress', 'resolved', 'rejected'];
 const FEEDBACK_TYPES = ['bug', 'design', 'idea', 'approval'];
 

@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
 import { api } from './api';
-import { initDb } from './db';
-import { config } from './config';
+import { initDb, config } from '@houston/core';
 
 const app = new Hono();
 

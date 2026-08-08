@@ -1,0 +1,11 @@
+{
+  "name": "@houston/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "mongodb": "^6.0.0"
+  }
+}

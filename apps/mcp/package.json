@@ -1,0 +1,10 @@
+{
+  "name": "@houston/mcp",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@houston/core": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^4.4.3"
+  }
+}

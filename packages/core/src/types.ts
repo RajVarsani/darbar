@@ -15,7 +15,8 @@ export type Project = {
   createdAt: Date;
 };
 
-export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'qa' | 'review' | 'blocked' | 'done';
+// jira-style workflow; blocked stays a status (visible column) with the free-text `blocker` field carrying the why
+export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'qa' | 'blocked' | 'done' | 'cancelled';
 export type FeedbackStatus =
   | 'pending' | 'triaged' | 'needs_clarification' | 'accepted' | 'in_progress' | 'resolved' | 'rejected';
 
