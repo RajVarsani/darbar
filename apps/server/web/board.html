@@ -71,10 +71,10 @@
   .searchwrap{flex:1;display:flex;justify-content:center}
   .search{display:flex;align-items:center;gap:8px;width:min(420px,100%);background:var(--beige);
     border:2px solid var(--ink);padding:6px 12px;color:var(--ink-soft);transition:box-shadow .1s,transform .1s}
-  .search:focus-within{box-shadow:3px 3px 0 var(--ink);transform:translate(-1px,-1px)}
+  .search:hover,.search:focus-visible{box-shadow:3px 3px 0 var(--ink);transform:translate(-1px,-1px)}
   .search svg{flex:none}
-  .search input{border:none;outline:none;background:none;width:100%;font-family:var(--mono);font-size:13px;color:var(--ink)}
-  .search input::placeholder{color:var(--ink-faint)}
+  .search .ph{flex:1;text-align:left;font-family:var(--mono);font-size:13px;color:var(--ink-faint);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .search kbd{font-family:var(--mono);font-size:10px;font-weight:700;background:var(--lime);border:1.5px solid var(--ink);
     padding:1px 6px;color:var(--ink)}
   .people{display:flex;align-items:center;gap:4px}
@@ -82,7 +82,7 @@
     font-family:var(--mono);font-size:10px;font-weight:800;color:var(--ink);background:var(--beige)}
 
   /* ---------- page ---------- */
-  .page{max-width:1560px;margin:0 auto;width:100%;padding:24px 24px 64px}
+  .page{width:100%;padding:24px 28px 64px}
   h1{font-family:var(--mono);font-size:28px;font-weight:700;letter-spacing:-.01em}
   .pagehead{display:flex;align-items:baseline;gap:14px;margin:2px 0 20px;flex-wrap:wrap}
   .pagehead .sub{color:var(--ink-soft);font-family:var(--mono);font-size:12px}
@@ -273,6 +273,29 @@
     box-shadow:4px 4px 0 rgba(28,28,28,.35);z-index:70;transition:transform .18s;max-width:min(560px,90vw)}
   .toast.show{transform:translate(-50%,0)}
 
+  /* ---------- command palette ---------- */
+  .pal{position:fixed;inset:0;z-index:60}
+  .palscrim{position:absolute;inset:0;background:rgba(28,28,28,.55)}
+  .palbox{position:relative;margin:18vh auto 0;width:min(560px,92vw);background:var(--beige);
+    border:2px solid var(--ink);box-shadow:6px 6px 0 var(--ink);display:flex;flex-direction:column;max-height:58vh}
+  .palinput{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:2px solid var(--ink);color:var(--ink-soft)}
+  .palinput svg{flex:none}
+  .palinput input{border:none;outline:none;background:none;width:100%;font-family:var(--mono);font-size:14px;color:var(--ink)}
+  .palinput input::placeholder{color:var(--ink-faint)}
+  .palresults{overflow-y:auto}
+  .palgroup{font-family:var(--mono);font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-soft);padding:10px 14px 4px}
+  .palrow{display:flex;gap:10px;align-items:center;padding:8px 14px;cursor:pointer;border-bottom:1.5px solid var(--hair)}
+  .palrow:last-child{border-bottom:none}
+  .palrow:hover{background:var(--beige-2)}
+  .palrow.selp{background:var(--lime);box-shadow:inset 4px 0 0 var(--ink)}
+  .palrow .snippet{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;font-size:13px}
+  .palempty{padding:22px 14px;text-align:center;color:var(--ink-soft);font-family:var(--mono);font-size:12px}
+
+  /* muted badge for backlog cards living in the Todo column */
+  .bklg{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;
+    color:var(--ink-faint);border:1.5px solid var(--ink-faint);padding:1px 5px;background:var(--beige-2)}
+
   @media (max-width:1080px){
     .toprow{padding:0 14px;gap:10px}
     .crumb,.people,.search kbd{display:none}
@@ -291,10 +314,10 @@
     <div class="brand"><span class="dot">D</span>DARBAR</div>
     <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span></div>
     <div class="searchwrap">
-      <label class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="q" placeholder="search tasks, feedback, ids…" autocomplete="off">
+      <button class="search" id="qbtn" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <span class="ph">search tasks, feedback, ids…</span>
         <kbd>⌘K</kbd>
-      </label>
+      </button>
     </div>
     <div class="people" id="people"></div>
     <span class="live" id="livedot">live</span>
@@ -323,13 +346,23 @@
 <aside class="drawer" id="drawer"></aside>
 <div class="scrim" id="scrim"></div>
 <div class="toast" id="toast"></div>
+<div class="pal" id="pal" hidden>
+  <div class="palscrim" data-pal-close></div>
+  <div class="palbox">
+    <label class="palinput"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="palq" placeholder="jump to task or feedback…" autocomplete="off">
+      <kbd style="font-family:var(--mono);font-size:10px;font-weight:700;background:var(--lime);border:1.5px solid var(--ink);padding:1px 6px;color:var(--ink)">ESC</kbd>
+    </label>
+    <div class="palresults" id="palresults"></div>
+  </div>
+</div>
 
 <script>
 const capId = location.pathname.split('/').pop();
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-const KANBAN_COLS = ['backlog','todo','in_progress','in_review','qa','blocked','done'];
+const KANBAN_COLS = ['todo','in_progress','in_review','qa','blocked','done']; // backlog cards live in todo, badged
 
 const state = {
   data: null,
@@ -343,6 +376,7 @@ const state = {
   collapsed: new Set(),    // task shortIds with hidden children
   doneExpanded: false,     // done column: false = latest 5 only
   canWrite: null,          // null = unknown; probed once. Tunnel viewers get 403 on writes.
+  pal: {open:false, q:'', sel:0},  // ⌘K palette; survives SSE re-renders
 };
 
 const initials = n => n.split(/[\s-]+/).map(w=>w[0]).join('').slice(0,2).toUpperCase();
@@ -355,6 +389,10 @@ const relTime = iso => {
   return new Date(iso).toLocaleDateString('en-GB',{day:'numeric',month:'short'});
 };
 const nice = s => String(s||'').replace(/_/g,' ');
+// feedback lifecycle wears its own vocabulary; API values untouched, st-* classes stay raw
+const FB_LABEL = {pending:'NEEDS TRIAGE', triaged:'TRIAGED', accepted:'PROMOTED', in_progress:'BEING FIXED',
+  needs_clarification:'WAITING ON AUTHOR', resolved:'RESOLVED', rejected:'NOT ACTIONED'};
+const fbLabel = s => FB_LABEL[s] || nice(s);
 const safeUrl = a => /^(https?:\/\/|\/)/i.test(String(a||'')); // block javascript:/data: schemes
 let toastT;
 function toast(msg){
@@ -385,7 +423,7 @@ function render(){
   $('ptitle').textContent = d.project.name;
   $('psub').textContent = (d.project.repos||[]).join(' · ');
   document.body.dataset.view = state.view;
-  renderTopNav(); renderPeople(); renderStats(); renderContent(); renderDrawer();
+  renderTopNav(); renderPeople(); renderStats(); renderContent(); renderDrawer(); renderPal();
 }
 
 const ICONS = {
@@ -397,12 +435,12 @@ const ICONS = {
 };
 
 function renderTopNav(){
-  const pendFb = fbs().filter(f=>['pending','needs_clarification'].includes(f.status)).length;
+  const openFbN = fbs().filter(openFb).length; // matches the feedback view's default "open" filter
   const openTasks = tasks().filter(t=>!isClosed(t)&&t.type!=='review').length;
   const views = [
     {id:'board', label:'Board', n: openTasks, icon:'board'},
     {id:'list', label:'List', n: tasks().length, icon:'list'},
-    {id:'feedback', label:'Feedback', n: pendFb, icon:'feedback'},
+    {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback'},
     {id:'activity', label:'Activity', n: null, icon:'activity'},
   ];
   $('views').innerHTML = views.map(v =>
@@ -437,8 +475,8 @@ function renderStats(){
   $('stats').innerHTML = `
     <div class="stat"><div class="lbl">Tasks completed</div><div class="val">${done}<span class="of"> / ${ts.length}</span></div>
       <div class="progress"><i style="width:${ts.length?Math.round(done/ts.length*100):0}%"></i></div></div>
-    <div class="stat"><div class="lbl">Feedback inbox</div><div class="val">${pend}</div>
-      <div class="hint">${pend? 'waiting for the orchestrator' : '<b>clear</b>, nothing waiting'}</div></div>
+    <div class="stat"><div class="lbl">Feedback · needs triage</div><div class="val">${pend}</div>
+      <div class="hint">${pend? `awaiting triage · ${open} open total` : open? `<b>triage clear</b> · ${open} open total` : '<b>clear</b>, nothing waiting'}</div></div>
     <div class="stat"><div class="lbl">Reviews in flight</div><div class="val">${openRev}<span class="of">${reviews.length?` / ${reviews.length}`:''}</span></div>
       <div class="hint">${pipeline()?.reviews?.length ? (openRev ? 'lanes working' : '<b>clear</b>, no open lanes') : 'no pipeline configured'}</div></div>
     <div class="stat"><div class="lbl">Activity · 7 days</div>
@@ -457,6 +495,7 @@ function cardHtml(t){
   return `<div class="kcard ${sel?'sel':''}" draggable="true" data-drag="${esc(t.shortId)}" data-task="${esc(t.shortId)}">
     <div class="krow1"><span class="id">${esc(t.shortId)}</span>
       <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
+      ${t.status==='backlog'?'<span class="bklg">BACKLOG</span>':''}
       ${parent?`<span class="id" title="subtask of ${esc(parent.shortId)}">└ ${esc(parent.shortId)}</span>`:''}
     </div>
     <div class="ttl">${esc(t.title)}</div>
@@ -472,7 +511,9 @@ function cardHtml(t){
 function renderKanban(){
   const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled' && matches(t.title+' '+t.shortId+' '+(t.assignee||'')));
   $('kanban').innerHTML = KANBAN_COLS.map(col=>{
-    const cards = visible.filter(t=>t.status===col);
+    const cards = col==='todo'
+      ? [...visible.filter(t=>t.status==='todo'), ...visible.filter(t=>t.status==='backlog')]
+      : visible.filter(t=>t.status===col);
     let shown = cards, toggle = '';
     if (col==='done'){
       shown = [...cards].sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
@@ -559,7 +600,7 @@ function renderContent(){
             ${f.taskShortId?`<span class="id">on ${esc(f.taskShortId)}</span>`:'<span class="id">project-level</span>'}
             ${f.attachments?.length?`<span class="id">[${f.attachments.length} img]</span>`:''}</div></span>
         <span style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
-          <span class="pill st-${esc(f.status)}">${esc(nice(f.status))}</span>
+          <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span></span>
       </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}</div>`;
   }
@@ -634,7 +675,7 @@ function renderDrawer(){
         <div class="dsec"><h3>Feedback on this task · ${fb.filter(openFb).length} open</h3>
           ${fb.length?`<div class="mini">${fb.map(f=>`<div class="frow" data-fb="${esc(f.shortId)}"><span class="id">${esc(f.shortId)}</span>
             <span class="col"><div class="fbody">${esc(f.body)}</div><div class="fsub"><span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span></div></span>
-            <span class="pill st-${esc(f.status)}">${esc(nice(f.status))}</span></div>`).join('')}</div>`
+            <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span></div>`).join('')}</div>`
           :'<div class="note">none yet. DM Gabbar with “'+esc(t.shortId)+' …” to file the first</div>'}</div>
         ${t.commits?.length?`<div class="dsec"><h3>Commits</h3><div class="commits">${t.commits.map(c=>`<span>· ${esc(c)}</span>`).join('')}</div></div>`:''}
         ${evs.length?`<div class="dsec"><h3>History</h3><div class="devents">${evs.map(e=>`<div><div class="t">${new Date(e.at).toLocaleString('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</div>${esc(e.text)}</div>`).join('')}</div></div>`:''}
@@ -645,10 +686,10 @@ function renderDrawer(){
     const FLOW = ['pending','triaged','accepted','in_progress','resolved'];
     const idx = FLOW.indexOf(f.status);
     const flow = f.status==='rejected'
-      ? FLOW.slice(0,2).map(s=>`<span class="step hit">${nice(s)}</span><span class="arrow">→</span>`).join('')+`<span class="step bad">rejected</span>`
-      : FLOW.map((s,i)=>`<span class="step ${i<idx?'hit':i===idx?(s==='resolved'?'hit':'now'):''}">${nice(s)}</span>`).join('<span class="arrow">→</span>');
+      ? FLOW.slice(0,2).map(s=>`<span class="step hit">${fbLabel(s)}</span><span class="arrow">→</span>`).join('')+`<span class="step bad">${fbLabel('rejected')}</span>`
+      : FLOW.map((s,i)=>`<span class="step ${i<idx?'hit':i===idx?(s==='resolved'?'hit':'now'):''}">${fbLabel(s)}</span>`).join('<span class="arrow">→</span>');
     dr.innerHTML = `
-      <div class="dhead">${backBtn}<span class="id">${esc(f.shortId)}</span><span class="pill st-${esc(f.status)}">${esc(nice(f.status))}</span><span class="grow"></span>${closeBtn}</div>
+      <div class="dhead">${backBtn}<span class="id">${esc(f.shortId)}</span><span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
           <span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span>
@@ -669,6 +710,54 @@ function renderDrawer(){
           ${f.resolvedTaskShortId&&f.resolvedTaskShortId!==t?.shortId?`<div class="note" style="margin-top:6px">handled by <a href="#" data-go-task="${esc(f.resolvedTaskShortId)}">${esc(f.resolvedTaskShortId)}</a></div>`:''}</div>
       </div>`;
   }
+}
+
+// ---------- command palette (⌘K) ----------
+function palResults(){
+  const q = state.pal.q;
+  const hit = s => String(s??'').toLowerCase().includes(q);
+  let ts = tasks(), fs = fbs();
+  if (q){
+    ts = ts.filter(t=>hit(t.shortId)||hit(t.title)||hit(t.description)||hit(t.assignee)||hit(t.lane));
+    fs = fs.filter(f=>hit(f.shortId)||hit(f.body)||hit(f.author)||hit(f.taskShortId));
+  } else {
+    ts = [...ts].sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+    fs = [...fs].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+  }
+  return [
+    ...ts.slice(0,8).map(t=>({kind:'task', id:t.shortId, text:t.title, status:t.status})),
+    ...fs.slice(0,8).map(f=>({kind:'fb', id:f.shortId, text:f.body||'screenshot only', status:f.status})),
+  ];
+}
+function renderPal(){
+  const wrap = $('pal');
+  wrap.hidden = !state.pal.open;
+  if (!state.pal.open) return;
+  const rows = palResults();
+  if (state.pal.sel >= rows.length) state.pal.sel = Math.max(0, rows.length-1);
+  const rowHtml = (r,i) => `<div class="palrow ${i===state.pal.sel?'selp':''}" data-pal-row="${i}">
+    <span class="id">${esc(r.id)}</span><span class="snippet">${esc(r.text)}</span>
+    <span class="pill st-${esc(r.status)}">${esc(r.kind==='fb'?fbLabel(r.status):nice(r.status))}</span></div>`;
+  const group = (label, kind) => {
+    const parts = rows.map((r,i)=>r.kind===kind?rowHtml(r,i):'').filter(Boolean);
+    return parts.length ? `<div class="palgroup">${label}</div>`+parts.join('') : '';
+  };
+  $('palresults').innerHTML = rows.length
+    ? group('Tasks','task') + group('Feedback','fb')
+    : `<div class="palempty">no matches for “${esc(state.pal.q)}”</div>`;
+  document.querySelector('.palrow.selp')?.scrollIntoView({block:'nearest'});
+}
+function openPal(){
+  state.pal = {open:true, q:'', sel:0};
+  const inp = $('palq'); inp.value = '';
+  renderPal(); inp.focus();
+}
+function closePal(){ state.pal.open = false; renderPal(); }
+function palGo(r){
+  closePal();
+  if (r.kind==='fb'){ if (state.view!=='feedback') setView('feedback'); }
+  else if (state.view==='feedback'||state.view==='activity') setView('board'); // drawer overlays everywhere else
+  select(r.kind, r.id);
 }
 
 // ---------- selection / navigation ----------
@@ -745,6 +834,10 @@ document.addEventListener('drop', async e=>{
 
 // ---------- events ----------
 document.addEventListener('click', e=>{
+  if (e.target.closest('#qbtn')){ openPal(); return; }
+  const pr = e.target.closest('[data-pal-row]');
+  if (pr){ const r = palResults()[+pr.dataset.palRow]; if (r) palGo(r); return; }
+  if (e.target.closest('[data-pal-close]')){ closePal(); return; }
   const vbtn = e.target.closest('[data-view-btn]');
   if (vbtn){ setView(vbtn.dataset.viewBtn); return; }
   const lbtn = e.target.closest('[data-lane-btn]');
@@ -770,10 +863,21 @@ document.addEventListener('click', e=>{
   if (e.target.closest('#dclose')) return clearSel();
   if (e.target.id==='scrim') return clearSel();
 });
-$('q').addEventListener('input', e=>{ state.q = e.target.value.trim().toLowerCase(); renderContent(); });
+$('palq').addEventListener('input', e=>{ state.pal.q = e.target.value.trim().toLowerCase(); state.pal.sel = 0; renderPal(); });
 document.addEventListener('keydown', e=>{
-  if ((e.metaKey||e.ctrlKey) && e.key==='k'){ e.preventDefault(); $('q').focus(); $('q').select(); }
-  if (e.key==='Escape'){ if (document.activeElement===$('q')) { $('q').blur(); } else clearSel(); }
+  if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); state.pal.open ? closePal() : openPal(); return; }
+  if (state.pal.open){
+    if (e.key==='Escape'){ e.preventDefault(); closePal(); return; }
+    if (e.key==='ArrowDown'||e.key==='ArrowUp'){
+      e.preventDefault();
+      const n = palResults().length; if (!n) return;
+      state.pal.sel = (state.pal.sel + (e.key==='ArrowDown'?1:n-1)) % n;
+      renderPal(); return;
+    }
+    if (e.key==='Enter'){ e.preventDefault(); const r = palResults()[state.pal.sel]; if (r) palGo(r); return; }
+    return;
+  }
+  if (e.key==='Escape') clearSel();
 });
 
 // ---------- data flow ----------
