@@ -68,7 +68,11 @@ async function buildHistory(client: any, channel: string, threadTs: string | nul
       .slice(-12);
     for (const m of msgs) {
       if (m.user === SELF_USER) history.push({ role: 'assistant', content: m.text });
-      else history.push({ role: 'user', content: `[${m.user}]: ${m.text}` });
+      else {
+        // gabbar replies in threads, which channel history omits — mark handled parents
+        const handled = !threadTs && (m.reply_count ?? 0) > 0 ? ' [gabbar already replied in this message\u2019s thread — handled]' : '';
+        history.push({ role: 'user', content: `[${m.user}]: ${m.text}${handled}` });
+      }
     }
   } catch { /* no history is fine */ }
   return history;

@@ -13,6 +13,7 @@ export const config = {
   mongoUri: env.MONGO_URI || 'mongodb://localhost:27017',
   dbName: env.DB_NAME || 'mission_control',
   filesDir: env.FILES_DIR || new URL('../../../data/files/', import.meta.url).pathname,
+  memoryDir: env.MEMORY_DIR || new URL('../../../data/memory', import.meta.url).pathname,
   slackBotToken: env.SLACK_BOT_TOKEN || '',
   slackAppToken: env.SLACK_APP_TOKEN || '',
   slackApiBase: env.SLACK_API_BASE || 'https://slack.com/api',
