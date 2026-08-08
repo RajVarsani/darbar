@@ -1,4 +1,4 @@
-# Houston — Claude instructions
+# Darbar — Claude instructions
 
 Mission control for agent-orchestrated projects: live boards + human feedback pipe
 (Slack via Gabbar) + MCP tools for orchestrator/builder sessions.
@@ -11,7 +11,7 @@ Mission control for agent-orchestrated projects: live boards + human feedback pi
 | `apps/gabbar` | Slack Socket Mode intake bot (writes pending feedback, nothing else) | `src/bot.ts` |
 | `apps/proxy` | Dynamic front door on `127.0.0.1:4800`; ngrok fronts ONLY this | `src/server.ts` |
 | `apps/mcp` | stdio MCP tools wrapping the API (spawned by Claude sessions) | `src/server.ts` |
-| `packages/core` | Shared config + Mongo collections + types (`@houston/core`) | `src/index.ts` |
+| `packages/core` | Shared config + Mongo collections + types (`@darbar/core`) | `src/index.ts` |
 
 Each workspace has its own CLAUDE.md with specifics. Read the one for whatever you touch.
 Runtime is Bun everywhere: `bun install`, `bun run`, `bunx`, `Bun.file`, `bun test`.
@@ -69,5 +69,5 @@ Socket Mode on, bot user `U0AGUK6D207`.
 - Commits: conventional-ish (`feat:`, `fix:`, `refactor:`); no session URLs in bodies.
 - Git pushes use the repo-local credential helper (reads `~/fafo/.envrc`); remotes
   stay token-free.
-- The Claude skills for this system (`gabbar` persona, `houston-project-init`)
+- The Claude skills for this system (`gabbar` persona, `darbar-project-init`)
   live in the separate public repo `RajVarsani/skills`, NOT here.

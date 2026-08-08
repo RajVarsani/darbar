@@ -1,4 +1,4 @@
-# @houston/server
+# @darbar/server
 
 Hono API + SSE + boards. The ONLY process that touches Mongo or posts Slack replies.
 
@@ -12,4 +12,4 @@ Hono API + SSE + boards. The ONLY process that touches Mongo or posts Slack repl
 - `web/board.html` — single-file cypherpunk board (lime/ink/beige, JetBrains Mono).
   Every interpolation goes through `esc()`; attachment URLs through `safeUrl()`.
 
-Statuses and types come from `@houston/core`; add new ones there first.
+Statuses and types come from `@darbar/core`; add new ones there first.

@@ -1,14 +1,14 @@
 // Gabbar's brain — an agent with tools, ported from the original Vercel gabbar-singh
-// repo and given Houston capabilities. Filing a feedback ticket is ONE tool call among
+// repo and given Darbar capabilities. Filing a feedback ticket is ONE tool call among
 // many, not the only thing the bot does.
 //
-// Invariant preserved from the old architecture: Gabbar is INTAKE-ONLY toward Houston.
+// Invariant preserved from the old architecture: Gabbar is INTAKE-ONLY toward Darbar.
 // Its tools can read boards and create/reopen feedback. No task creation, no status
 // changes, no execution. Author identity and slack thread refs are injected by the
 // transport layer, never model-controlled.
 import Anthropic from '@anthropic-ai/sdk';
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
-import { config } from '@houston/core';
+import { config } from '@darbar/core';
 import { memoryTool, memoryTree, readPersonFile } from './memory';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
@@ -23,7 +23,7 @@ async function mc(path: string, method = 'GET', body?: unknown): Promise<string>
     const json = await r.json().catch(() => ({}));
     return JSON.stringify(json);
   } catch (e) {
-    return JSON.stringify({ error: `houston unreachable: ${String(e)}` });
+    return JSON.stringify({ error: `darbar unreachable: ${String(e)}` });
   }
 }
 
@@ -35,7 +35,7 @@ export type AgentContext = {
   channelType: string;
   messageTs: string;
   threadTs: string | null;
-  attachments: string[]; // houston file URLs already downloaded by the transport
+  attachments: string[]; // darbar file URLs already downloaded by the transport
   existingFeedback: { shortId: string; status: string } | null; // thread ↔ feedback mapping, pre-resolved
 };
 
@@ -52,7 +52,7 @@ const PERSONALITY = `you are gabbar singh — raj's personal AI agent in the sat
 - use slack formatting: *bold*, _italic_, \`code\`
 
 ## your job
-you are the human-facing front door of HOUSTON, raj's mission-control system for
+you are the human-facing front door of DARBAR, raj's mission-control system for
 agent-orchestrated projects. projects have tasks (short ids like MRF-12, TODO-3) and
 feedback rows. stakeholders talk to you in slack; an orchestrator agent (not you)
 triages feedback and runs the work.
@@ -107,7 +107,7 @@ function buildTools(ctx: AgentContext) {
   return [
     betaTool({
       name: 'list_projects',
-      description: 'List all Houston projects with prefixes, board URLs and counts (tasks done, feedback waiting). Call this to find which projects exist or to resolve an ambiguous project reference.',
+      description: 'List all Darbar projects with prefixes, board URLs and counts (tasks done, feedback waiting). Call this to find which projects exist or to resolve an ambiguous project reference.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       run: async () => mc('/projects'),
     }),
@@ -151,7 +151,7 @@ function buildTools(ctx: AgentContext) {
     }),
     betaTool({
       name: 'file_feedback',
-      description: 'File a feedback row in Houston at status=pending for the orchestrator to triage. Use when the sender reports a bug, gives design input, requests a change, or asks for work. Provide taskRef when the message concerns a specific task; otherwise provide project (prefix). Write body as a faithful, concise restatement of what the sender said, not your interpretation. The sender identity, slack thread and any screenshots are attached automatically.',
+      description: 'File a feedback row in Darbar at status=pending for the orchestrator to triage. Use when the sender reports a bug, gives design input, requests a change, or asks for work. Provide taskRef when the message concerns a specific task; otherwise provide project (prefix). Write body as a faithful, concise restatement of what the sender said, not your interpretation. The sender identity, slack thread and any screenshots are attached automatically.',
       inputSchema: {
         type: 'object',
         properties: {

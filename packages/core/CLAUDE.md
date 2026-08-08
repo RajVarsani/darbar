@@ -1,4 +1,4 @@
-# @houston/core
+# @darbar/core
 
 Shared foundation: `config.ts` (ALL runtime values, driven by root .env — no
 defaults elsewhere), `db.ts` (Mongo client, typed collections, indexes, capId +

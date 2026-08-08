@@ -6,7 +6,7 @@
 // root. Traversal (.., absolute escapes, symlinks out) is rejected.
 import fs from 'node:fs';
 import path from 'node:path';
-import { config } from '@houston/core';
+import { config } from '@darbar/core';
 import { betaMemoryTool } from '@anthropic-ai/sdk/helpers/beta/memory';
 
 const ROOT = path.resolve(config.memoryDir);

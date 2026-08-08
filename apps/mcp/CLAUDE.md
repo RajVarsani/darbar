@@ -1,4 +1,4 @@
-# @houston/mcp
+# @darbar/mcp
 
 stdio MCP server exposing the tracker to Claude sessions. Tools wrap the HTTP API
 (config.apiUrl); zod schemas gate inputs. Registration snippet lives in the root

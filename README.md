@@ -1,4 +1,4 @@
-# Houston
+# Darbar
 
 Mission control for agent-orchestrated projects.
 
@@ -10,7 +10,7 @@ Plan: https://claude.ai/code/artifact/6be911e7-772f-4c96-baf3-5994fe48207f
 - `apps/gabbar` — Slack Socket Mode intake scribe: DMs/mentions → feedback rows (pending). Executes nothing.
 - `apps/proxy` — dynamic front door (:4800) that ngrok tunnels to; per-route public-path policy
 - `apps/mcp` — stdio MCP tools for orchestrator/builders/lanes
-- `packages/core` — shared config + db + types (`@houston/core`)
+- `packages/core` — shared config + db + types (`@darbar/core`)
 
 One command: `bun dev` (mongo check → server + gabbar + proxy + tunnel).
 
@@ -33,7 +33,7 @@ bun run tunnel   # ngrok -> proxy, uses NGROK_DOMAIN from .env when set
 ## Sharing / the front door
 ngrok fronts ONLY the proxy. The proxy enforces the public surface per route:
 tunneled requests (x-forwarded-host present) must match a route's `public` regex
-list; everything else 403s. Default route -> houston with boards, board API and
+list; everything else 403s. Default route -> darbar with boards, board API and
 files public. Add more services at runtime:
 ```
 curl -X POST localhost:4800/-/route -H "Authorization: Bearer $PROXY_ADMIN_TOKEN"   -d '{"prefix":"fe","target":"http://127.0.0.1:5173","public":["^/"]}'
@@ -45,5 +45,5 @@ Mongo: reuses the saturn-v2 docker container (db `mission_control`, override via
 
 ## MCP registration (orchestrator sessions)
 ```json
-{ "mcpServers": { "houston": { "command": "bun", "args": ["--env-file=/Users/rajvarsani/fafo/houston/.env", "/Users/rajvarsani/fafo/houston/apps/mcp/src/server.ts"] } } }
+{ "mcpServers": { "darbar": { "command": "bun", "args": ["--env-file=/Users/rajvarsani/fafo/darbar/.env", "/Users/rajvarsani/fafo/darbar/apps/mcp/src/server.ts"] } } }
 ```

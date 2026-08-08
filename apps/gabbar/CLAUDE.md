@@ -1,7 +1,7 @@
-# @houston/gabbar
+# @darbar/gabbar
 
 Gabbar is an AGENT, not a parser — ported from the original Vercel gabbar-singh repo
-(persona + security rules + memory) and given Houston tools. Claude Opus 5 via the
+(persona + security rules + memory) and given Darbar tools. Claude Opus 5 via the
 Anthropic SDK's beta tool runner, with server-side refusal fallbacks enabled.
 
 ## Architecture

@@ -1,9 +1,9 @@
 {
-  "name": "@houston/proxy",
+  "name": "@darbar/proxy",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@houston/core": "workspace:*"
+    "@darbar/core": "workspace:*"
   },
   "scripts": {
     "dev": "bun --env-file=../../.env src/proxy.ts"

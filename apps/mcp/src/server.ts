@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { config } from '@houston/core';
+import { config } from '@darbar/core';
 
 const API = config.apiUrl;
 
@@ -16,7 +16,7 @@ async function call(path: string, method = 'GET', body?: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(json, null, 2) }], isError: !r.ok };
 }
 
-const server = new McpServer({ name: 'mission-control', version: '0.1.0' });
+const server = new McpServer({ name: 'darbar', version: '0.1.0' });
 
 server.tool('get_project_context', 'Fetch a project charter: protocols, repos, stakeholders. Every agent should read this before working.',
   { project: z.string().describe('project prefix, name, or capId') },

@@ -1,5 +1,5 @@
 {
-  "name": "houston",
+  "name": "darbar",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -8,9 +8,9 @@
   ],
   "scripts": {
     "dev": "sh scripts/dev.sh",
-    "server": "bun run --filter @houston/server dev",
-    "gabbar": "bun run --filter @houston/gabbar dev",
-    "proxy": "bun run --filter @houston/proxy dev",
+    "server": "bun run --filter @darbar/server dev",
+    "gabbar": "bun run --filter @darbar/gabbar dev",
+    "proxy": "bun run --filter @darbar/proxy dev",
     "mcp": "bun --env-file=.env apps/mcp/src/server.ts",
     "tunnel": "sh scripts/tunnel.sh",
     "typecheck": "bunx tsc --noEmit"

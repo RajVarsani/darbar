@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { api } from './api';
-import { initDb, config } from '@houston/core';
+import { initDb, config } from '@darbar/core';
 
 const app = new Hono();
 
@@ -34,7 +34,7 @@ const homePath = new URL('../web/home.html', import.meta.url).pathname;
 app.get('/', async (c) => c.html(await Bun.file(homePath).text()));
 
 await initDb();
-console.log(`houston listening on ${config.bindHost}:${config.port}`);
+console.log(`darbar listening on ${config.bindHost}:${config.port}`);
 
 export default {
   port: config.port,

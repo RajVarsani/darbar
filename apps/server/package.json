@@ -1,9 +1,9 @@
 {
-  "name": "@houston/server",
+  "name": "@darbar/server",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@houston/core": "workspace:*",
+    "@darbar/core": "workspace:*",
     "hono": "^4.0.0"
   },
   "scripts": {

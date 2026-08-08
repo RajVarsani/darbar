@@ -1,5 +1,5 @@
 {
-  "name": "@houston/core",
+  "name": "@darbar/core",
   "private": true,
   "type": "module",
   "exports": {

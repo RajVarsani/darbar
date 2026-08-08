@@ -1,10 +1,10 @@
 {
-  "name": "@houston/gabbar",
+  "name": "@darbar/gabbar",
   "private": true,
   "type": "module",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",
-    "@houston/core": "workspace:*",
+    "@darbar/core": "workspace:*",
     "@slack/bolt": "^4.0.0"
   },
   "scripts": {

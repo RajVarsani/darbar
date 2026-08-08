@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Houston · projects</title>
+<title>Darbar · projects</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
@@ -41,17 +41,17 @@
 </style>
 </head>
 <body>
-<h1>HOUSTON · projects</h1>
+<h1>DARBAR · projects</h1>
 <div class="sub">local-only console. this page and the full api <b>403 through the tunnel</b>; only boards are shared.</div>
 <div class="grid" id="grid"><div class="empty">loading…</div></div>
-<div class="note">boards open on the tunnel url (shareable). manage projects via the api or /houston-project-init.</div>
+<div class="note">boards open on the tunnel url (shareable). manage projects via the api or /darbar-project-init.</div>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 (async () => {
   const r = await fetch('/api/projects');
   const list = await r.json();
   const grid = document.getElementById('grid');
-  if (!Array.isArray(list) || !list.length) { grid.innerHTML = '<div class="empty">no projects yet. run /houston-project-init in a claude session.</div>'; return; }
+  if (!Array.isArray(list) || !list.length) { grid.innerHTML = '<div class="empty">no projects yet. run /darbar-project-init in a claude session.</div>'; return; }
   grid.innerHTML = list.map(p => {
     const c = p.counts || {tasks:0, done:0, pendingFb:0};
     const pct = c.tasks ? Math.round(c.done / c.tasks * 100) : 0;

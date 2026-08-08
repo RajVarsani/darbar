@@ -2,7 +2,7 @@
 // Socket Mode: outbound websocket only, no public endpoint. The transport owns
 // identity, file downloads, and thread context; the agent owns all judgment.
 import { App } from '@slack/bolt';
-import { config } from '@houston/core';
+import { config } from '@darbar/core';
 import { runAgent, type AgentContext } from './agent';
 
 if (!config.slackBotToken || !config.slackAppToken) {

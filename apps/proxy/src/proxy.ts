@@ -7,7 +7,7 @@
 //   are only allowed onto paths matching the route's `public` regex list. Local
 //   requests bypass the policy. Admin endpoints are never reachable from outside.
 // Routes live in data/routes.json (gitignored) and hot-reload on change.
-import { config } from '@houston/core';
+import { config } from '@darbar/core';
 
 type Route = { target: string; public: string[] };
 type Routes = { default: Route; prefixes: Record<string, Route> };
