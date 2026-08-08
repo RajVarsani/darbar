@@ -26,34 +26,18 @@
     --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  [hidden]{display:none!important}
   html{height:100%}
   body{min-height:100%;background:var(--lime);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;
-    -webkit-font-smoothing:antialiased;display:grid;grid-template-columns:212px minmax(0,1fr)}
+    -webkit-font-smoothing:antialiased}
   button{font:inherit;background:none;border:none;cursor:pointer;color:inherit}
   a{color:var(--green-deep);text-decoration:underline;text-underline-offset:2px}
   ::selection{background:var(--ink);color:var(--lime)}
 
-  /* ---------- permanent sidebar ---------- */
-  .side{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;background:var(--lime);
-    border-right:2px solid var(--ink);z-index:31}
-  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:700;font-size:14px;
-    white-space:nowrap;height:58px;padding:0 16px;border-bottom:2px solid var(--ink)}
+  /* ---------- brand ---------- */
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:700;font-size:14px;white-space:nowrap}
   .brand .dot{width:24px;height:24px;background:var(--ink);color:var(--lime);display:grid;place-items:center;
     font-size:13px;font-weight:800}
-  .snav{padding:8px 10px 4px;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
-  .shead{font-family:var(--mono);font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;
-    color:var(--ink-soft);padding:14px 8px 5px}
-  .sitem{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;font-weight:700;
-    padding:6px 9px;border:2px solid transparent;color:var(--ink-soft);text-align:left;transition:.08s;width:100%}
-  .sitem:hover{border-color:var(--ink);color:var(--ink)}
-  .sitem.on{background:var(--ink);color:var(--lime)}
-  .sitem svg{flex:none}
-  .sitem .n{margin-left:auto;font-size:10px;font-weight:800;background:var(--beige);border:1.5px solid var(--ink);
-    color:var(--ink);padding:0 5px;min-width:18px;text-align:center}
-  .sitem.on .n{background:var(--lime)}
-  .sitem .n.zero{opacity:.35}
-  .speople{display:flex;flex-wrap:wrap;gap:5px;padding:6px 9px}
-  .sfoot{margin-top:auto;padding:11px 16px;border-top:2px solid var(--ink);display:flex;align-items:center;gap:8px}
 
   .live{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;font-weight:700;
     text-transform:uppercase;letter-spacing:.06em;color:var(--green-deep)}
@@ -61,9 +45,25 @@
   .live.off{color:var(--ink-soft)} .live.off::before{background:var(--beige);animation:none}
   @keyframes pulse{50%{opacity:.25}}
 
-  /* ---------- top bar ---------- */
-  .top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;
-    padding:0 24px;height:58px;background:var(--lime);border-bottom:2px solid var(--ink)}
+  /* ---------- top bar: one sticky header, two stacked rows ---------- */
+  .top{position:sticky;top:0;z-index:30;background:var(--lime);border-bottom:2px solid var(--ink)}
+  .toprow{display:flex;align-items:center;gap:16px;padding:0 24px;height:54px;border-bottom:1.5px solid var(--hair)}
+  .toprow2{height:44px;gap:10px;border-bottom:none;overflow-x:auto}
+  .views,.lanes{display:flex;align-items:center;gap:4px}
+  .lanes{gap:8px}
+  .vtab{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;font-weight:700;
+    padding:5px 11px;border:2px solid transparent;color:var(--ink-soft);transition:.08s;white-space:nowrap}
+  .vtab:hover{border-color:var(--ink);color:var(--ink)}
+  .vtab.on{background:var(--ink);color:var(--lime)}
+  .vtab svg,.lanechip svg{flex:none}
+  .vtab .n,.lanechip .n{font-size:10px;font-weight:800;background:var(--beige);border:1.5px solid var(--ink);
+    color:var(--ink);padding:0 5px;min-width:18px;text-align:center}
+  .vtab.on .n,.lanechip.on .n{background:var(--lime)}
+  .vtab .n.zero,.lanechip .n.zero{opacity:.35}
+  .lanechip{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;font-weight:700;
+    padding:3px 9px;border:2px solid var(--ink);background:var(--beige);color:var(--ink);white-space:nowrap;transition:.08s}
+  .lanechip:hover{box-shadow:2px 2px 0 var(--ink);transform:translate(-1px,-1px)}
+  .lanechip.on{background:var(--ink);color:var(--lime);box-shadow:none;transform:none}
   .crumb{font-family:var(--mono);font-weight:700;font-size:14px;white-space:nowrap;display:flex;align-items:center;gap:10px}
   .chip{font-family:var(--mono);font-size:11px;font-weight:700;background:var(--beige);border:2px solid var(--ink);
     padding:1px 7px;letter-spacing:.04em}
@@ -110,7 +110,7 @@
     font-family:var(--mono);font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.07em}
   .khead .n{margin-left:auto;font-size:10px;background:var(--beige-2);border:1.5px solid var(--ink);padding:0 6px;
     font-variant-numeric:tabular-nums}
-  .kcards{display:flex;flex-direction:column;gap:10px;padding:10px;min-height:56px;max-height:calc(100vh - 320px);overflow-y:auto}
+  .kcards{display:flex;flex-direction:column;gap:10px;padding:10px;min-height:56px;max-height:calc(100vh - 366px);overflow-y:auto}
   .kcard{background:var(--beige-2);border:2px solid var(--ink);padding:9px 11px 10px;cursor:pointer;transition:transform .08s,box-shadow .08s}
   .kcard:hover{transform:translate(-2px,-2px);box-shadow:3px 3px 0 var(--ink)}
   .kcard.sel{background:var(--lime)}
@@ -141,9 +141,6 @@
   .pip.p-cancelled{background:var(--ink-faint)}
 
   /* ---------- content box (list / feedback / activity / lane) ---------- */
-  .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:20px;align-items:start}
-  .split.boardmode{display:block}
-  .split.boardmode .content{display:none}
   .content{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);min-width:0}
   .viewbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:2px solid var(--ink)}
   .viewbar .vtitle{font-family:var(--mono);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
@@ -222,20 +219,18 @@
   .ev .x{color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ev .x b{color:var(--ink);font-weight:700;font-family:var(--mono);font-size:11.5px}
 
-  /* ---------- drawer ---------- */
-  .drawer{position:sticky;top:78px;background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);
-    max-height:calc(100vh - 100px);display:flex;flex-direction:column;overflow:hidden}
-  /* board view: kanban takes the full width, the drawer floats over it */
-  body[data-view=board] .drawer{position:fixed;right:20px;top:74px;width:min(430px,92vw);z-index:45;display:none;
-    max-height:calc(100vh - 96px);box-shadow:6px 6px 0 var(--ink)}
-  body[data-view=board] .drawer.open{display:flex}
+  /* ---------- drawer: fixed full-height right panel, overlays content on every view ---------- */
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:min(440px,94vw);z-index:45;background:var(--beige);
+    border-left:2px solid var(--ink);box-shadow:-8px 0 0 rgba(28,28,28,.25);display:flex;flex-direction:column;
+    overflow:hidden;transform:translateX(calc(100% + 12px));transition:transform .18s ease}
+  .drawer.open{transform:none}
   .dhead{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:2px solid var(--ink);background:var(--beige-2)}
   .dhead .grow{flex:1}
   .iconbtn{width:26px;height:26px;display:grid;place-items:center;color:var(--ink);border:2px solid var(--ink);
     background:var(--beige);transition:.08s}
   .iconbtn:hover{background:var(--ink);color:var(--lime)}
   .iconbtn[disabled]{opacity:.3;pointer-events:none}
-  .dbody{overflow-y:auto;padding:18px 20px 24px}
+  .dbody{flex:1;overflow-y:auto;padding:18px 20px 24px}
   .dempty{display:grid;place-items:center;text-align:center;padding:64px 24px;color:var(--ink-soft);font-family:var(--mono);font-size:12.5px}
   .dempty .big{width:44px;height:44px;border:2px solid var(--ink);background:var(--lime);display:grid;place-items:center;margin:0 auto 14px}
   .dtitle{font-family:var(--mono);font-size:17px;font-weight:700;margin:10px 0 2px;text-wrap:balance;line-height:1.35}
@@ -278,16 +273,11 @@
   .toast.show{transform:translate(-50%,0)}
 
   @media (max-width:1080px){
-    body{grid-template-columns:1fr}
-    .side{position:static;height:auto;flex-direction:row;align-items:center;border-right:none;border-bottom:2px solid var(--ink);overflow-x:auto}
-    .brand{border-bottom:none;flex:none}
-    .snav{flex-direction:row;padding:0 8px;align-items:center;overflow:visible}
-    .shead,.speople,.sfoot{display:none}
-    .sitem .n{margin-left:6px}
-    .split{grid-template-columns:1fr}
-    .drawer,body[data-view=board] .drawer{position:fixed;inset:auto 0 0 0;top:auto;right:auto;width:auto;max-height:76vh;z-index:40;
-      box-shadow:0 -4px 0 var(--ink);transform:translateY(105%);transition:transform .22s ease;display:flex}
-    .drawer.open,body[data-view=board] .drawer.open{transform:none}
+    .toprow{padding:0 14px;gap:10px}
+    .crumb,.people,.search kbd{display:none}
+    .drawer{inset:auto 0 0 0;top:auto;width:auto;max-height:76vh;z-index:40;border-left:none;border-top:2px solid var(--ink);
+      box-shadow:0 -4px 0 var(--ink);transform:translateY(105%);transition:transform .22s ease}
+    .drawer.open{transform:none}
     .scrim{position:fixed;inset:0;background:rgba(28,28,28,.45);z-index:35;opacity:0;pointer-events:none;transition:.2s}
     .scrim.on{opacity:1;pointer-events:auto}
   }
@@ -295,40 +285,41 @@
 </style>
 </head>
 <body data-view="board">
-<aside class="side">
-  <div class="brand"><span class="dot">D</span>DARBAR</div>
-  <nav class="snav" id="snav"></nav>
-  <div class="sfoot"><span class="live" id="livedot">live</span></div>
-</aside>
-
-<main>
 <header class="top">
-  <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span></div>
-  <div class="searchwrap">
-    <label class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input id="q" placeholder="search tasks, feedback, ids…" autocomplete="off">
-      <kbd>⌘K</kbd>
-    </label>
+  <div class="toprow">
+    <div class="brand"><span class="dot">D</span>DARBAR</div>
+    <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span></div>
+    <div class="searchwrap">
+      <label class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="q" placeholder="search tasks, feedback, ids…" autocomplete="off">
+        <kbd>⌘K</kbd>
+      </label>
+    </div>
+    <div class="people" id="people"></div>
+    <span class="live" id="livedot">live</span>
   </div>
-  <div class="people" id="people"></div>
+  <div class="toprow toprow2">
+    <nav class="views" id="views"></nav>
+    <span style="flex:1"></span>
+    <nav class="lanes" id="lanes"></nav>
+  </div>
 </header>
 
+<main>
 <div class="page">
   <div class="pagehead"><h1 id="ptitle">…</h1><span class="sub" id="psub"></span></div>
   <section class="stats" id="stats"></section>
 
   <section class="kanban" id="kanban" hidden></section>
 
-  <div class="split" id="split">
-    <section class="content">
-      <div class="viewbar" id="viewbar"></div>
-      <div class="list" id="list"></div>
-    </section>
-    <aside class="drawer" id="drawer" hidden></aside>
-  </div>
-  <!-- board view reuses the same drawer node, floated -->
+  <section class="content" id="content" hidden>
+    <div class="viewbar" id="viewbar"></div>
+    <div class="list" id="list"></div>
+  </section>
 </div>
 </main>
+<!-- fixed full-height right panel; slides in on selection, bottom sheet under 1080px -->
+<aside class="drawer" id="drawer"></aside>
 <div class="scrim" id="scrim"></div>
 <div class="toast" id="toast"></div>
 
@@ -393,7 +384,7 @@ function render(){
   $('ptitle').textContent = d.project.name;
   $('psub').textContent = (d.project.repos||[]).join(' · ');
   document.body.dataset.view = state.view;
-  renderSide(); renderPeople(); renderStats(); renderContent(); renderDrawer();
+  renderTopNav(); renderPeople(); renderStats(); renderContent(); renderDrawer();
 }
 
 const ICONS = {
@@ -404,37 +395,30 @@ const ICONS = {
   lane: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m9 11 3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>',
 };
 
-function renderSide(){
+function renderTopNav(){
   const pendFb = fbs().filter(f=>['pending','needs_clarification'].includes(f.status)).length;
   const openTasks = tasks().filter(t=>!isClosed(t)&&t.type!=='review').length;
   const views = [
     {id:'board', label:'Board', n: openTasks, icon:'board'},
     {id:'list', label:'List', n: tasks().length, icon:'list'},
-    {id:'feedback', label:'Feedback', n: pendFb, icon:'feedback', warn: pendFb>0},
+    {id:'feedback', label:'Feedback', n: pendFb, icon:'feedback'},
     {id:'activity', label:'Activity', n: null, icon:'activity'},
   ];
-  let html = '<div class="shead">views</div>' + views.map(v =>
-    `<button class="sitem ${state.view===v.id?'on':''}" data-view-btn="${v.id}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
+  $('views').innerHTML = views.map(v =>
+    `<button class="vtab ${state.view===v.id?'on':''}" data-view-btn="${v.id}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
   const lanes = pipeline()?.reviews ?? [];
-  if (lanes.length){
-    html += '<div class="shead">review lanes</div>' + lanes.map(l => {
-      const open = tasks().filter(t=>t.type==='review'&&t.lane===l.lane&&!isClosed(t)).length;
-      return `<button class="sitem ${state.view==='lane'&&state.lane===l.lane?'on':''}" data-lane-btn="${esc(l.lane)}">${ICONS.lane}${esc(l.label)}<span class="n ${open?'':'zero'}">${open}</span></button>`;
-    }).join('');
-  }
-  const ppl = state.data.project.stakeholders||[];
-  const agents = [...new Set(tasks().filter(t=>t.assigneeType==='agent'&&t.assignee).map(t=>t.assignee))];
-  html += '<div class="shead">people</div><div class="speople">'
-    + ppl.map(p=>`<span class="ava" title="${esc(p.name)} · ${esc(p.role||'stakeholder')}">${esc(initials(p.name))}</span>`).join('')
-    + agents.map(a=>`<span class="ava" title="${esc(a)} · agent" style="background:var(--ink);color:var(--lime)">${esc(initials(a))}</span>`).join('')
-    + '</div>';
-  $('snav').innerHTML = html;
+  $('lanes').innerHTML = lanes.map(l => {
+    const open = tasks().filter(t=>t.type==='review'&&t.lane===l.lane&&!isClosed(t)).length;
+    return `<button class="lanechip ${state.view==='lane'&&state.lane===l.lane?'on':''}" data-lane-btn="${esc(l.lane)}">${ICONS.lane}${esc(l.label)}<span class="n ${open?'':'zero'}">${open}</span></button>`;
+  }).join('');
 }
 
 function renderPeople(){
   const ppl = state.data.project.stakeholders||[];
+  const agents = [...new Set(tasks().filter(t=>t.assigneeType==='agent'&&t.assignee).map(t=>t.assignee))];
   $('people').innerHTML = ppl.map(p=>
-    `<span class="ava" title="${esc(p.name)}">${esc(initials(p.name))}</span>`).join('');
+    `<span class="ava" title="${esc(p.name)} · ${esc(p.role||'stakeholder')}">${esc(initials(p.name))}</span>`).join('')
+    + agents.map(a=>`<span class="ava" title="${esc(a)} · agent" style="background:var(--ink);color:var(--lime)">${esc(initials(a))}</span>`).join('');
 }
 
 function renderStats(){
@@ -476,7 +460,7 @@ function cardHtml(t){
     </div>
     <div class="ttl">${esc(t.title)}</div>
     <div class="kfoot">
-      ${kids.length?`<span class="pips" title="${kids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · ')}"><span class="plbl">REV</span>${kids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
+      ${kids.length?`<span class="pips" title="${esc(kids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · '))}"><span class="plbl">REV</span>${kids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
       ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">${ICONS.feedback}${fbOpen||fb.length}</span>`:''}
       ${t.blocker?`<span class="typ" style="color:var(--red);border-color:var(--red);background:var(--red-pale)" title="${esc(t.blocker)}">BLK</span>`:''}
       <span style="flex:1"></span>
@@ -518,7 +502,7 @@ function taskRowHtml(t, isSub){
     <span class="id">${esc(t.shortId)}</span>
     <span class="col"><div class="ttl">${esc(t.title)}</div></span>
     <span class="rmeta">
-      ${revKids.length?`<span class="pips" title="${revKids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · ')}"><span class="plbl">REV</span>${revKids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
+      ${revKids.length?`<span class="pips" title="${esc(revKids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · '))}"><span class="plbl">REV</span>${revKids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
       ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">${ICONS.feedback}${fbOpen||fb.length}</span>`:''}
       ${t.type&&t.type!=='feature'?`<span class="typ typ-${esc(t.type)}">${esc(t.type)}</span>`:''}
       ${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:''}
@@ -529,10 +513,7 @@ function taskRowHtml(t, isSub){
 function renderContent(){
   const board = state.view==='board';
   $('kanban').hidden = !board;
-  // board view: the drawer (inside .split) floats over the kanban, so .split must stay
-  // rendered — only the content box hides. display:none on .split would hide the fixed drawer too.
-  $('split').classList.toggle('boardmode', board);
-  $('drawer').hidden = false;
+  $('content').hidden = board;
   if (board){ renderKanban(); return; }
 
   const vb = $('viewbar'); const el = $('list');
@@ -717,7 +698,7 @@ function applyHash(){
 function setView(v, lane=null){
   state.view = v; state.lane = lane;
   document.body.dataset.view = v;
-  renderSide(); renderContent(); renderDrawer();
+  renderTopNav(); renderContent(); renderDrawer();
 }
 
 // ---------- drag & drop (status moves; server enforces gates, tunnel viewers get 403) ----------
