@@ -56,6 +56,8 @@ routes.json) and is gitignored.
   parent to done unless `pipeline.autoAdvance` is false (then it waits for an explicit
   push). Never hand-create `type=review` tasks. Review tasks render as pips on the
   parent's kanban card, not as columns cards.
+- **Orchestrator sessions run the standing drain loop** — triage verbs, dispatch,
+  board audit, resume contract: `docs/orchestrator-loop.md`.
 
 ## Task statuses (Jira-style)
 
