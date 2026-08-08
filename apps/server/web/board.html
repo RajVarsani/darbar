@@ -132,6 +132,8 @@
 
   /* ---------- content box (list / feedback / activity / lane) ---------- */
   .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:20px;align-items:start}
+  .split.boardmode{display:block}
+  .split.boardmode .content{display:none}
   .content{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);min-width:0}
   .viewbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:2px solid var(--ink)}
   .viewbar .vtitle{font-family:var(--mono);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
@@ -508,7 +510,9 @@ function taskRowHtml(t, isSub){
 function renderContent(){
   const board = state.view==='board';
   $('kanban').hidden = !board;
-  $('split').style.display = board ? 'none' : '';
+  // board view: the drawer (inside .split) floats over the kanban, so .split must stay
+  // rendered — only the content box hides. display:none on .split would hide the fixed drawer too.
+  $('split').classList.toggle('boardmode', board);
   $('drawer').hidden = false;
   if (board){ renderKanban(); return; }
 
