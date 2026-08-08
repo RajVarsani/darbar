@@ -89,7 +89,15 @@ api.post('/projects', async (c) => {
 
 api.get('/projects', async (c) => {
   const list = await Projects.find({}, { projection: { charter: 0 } }).sort({ createdAt: -1 }).toArray();
-  return c.json(list.map((p) => ({ ...p, boardUrl: `${config.baseUrl}/p/${p.capId}` })));
+  const withCounts = await Promise.all(list.map(async (p) => {
+    const [tasks, done, pendingFb] = await Promise.all([
+      Tasks.countDocuments({ projectId: p._id }),
+      Tasks.countDocuments({ projectId: p._id, status: 'done' }),
+      Feedback.countDocuments({ projectId: p._id, status: { $in: ['pending', 'needs_clarification'] } }),
+    ]);
+    return { ...p, boardUrl: `${config.baseUrl}/p/${p.capId}`, counts: { tasks, done, pendingFb } };
+  }));
+  return c.json(withCounts);
 });
 
 api.get('/projects/:ref/context', async (c) => {

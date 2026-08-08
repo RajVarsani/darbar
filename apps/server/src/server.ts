@@ -28,7 +28,10 @@ app.get('/files/:name', async (c) => {
   });
 });
 
-app.get('/', (c) => c.text('houston up. Boards are at /p/<capId>.'));
+// local-only projects index: '/' is not on the proxy's public allowlist,
+// so this page 403s through the tunnel by construction
+const homePath = new URL('../web/home.html', import.meta.url).pathname;
+app.get('/', async (c) => c.html(await Bun.file(homePath).text()));
 
 await initDb();
 console.log(`houston listening on ${config.bindHost}:${config.port}`);

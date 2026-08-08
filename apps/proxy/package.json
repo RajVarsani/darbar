@@ -6,6 +6,6 @@
     "@houston/core": "workspace:*"
   },
   "scripts": {
-    "dev": "bun --env-file=../../.env src/server.ts"
+    "dev": "bun --env-file=../../.env src/proxy.ts"
   }
 }
