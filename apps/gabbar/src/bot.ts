@@ -133,7 +133,17 @@ async function safeHandle(args: any) {
   }
 }
 
-app.message(async (args: any) => { if (args.message.channel_type === 'im') await safeHandle(args); });
+// channels are noisy: only bare replies inside threads rooted at tracked feedback get through.
+// Requires message.channels/message.groups events + channels:history/groups:history scopes on the app.
+app.message(async (args: any) => {
+  const m = args.message;
+  if (m.channel_type === 'im') { await safeHandle(args); return; }
+  if (m.subtype || m.user === SELF_USER || (!m.user && m.bot_id)) return;
+  if (SELF_USER && (m.text || '').includes(`<@${SELF_USER}>`)) return; // app_mention owns mentions
+  if (!(m.thread_ts && m.thread_ts !== m.ts)) return;
+  if (!(await existingFeedback(m.channel, m.thread_ts))) return;
+  await safeHandle(args);
+});
 app.event('app_mention', async (args: any) => { await safeHandle(args); });
 
 SELF_USER = ((await app.client.auth.test()) as { user_id?: string }).user_id ?? '';
