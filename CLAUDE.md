@@ -70,9 +70,9 @@ rows to `pending`, never duplicate).
 
 ## Test fixtures
 
-Project TST ("Gabbar Test Project"), board `/p/PUNbf9U9VS4b7RBgiTtGg`,
 Raj↔Gabbar DM channel `D0AH8292D7Y`. Slack app "Gabbar Singh" `A0AHP0UKQMP`,
-Socket Mode on, bot user `U0AGUK6D207`.
+Socket Mode on, bot user `U0AGUK6D207`. (Old TST/TODO test projects were wiped
+2026-08-08; the live dogfood project is DAR "Darbar Platform".)
 
 ## Conventions
 
