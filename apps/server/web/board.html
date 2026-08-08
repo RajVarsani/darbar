@@ -120,6 +120,16 @@
   .kfoot{display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap}
   .kfoot .who{transform:scale(.95);transform-origin:left center}
   .kempty{padding:14px 12px;text-align:center;color:var(--ink-faint);font-family:var(--mono);font-size:11px}
+  /* empty columns go quiet so real work stands out; still a live drop target */
+  .kcol.slim{box-shadow:2px 2px 0 var(--ink)}
+  .kcol.slim .khead{color:var(--ink-faint)}
+  .kcol.slim .khead .n{opacity:.4}
+  .kcol.slim .kcards{min-height:34px;padding:6px 10px}
+  .kcol.slim .kempty{padding:6px 10px}
+  .kcol.slim.over .khead{color:var(--ink)}
+  .kmore{display:block;width:100%;font-family:var(--mono);font-size:11px;font-weight:700;text-transform:uppercase;
+    letter-spacing:.05em;padding:5px 12px;color:var(--ink-soft);border-top:2px solid var(--ink);transition:.08s}
+  .kmore:hover{background:var(--lime);color:var(--ink)}
 
   /* review pips: one square per pipeline lane on the parent card */
   .pips{display:inline-flex;gap:3px;align-items:center;padding:3px 6px;border:1.5px solid var(--ink);background:var(--beige)}
@@ -339,6 +349,7 @@ const state = {
   sel: null,               // {kind:'task'|'fb', id: shortId}
   stack: [],               // drawer back stack of sel objects
   collapsed: new Set(),    // task shortIds with hidden children
+  doneExpanded: false,     // done column: false = latest 5 only
   canWrite: null,          // null = unknown; probed once. Tunnel viewers get 403 on writes.
 };
 
@@ -477,10 +488,18 @@ function renderKanban(){
   const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled' && matches(t.title+' '+t.shortId+' '+(t.assignee||'')));
   $('kanban').innerHTML = KANBAN_COLS.map(col=>{
     const cards = visible.filter(t=>t.status===col);
-    return `<div class="kcol" data-col="${col}">
+    let shown = cards, toggle = '';
+    if (col==='done'){
+      shown = [...cards].sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+      if (cards.length>5){
+        toggle = `<button class="kmore" data-done-toggle>${state.doneExpanded?'show latest 5':`show all ${cards.length}`}</button>`;
+        if (!state.doneExpanded) shown = shown.slice(0,5);
+      }
+    }
+    return `<div class="kcol ${cards.length?'':'slim'}" data-col="${col}">
       <div class="khead">${nice(col)}<span class="n">${cards.length}</span></div>
-      <div class="kcards" data-col="${col}">${cards.map(cardHtml).join('') || `<div class="kempty">—</div>`}</div>
-    </div>`;
+      <div class="kcards" data-col="${col}">${shown.map(cardHtml).join('') || `<div class="kempty">—</div>`}</div>
+      ${toggle}</div>`;
   }).join('');
 }
 
@@ -763,6 +782,8 @@ document.addEventListener('click', e=>{
   if (fbf){ state.fbFilter = fbf.dataset.fbf; renderContent(); return; }
   const tf = e.target.closest('[data-tf]');
   if (tf){ state.taskFilter = tf.dataset.tf; renderContent(); return; }
+  const dt = e.target.closest('[data-done-toggle]');
+  if (dt){ state.doneExpanded = !state.doneExpanded; renderContent(); return; }
   if (e.target.closest('#dback')) return goBack();
   if (e.target.closest('#dclose')) return clearSel();
   if (e.target.id==='scrim') return clearSel();
