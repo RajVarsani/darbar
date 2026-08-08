@@ -1,18 +1,31 @@
 # @houston/gabbar
 
-Slack Socket Mode intake scribe. INTAKE-ONLY: writes feedback rows at `pending`,
-confirms in thread, nothing else. No task creation, no status changes, no execution.
+Gabbar is an AGENT, not a parser — ported from the original Vercel gabbar-singh repo
+(persona + security rules + memory) and given Houston tools. Claude Opus 5 via the
+Anthropic SDK's beta tool runner, with server-side refusal fallbacks enabled.
 
-Flow per message (src/bot.ts):
-1. Skip own messages (`SELF_USER`), edits, joins. App-token user messages carry a
-   bot_id but a real `user` — do NOT filter on bot_id alone (learned the hard way).
-2. Thread reply? Look up the row by thread-root ts via `/api/feedback/by-slack`
-   (ANY status) and reopen to pending. Never file duplicates from threads.
-3. Task ref (TST-12) only counts if `/api/tasks/:ref` confirms it exists.
-4. No ref: channel-bound project, else the only project, else ASK (never guess
-   between multiple projects).
-5. Screenshots -> `data/files/` via bot token; URLs use `config.baseUrl`.
-6. Everything wrapped in `safeHandle`: failures reply to the human, never vanish.
+## Architecture
+- `src/bot.ts` — Slack Socket Mode TRANSPORT. Owns verified identity (SELF_USER guard;
+  app-token user messages carry bot_id but a real `user` — never filter on bot_id
+  alone), screenshot downloads into data/files, thread history assembly, and the
+  thread→feedback pre-lookup. No judgment lives here.
+- `src/agent.ts` — the BRAIN. Persona (lowercase, hinglish, "raj banaya mujhe"),
+  security rules (identity only from the verified payload; non-owners are stakeholders
+  with limited trust), core memory (mongo `gabbar_memory`), and tools.
 
-Needs SLACK_BOT_TOKEN + SLACK_APP_TOKEN; exits gracefully without them so `bun dev`
-still brings up the rest.
+## Tools (intake-only invariant)
+list_projects · get_board · get_task · file_feedback · reopen_feedback · save_memory
+(owner-only). NO task creation, NO status changes, NO execution. Ticket filing is one
+tool call among many — chit-chat gets a plain reply and no tool calls.
+
+file_feedback's author, slack thread ref, and attachments are injected by the
+TRANSPORT, never model-controlled — the model cannot spoof identity.
+
+## Judgment rules that came from real failures
+- History is context, never a backlog: act only on the current message (the agent once
+  filed tickets for old messages it saw in DM history).
+- Look before declining: check list_projects before calling something "not project
+  work" — projects can be personal todo lists.
+
+Needs SLACK_BOT_TOKEN + SLACK_APP_TOKEN + ANTHROPIC_API_KEY; exits gracefully without
+them so `bun dev` still brings up the rest. Model override: GABBAR_MODEL.

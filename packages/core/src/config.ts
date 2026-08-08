@@ -16,6 +16,9 @@ export const config = {
   slackBotToken: env.SLACK_BOT_TOKEN || '',
   slackAppToken: env.SLACK_APP_TOKEN || '',
   slackApiBase: env.SLACK_API_BASE || 'https://slack.com/api',
+  anthropicApiKey: env.ANTHROPIC_API_KEY || '',
+  gabbarModel: env.GABBAR_MODEL || 'claude-opus-5',
+  gabbarOwnerId: env.GABBAR_OWNER_ID || '',
   bindHost: env.BIND_HOST || '127.0.0.1', // loopback only; a tunnel fronts anything public
   proxyPort: Number(env.PROXY_PORT || 4800),
   proxyAdminToken: env.PROXY_ADMIN_TOKEN || '',

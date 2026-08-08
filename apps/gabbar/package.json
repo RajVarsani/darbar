@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
     "@houston/core": "workspace:*",
     "@slack/bolt": "^4.0.0"
   },
