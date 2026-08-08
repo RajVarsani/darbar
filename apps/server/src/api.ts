@@ -73,6 +73,12 @@ function readPipeline(v: unknown): Pipeline | undefined {
 const openReviewCount = (parentId: ObjectId) =>
   Tasks.countDocuments({ parentTaskId: parentId, type: 'review', status: { $nin: CLOSED } });
 
+// feedback rows still blocking a task; needs_clarification is with the reporter, so not blocking
+const OPEN_FEEDBACK: FeedbackStatus[] = ['pending', 'triaged', 'accepted', 'in_progress'];
+const openFeedbackShortIds = async (taskId: ObjectId) =>
+  (await Feedback.find({ taskId, status: { $in: OPEN_FEEDBACK } }, { projection: { shortId: 1 } }).toArray())
+    .map((f) => f.shortId);
+
 // dev task entered in_review -> one review subtask per configured lane, assigned to the lane manager.
 // A re-entry after rework spawns a fresh round only once the previous round is fully closed.
 async function spawnReviews(t: Task) {
@@ -109,6 +115,11 @@ async function maybeAdvanceParent(parentId: ObjectId) {
   const parent = await Tasks.findOne({ _id: parentId });
   if (!parent || parent.status !== 'in_review') return;
   if (await openReviewCount(parentId)) return;
+  const fbIds = await openFeedbackShortIds(parentId);
+  if (fbIds.length) {
+    await logEvent(parent.projectId, `${parent.shortId}: reviews closed but ${fbIds.length} open feedback (${fbIds.join(', ')}) — holding`, parent._id);
+    return;
+  }
   const p = await Projects.findOne({ _id: parent.projectId });
   if (p?.pipeline?.autoAdvance === false) {
     await logEvent(parent.projectId, `${parent.shortId}: all reviews closed — awaiting explicit push out of in_review`, parent._id);
@@ -190,6 +201,13 @@ api.get('/projects/:ref/context', async (c) => {
   const p = await resolveProject(c.req.param('ref'));
   if (!p) return c.json({ error: 'project not found' }, 404);
   return c.json({ name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders });
+});
+
+api.get('/projects/:ref/events', async (c) => {
+  const p = await resolveProject(c.req.param('ref'));
+  if (!p) return c.json({ error: 'project not found' }, 404);
+  const limit = Math.min(Math.max(Number(c.req.query('limit')) || 20, 1), 50);
+  return c.json(await Events.find({ projectId: p._id }).sort({ at: -1 }).limit(limit).toArray());
 });
 
 // ---------- board (capability URL) ----------
@@ -309,10 +327,12 @@ api.patch('/tasks/:ref', async (c) => {
   const addCommit = str(b.addCommit);
   if (Object.keys(set).length === 0 && !addCommit) return c.json(t); // nothing to do, no noise event
 
-  // done-gate: a dev task cannot close over the heads of its open review lanes
+  // done-gate: a dev task cannot close over the heads of its open review lanes or open feedback
   if (set.status === 'done' && t.type !== 'review') {
     const open = await openReviewCount(t._id!);
     if (open) return c.json({ error: `${t.shortId} has ${open} open review subtask(s); close them (or cancel them) first` }, 409);
+    const fbIds = await openFeedbackShortIds(t._id!);
+    if (fbIds.length) return c.json({ error: `${t.shortId} has ${fbIds.length} open feedback row(s) (${fbIds.join(', ')}); resolve or reject them first` }, 409);
   }
 
   set.updatedAt = new Date();
@@ -386,6 +406,13 @@ api.get('/feedback/by-slack', async (c) => {
   return c.json(fb);
 });
 
+// param route stays registered AFTER the static /feedback/pending and /feedback/by-slack
+api.get('/feedback/:shortId', async (c) => {
+  const fb = await Feedback.findOne({ shortId: c.req.param('shortId').toUpperCase() });
+  if (!fb) return c.json({ error: 'feedback not found' }, 404);
+  return c.json(fb);
+});
+
 api.patch('/feedback/:shortId', async (c) => {
   const fb = await Feedback.findOne({ shortId: c.req.param('shortId').toUpperCase() });
   if (!fb) return c.json({ error: 'feedback not found' }, 404);
@@ -409,6 +436,9 @@ api.patch('/feedback/:shortId', async (c) => {
   if (b.status === 'resolved') await slackThreadReply(fb, `*${fb.shortId} resolved.* ${resolution ?? ''}`.trim());
   if (b.status === 'rejected') await slackThreadReply(fb, `*${fb.shortId} not actioned:* ${resolution ?? 'no reason given (that is a bug, flag it)'}`);
   if (b.status === 'needs_clarification') await slackThreadReply(fb, `*${fb.shortId}:* quick question, ${resolution ?? 'can you add detail?'}`);
+
+  // a parent held in_review only by this feedback closes itself once the last blocking row resolves
+  if ((b.status === 'resolved' || b.status === 'rejected') && fb.taskId) await maybeAdvanceParent(fb.taskId);
   return c.json(await Feedback.findOne({ _id: fb._id }));
 });
 
