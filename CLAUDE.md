@@ -48,11 +48,20 @@ routes.json) and is gitignored.
   they block Mongo operator injection and untyped garbage reaching the board.
 - **Every feedback state change that matters replies in the original Slack thread**;
   reply failures are logged as board events, never swallowed.
+- **The review pipeline is server-side** (`spawnReviews`/`maybeAdvanceParent`/done-gate
+  in `apps/server/src/api.ts`), so the rules hold for every writer (UI drag, MCP, curl):
+  a dev task entering `in_review` spawns one `type=review` subtask per configured lane
+  (`project.pipeline.reviews`, each assigned to its lane manager); `done` is rejected
+  (409) while review children are open; closing the last review child auto-advances the
+  parent to done unless `pipeline.autoAdvance` is false (then it waits for an explicit
+  push). Never hand-create `type=review` tasks. Review tasks render as pips on the
+  parent's kanban card, not as columns cards.
 
 ## Task statuses (Jira-style)
 
 `backlog → todo → in_progress → in_review → qa → done`, plus `blocked` (with the
-free-text `blocker` field carrying why) and `cancelled`. Feedback lifecycle:
+free-text `blocker` field carrying why) and `cancelled`. Task `type`:
+`feature|bug|chore|review|regression`. Feedback lifecycle:
 `pending → triaged → accepted → in_progress → resolved | rejected | needs_clarification`
 (replies in-thread on resolved/rejected/needs_clarification; thread replies reopen
 rows to `pending`, never duplicate).

@@ -28,22 +28,50 @@ server.tool('get_board', 'Full board for a project: tasks, feedback, recent even
   { capId: z.string().describe('project capability id') },
   ({ capId }) => call(`/p/${capId}`));
 
-server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only the orchestrator promotes feedback into tasks.',
+const STATUS = z.enum(['backlog', 'todo', 'in_progress', 'in_review', 'qa', 'blocked', 'done', 'cancelled']);
+const TYPE = z.enum(['feature', 'bug', 'chore', 'review', 'regression']);
+
+server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only the orchestrator promotes feedback into tasks. Review subtasks are pipeline-spawned by the server — do not create type=review tasks by hand.',
   {
     project: z.string(), title: z.string(), description: z.string().optional(),
     parentTaskRef: z.string().optional(), assignee: z.string().optional(),
     assigneeType: z.enum(['agent', 'human']).optional(), origin: z.string().optional(),
+    type: TYPE.optional(), status: STATUS.optional(),
   },
   (args) => call('/tasks', 'POST', args));
 
-server.tool('update_task', 'Update your own task row: status, blocker, notes, or append a commit hash.',
+server.tool('update_task', 'Update a task row: status, blocker, notes, or append a commit hash. Moving a dev task to in_review auto-spawns the project pipeline review lanes; done is rejected (409) while review children are open; closing the last review child auto-advances the parent when the project has autoAdvance on.',
   {
     taskRef: z.string().describe('short id like TST-1'),
-    status: z.enum(['backlog', 'todo', 'in_progress', 'qa', 'review', 'blocked', 'done']).optional(),
+    status: STATUS.optional(),
     assignee: z.string().optional(), blocker: z.string().nullable().optional(),
-    notes: z.string().optional(), addCommit: z.string().optional(),
+    notes: z.string().optional(), addCommit: z.string().optional(), type: TYPE.optional(),
   },
   ({ taskRef, ...rest }) => call(`/tasks/${taskRef}`, 'PATCH', rest));
+
+server.tool('my_tasks', 'Open tasks for an assignee (lane managers and builders start here). Optionally scope by project or lane.',
+  {
+    assignee: z.string().describe('exact assignee name, e.g. qa-manager'),
+    project: z.string().optional(), lane: z.string().optional(),
+  },
+  ({ assignee, project, lane }) => {
+    const qs = new URLSearchParams({ assignee, open: 'true' });
+    if (project) qs.set('project', project);
+    if (lane) qs.set('lane', lane);
+    return call(`/tasks?${qs}`);
+  });
+
+server.tool('set_pipeline', 'Configure the review pipeline for a project: lanes spawned as subtasks when a dev task hits in_review, each assigned to its lane manager. autoAdvance moves the parent to done when the last lane closes.',
+  {
+    project: z.string(),
+    autoAdvance: z.boolean().optional().describe('default true; false = parent waits in in_review for an explicit push'),
+    reviews: z.array(z.object({
+      lane: z.string().describe('key, e.g. qa or code-review'),
+      label: z.string().optional(),
+      manager: z.string().describe('agent the spawned task is assigned to, e.g. qa-manager'),
+    })),
+  },
+  ({ project, ...rest }) => call(`/projects/${encodeURIComponent(project)}`, 'PATCH', { pipeline: rest }));
 
 server.tool('file_feedback', 'File a finding as feedback (lanes use this). Lands in the same pending queue as human feedback.',
   {

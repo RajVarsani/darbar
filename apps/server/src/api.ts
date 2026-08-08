@@ -4,13 +4,15 @@ import { streamSSE } from 'hono/streaming';
 import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
 import { config } from '@darbar/core';
-import type { FeedbackDoc, Task, TaskStatus, FeedbackStatus } from '@darbar/core';
+import type { FeedbackDoc, Pipeline, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
 
 export const api = new Hono();
 
 export const TASK_STATUSES: TaskStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'qa', 'blocked', 'done', 'cancelled'];
+export const TASK_TYPES: TaskType[] = ['feature', 'bug', 'chore', 'review', 'regression'];
 export const FEEDBACK_STATUSES: FeedbackStatus[] = ['pending', 'triaged', 'needs_clarification', 'accepted', 'in_progress', 'resolved', 'rejected'];
 const FEEDBACK_TYPES = ['bug', 'design', 'idea', 'approval'];
+const CLOSED: TaskStatus[] = ['done', 'cancelled'];
 
 // body/type guards: user-controlled JSON never reaches Mongo operators or the board untyped
 async function readBody(c: Context): Promise<Record<string, unknown> | null> {
@@ -47,6 +49,73 @@ async function slackThreadReply(fb: FeedbackDoc, text: string) {
 
 async function resolveTaskRef(ref: string) {
   return Tasks.findOne({ shortId: ref.toUpperCase() });
+}
+
+// pipeline config comes from user JSON: rebuild it field-by-field, never store the raw object
+function readPipeline(v: unknown): Pipeline | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const o = v as Record<string, unknown>;
+  const reviews = Array.isArray(o.reviews)
+    ? o.reviews.flatMap((r) => {
+        if (!r || typeof r !== 'object') return [];
+        const { lane, label, manager } = r as Record<string, unknown>;
+        return typeof lane === 'string' && lane && typeof manager === 'string' && manager
+          ? [{ lane, label: typeof label === 'string' && label ? label : lane, manager }]
+          : [];
+      })
+    : [];
+  return { autoAdvance: o.autoAdvance !== false, reviews };
+}
+
+// ---------- review pipeline engine ----------
+// All three live server-side so the rules hold no matter who moves a task (UI drag, MCP, curl).
+
+const openReviewCount = (parentId: ObjectId) =>
+  Tasks.countDocuments({ parentTaskId: parentId, type: 'review', status: { $nin: CLOSED } });
+
+// dev task entered in_review -> one review subtask per configured lane, assigned to the lane manager.
+// A re-entry after rework spawns a fresh round only once the previous round is fully closed.
+async function spawnReviews(t: Task) {
+  const p = await Projects.findOne({ _id: t.projectId });
+  const lanes = p?.pipeline?.reviews ?? [];
+  if (!p || lanes.length === 0) return;
+  if (await openReviewCount(t._id!)) return;
+  for (const l of lanes) {
+    const doc: Task = {
+      projectId: p._id!,
+      shortId: await nextShortId(p._id!, 'task'),
+      parentTaskId: t._id!,
+      title: `${l.label}: ${t.title}`,
+      description: `pipeline-spawned ${l.label} of ${t.shortId}. The lane manager reassigns to a subagent, files findings as feedback on ${t.shortId}, and closes this when the lane passes.`,
+      status: 'todo',
+      type: 'review',
+      lane: l.lane,
+      assignee: l.manager,
+      assigneeType: 'agent',
+      origin: `pipeline:${t.shortId}`,
+      commits: [],
+      blocker: null,
+      notes: '',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await Tasks.insertOne(doc);
+    await logEvent(p._id!, `${doc.shortId} spawned: ${l.label} review of ${t.shortId} → ${l.manager}`, doc._id);
+  }
+}
+
+// last review child closed -> parent leaves in_review (autoAdvance) or waits for an explicit push
+async function maybeAdvanceParent(parentId: ObjectId) {
+  const parent = await Tasks.findOne({ _id: parentId });
+  if (!parent || parent.status !== 'in_review') return;
+  if (await openReviewCount(parentId)) return;
+  const p = await Projects.findOne({ _id: parent.projectId });
+  if (p?.pipeline?.autoAdvance === false) {
+    await logEvent(parent.projectId, `${parent.shortId}: all reviews closed — awaiting explicit push out of in_review`, parent._id);
+    return;
+  }
+  await Tasks.updateOne({ _id: parentId }, { $set: { status: 'done', updatedAt: new Date() } });
+  await logEvent(parent.projectId, `${parent.shortId} auto-advanced → done (all reviews closed)`, parent._id);
 }
 
 async function resolveProject(ref: string) {
@@ -100,6 +169,23 @@ api.get('/projects', async (c) => {
   return c.json(withCounts);
 });
 
+api.patch('/projects/:ref', async (c) => {
+  const p = await resolveProject(c.req.param('ref'));
+  if (!p) return c.json({ error: 'project not found' }, 404);
+  const b = await readBody(c);
+  if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const set: Record<string, unknown> = {};
+  const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
+  const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
+  const pipeline = b.pipeline !== undefined ? readPipeline(b.pipeline) : undefined;
+  if (pipeline) set.pipeline = pipeline;
+  if (Object.keys(set).length === 0) return c.json({ error: 'nothing to update (charter, slackChannel, pipeline)' }, 400);
+  await Projects.updateOne({ _id: p._id }, { $set: set });
+  const laneNote = pipeline ? `: lanes [${pipeline.reviews.map((r) => r.lane).join(', ')}], autoAdvance ${pipeline.autoAdvance}` : '';
+  await logEvent(p._id!, `project updated (${Object.keys(set).join(', ')})${laneNote}`);
+  return c.json(await Projects.findOne({ _id: p._id }));
+});
+
 api.get('/projects/:ref/context', async (c) => {
   const p = await resolveProject(c.req.param('ref'));
   if (!p) return c.json({ error: 'project not found' }, 404);
@@ -116,7 +202,7 @@ api.get('/p/:capId', async (c) => {
     Feedback.find({ projectId: p._id }).sort({ createdAt: -1 }).toArray(),
     Events.find({ projectId: p._id }).sort({ at: -1 }).limit(config.eventsBoardLimit).toArray(),
   ]);
-  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders }, tasks, feedback, events });
+  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders, pipeline: p.pipeline ?? null }, tasks, feedback, events });
 });
 
 api.get('/p/:capId/stream', async (c) => {
@@ -145,6 +231,8 @@ api.post('/tasks', async (c) => {
   if (!title) return c.json({ error: 'title (string) required' }, 400);
   const status = (str(b.status) ?? 'todo') as TaskStatus;
   if (!TASK_STATUSES.includes(status)) return c.json({ error: `bad status; use ${TASK_STATUSES.join('|')}` }, 400);
+  const type = (str(b.type) ?? 'feature') as TaskType;
+  if (!TASK_TYPES.includes(type)) return c.json({ error: `bad type; use ${TASK_TYPES.join('|')}` }, 400);
   const p = await resolveProject(str(b.project) ?? '');
   if (!p) return c.json({ error: 'project not found' }, 404);
   let parentTaskId: ObjectId | null = null;
@@ -160,6 +248,8 @@ api.post('/tasks', async (c) => {
     title,
     description: str(b.description) ?? '',
     status,
+    type,
+    lane: strOrNull(b.lane) ?? null,
     assignee: strOrNull(b.assignee) ?? null,
     assigneeType: b.assigneeType === 'human' ? 'human' : 'agent',
     origin: strOrNull(b.origin) ?? null,
@@ -172,6 +262,23 @@ api.post('/tasks', async (c) => {
   await Tasks.insertOne(doc);
   await logEvent(p._id!, `${doc.shortId} created: ${doc.title}`, doc._id);
   return c.json(doc);
+});
+
+// my_tasks and lane views: filter by assignee/project/status, open=true for not-closed
+api.get('/tasks', async (c) => {
+  const q: Record<string, unknown> = {};
+  const assignee = c.req.query('assignee'); if (assignee) q.assignee = assignee;
+  const lane = c.req.query('lane'); if (lane) q.lane = lane;
+  const status = c.req.query('status');
+  if (status) q.status = { $in: status.split(',').filter((s) => TASK_STATUSES.includes(s as TaskStatus)) };
+  else if (c.req.query('open') === 'true') q.status = { $nin: CLOSED };
+  const ref = c.req.query('project');
+  if (ref) {
+    const p = await resolveProject(ref);
+    if (!p) return c.json({ error: 'project not found' }, 404);
+    q.projectId = p._id;
+  }
+  return c.json(await Tasks.find(q as never).sort({ updatedAt: -1 }).limit(200).toArray());
 });
 
 api.get('/tasks/:ref', async (c) => {
@@ -188,23 +295,39 @@ api.patch('/tasks/:ref', async (c) => {
   if (b.status !== undefined && !TASK_STATUSES.includes(b.status as TaskStatus)) {
     return c.json({ error: `bad status; use ${TASK_STATUSES.join('|')}` }, 400);
   }
+  if (b.type !== undefined && !TASK_TYPES.includes(b.type as TaskType)) {
+    return c.json({ error: `bad type; use ${TASK_TYPES.join('|')}` }, 400);
+  }
   const set: Record<string, unknown> = {};
-  for (const k of ['title', 'description', 'status', 'notes'] as const) {
+  for (const k of ['title', 'description', 'status', 'notes', 'type'] as const) {
     const v = str(b[k]); if (v !== undefined) set[k] = v;
   }
-  for (const k of ['assignee', 'blocker'] as const) {
+  for (const k of ['assignee', 'blocker', 'lane'] as const) {
     const v = strOrNull(b[k]); if (v !== undefined) set[k] = v;
   }
   if (b.assigneeType === 'human' || b.assigneeType === 'agent') set.assigneeType = b.assigneeType;
   const addCommit = str(b.addCommit);
   if (Object.keys(set).length === 0 && !addCommit) return c.json(t); // nothing to do, no noise event
+
+  // done-gate: a dev task cannot close over the heads of its open review lanes
+  if (set.status === 'done' && t.type !== 'review') {
+    const open = await openReviewCount(t._id!);
+    if (open) return c.json({ error: `${t.shortId} has ${open} open review subtask(s); close them (or cancel them) first` }, 409);
+  }
+
   set.updatedAt = new Date();
   const update: { $set: Record<string, unknown>; $push?: { commits: string } } = { $set: set };
   if (addCommit) update.$push = { commits: addCommit };
   await Tasks.updateOne({ _id: t._id }, update);
   const changed = Object.keys(set).filter((k) => k !== 'updatedAt').concat(addCommit ? ['commit'] : []).join(', ');
   await logEvent(t.projectId, `${t.shortId} updated (${changed})${set.status ? ` → ${set.status}` : ''}`, t._id);
-  return c.json(await Tasks.findOne({ _id: t._id }));
+
+  const after = await Tasks.findOne({ _id: t._id });
+  // pipeline hooks fire on the transition, not the state: entering review spawns lanes,
+  // closing the last review lane advances (or announces) the parent
+  if (after && set.status === 'in_review' && t.status !== 'in_review' && t.type !== 'review') await spawnReviews(after);
+  if (t.type === 'review' && CLOSED.includes(set.status as TaskStatus) && t.parentTaskId) await maybeAdvanceParent(t.parentTaskId);
+  return c.json(after);
 });
 
 // ---------- feedback ----------

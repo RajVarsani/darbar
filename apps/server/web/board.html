@@ -26,27 +26,47 @@
     --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100%}
-  body{background:var(--lime);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;
-    -webkit-font-smoothing:antialiased}
+  html{height:100%}
+  body{min-height:100%;background:var(--lime);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;
+    -webkit-font-smoothing:antialiased;display:grid;grid-template-columns:212px minmax(0,1fr)}
   button{font:inherit;background:none;border:none;cursor:pointer;color:inherit}
   a{color:var(--green-deep);text-decoration:underline;text-underline-offset:2px}
   ::selection{background:var(--ink);color:var(--lime)}
 
-  /* ---------- top bar ---------- */
-  .top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;
-    padding:0 24px;height:58px;background:var(--lime);border-bottom:2px solid var(--ink)}
-  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:700;font-size:14px;white-space:nowrap}
+  /* ---------- permanent sidebar ---------- */
+  .side{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;background:var(--lime);
+    border-right:2px solid var(--ink);z-index:31}
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:700;font-size:14px;
+    white-space:nowrap;height:58px;padding:0 16px;border-bottom:2px solid var(--ink)}
   .brand .dot{width:24px;height:24px;background:var(--ink);color:var(--lime);display:grid;place-items:center;
     font-size:13px;font-weight:800}
-  .crumb{color:var(--ink-soft);font-weight:400}
-  .chip{font-family:var(--mono);font-size:11px;font-weight:700;background:var(--beige);border:2px solid var(--ink);
-    padding:1px 7px;letter-spacing:.04em}
+  .snav{padding:8px 10px 4px;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
+  .shead{font-family:var(--mono);font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;
+    color:var(--ink-soft);padding:14px 8px 5px}
+  .sitem{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;font-weight:700;
+    padding:6px 9px;border:2px solid transparent;color:var(--ink-soft);text-align:left;transition:.08s;width:100%}
+  .sitem:hover{border-color:var(--ink);color:var(--ink)}
+  .sitem.on{background:var(--ink);color:var(--lime)}
+  .sitem svg{flex:none}
+  .sitem .n{margin-left:auto;font-size:10px;font-weight:800;background:var(--beige);border:1.5px solid var(--ink);
+    color:var(--ink);padding:0 5px;min-width:18px;text-align:center}
+  .sitem.on .n{background:var(--lime)}
+  .sitem .n.zero{opacity:.35}
+  .speople{display:flex;flex-wrap:wrap;gap:5px;padding:6px 9px}
+  .sfoot{margin-top:auto;padding:11px 16px;border-top:2px solid var(--ink);display:flex;align-items:center;gap:8px}
+
   .live{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;font-weight:700;
     text-transform:uppercase;letter-spacing:.06em;color:var(--green-deep)}
   .live::before{content:"";width:8px;height:8px;background:var(--green);border:1.5px solid var(--ink);animation:pulse 2.2s infinite}
   .live.off{color:var(--ink-soft)} .live.off::before{background:var(--beige);animation:none}
   @keyframes pulse{50%{opacity:.25}}
+
+  /* ---------- top bar ---------- */
+  .top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;
+    padding:0 24px;height:58px;background:var(--lime);border-bottom:2px solid var(--ink)}
+  .crumb{font-family:var(--mono);font-weight:700;font-size:14px;white-space:nowrap;display:flex;align-items:center;gap:10px}
+  .chip{font-family:var(--mono);font-size:11px;font-weight:700;background:var(--beige);border:2px solid var(--ink);
+    padding:1px 7px;letter-spacing:.04em}
   .searchwrap{flex:1;display:flex;justify-content:center}
   .search{display:flex;align-items:center;gap:8px;width:min(420px,100%);background:var(--beige);
     border:2px solid var(--ink);padding:6px 12px;color:var(--ink-soft);transition:box-shadow .1s,transform .1s}
@@ -61,36 +81,61 @@
     font-family:var(--mono);font-size:10px;font-weight:800;color:var(--ink);background:var(--beige)}
 
   /* ---------- page ---------- */
-  .page{max-width:1440px;margin:0 auto;padding:28px 24px 64px}
-  h1{font-family:var(--mono);font-size:30px;font-weight:700;letter-spacing:-.01em}
-  .pagehead{display:flex;align-items:baseline;gap:14px;margin:2px 0 22px;flex-wrap:wrap}
+  .page{max-width:1560px;margin:0 auto;width:100%;padding:24px 24px 64px}
+  h1{font-family:var(--mono);font-size:28px;font-weight:700;letter-spacing:-.01em}
+  .pagehead{display:flex;align-items:baseline;gap:14px;margin:2px 0 20px;flex-wrap:wrap}
   .pagehead .sub{color:var(--ink-soft);font-family:var(--mono);font-size:12px}
 
   /* ---------- stats ---------- */
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px}
-  .stat{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:14px 16px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-bottom:22px}
+  .stat{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:13px 16px}
   .stat .lbl{font-family:var(--mono);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft)}
-  .stat .val{font-family:var(--mono);font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;margin:4px 0 1px}
-  .stat .val .of{color:var(--ink-faint);font-size:16px;font-weight:700}
+  .stat .val{font-family:var(--mono);font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;margin:4px 0 1px}
+  .stat .val .of{color:var(--ink-faint);font-size:15px;font-weight:700}
   .stat .hint{font-size:12px;color:var(--ink-soft)}
   .stat .hint b{color:var(--green-deep);font-weight:700}
   .progress{height:8px;border:1.5px solid var(--ink);background:var(--beige-2);margin-top:10px}
   .progress i{display:block;height:100%;background:var(--green);border-right:1.5px solid var(--ink);transition:width .4s}
   .progress i[style*="width: 0%"]{border-right:none}
-  .spark{display:flex;align-items:flex-end;gap:3px;height:36px;margin-top:8px}
+  .spark{display:flex;align-items:flex-end;gap:3px;height:34px;margin-top:8px}
   .spark i{flex:1;background:var(--beige-2);border:1.5px solid var(--ink);min-height:4px;transition:height .3s}
   .spark i.hot{background:var(--lime)}
 
-  /* ---------- split ---------- */
+  /* ---------- kanban ---------- */
+  .kanban{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(238px,1fr);gap:14px;overflow-x:auto;
+    align-items:start;padding-bottom:10px}
+  .kcol{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);min-width:0}
+  .kcol.over{background:var(--lime);outline:2px dashed var(--ink);outline-offset:-7px}
+  .khead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:2px solid var(--ink);
+    font-family:var(--mono);font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.07em}
+  .khead .n{margin-left:auto;font-size:10px;background:var(--beige-2);border:1.5px solid var(--ink);padding:0 6px;
+    font-variant-numeric:tabular-nums}
+  .kcards{display:flex;flex-direction:column;gap:10px;padding:10px;min-height:56px;max-height:calc(100vh - 320px);overflow-y:auto}
+  .kcard{background:var(--beige-2);border:2px solid var(--ink);padding:9px 11px 10px;cursor:pointer;transition:transform .08s,box-shadow .08s}
+  .kcard:hover{transform:translate(-2px,-2px);box-shadow:3px 3px 0 var(--ink)}
+  .kcard.sel{background:var(--lime)}
+  .kcard.ghost{opacity:.35}
+  .krow1{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+  .kcard .ttl{white-space:normal;font-size:13px;font-weight:600;line-height:1.35}
+  .kfoot{display:flex;gap:7px;align-items:center;margin-top:8px;flex-wrap:wrap}
+  .kfoot .who{transform:scale(.95);transform-origin:left center}
+  .kempty{padding:14px 12px;text-align:center;color:var(--ink-faint);font-family:var(--mono);font-size:11px}
+
+  /* review pips: one square per pipeline lane on the parent card */
+  .pips{display:inline-flex;gap:3px;align-items:center;padding:3px 6px;border:1.5px solid var(--ink);background:var(--beige)}
+  .pips .plbl{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;color:var(--ink-soft);margin-right:2px}
+  .pip{width:9px;height:9px;border:1.5px solid var(--ink);background:var(--beige-2)}
+  .pip.p-run{background:var(--lime)}
+  .pip.p-done{background:var(--green)}
+  .pip.p-blocked{background:var(--red)}
+  .pip.p-cancelled{background:var(--ink-faint)}
+
+  /* ---------- content box (list / feedback / activity / lane) ---------- */
   .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:20px;align-items:start}
   .content{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);min-width:0}
-
-  .tabs{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:2px solid var(--ink)}
-  .tab{font-family:var(--mono);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
-    padding:6px 12px;border:2px solid transparent;color:var(--ink-soft);transition:.1s}
-  .tab:hover{border-color:var(--ink);color:var(--ink)}
-  .tab.on{background:var(--ink);color:var(--lime);border-color:var(--ink)}
-  .tab .n{font-size:10px;margin-left:6px;opacity:.75}
+  .viewbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:2px solid var(--ink)}
+  .viewbar .vtitle{font-family:var(--mono);font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+  .viewbar .vn{font-family:var(--mono);font-size:10px;color:var(--ink-soft);font-weight:700}
   .filters{margin-left:auto;display:flex;border:2px solid var(--ink)}
   .seg{font-family:var(--mono);font-size:11px;font-weight:700;text-transform:uppercase;padding:4px 12px;
     color:var(--ink-soft);border-right:2px solid var(--ink)}
@@ -98,7 +143,7 @@
   .seg.on{background:var(--lime);color:var(--ink)}
 
   /* ---------- rows ---------- */
-  .list{min-height:340px}
+  .list{min-height:300px}
   .trow{display:grid;grid-template-columns:26px 76px minmax(0,1fr) auto;gap:10px;align-items:center;
     padding:11px 16px 11px 10px;border-bottom:1.5px solid var(--hair);cursor:pointer;transition:background .08s}
   .trow:hover{background:var(--beige-2)}
@@ -147,6 +192,10 @@
   .typ-design{color:var(--green-deep);border-color:var(--green-deep);background:var(--green-pale)}
   .typ-idea{color:var(--ink);border-color:var(--ink);background:var(--lime)}
   .typ-approval{color:#fff;border-color:var(--ink);background:var(--green)}
+  .typ-feature{color:var(--ink);border-color:var(--ink);background:var(--lime)}
+  .typ-chore{color:var(--ink-soft);border-color:var(--ink-soft);background:var(--beige-2)}
+  .typ-review{color:var(--green-deep);border-color:var(--green-deep);background:var(--green-pale)}
+  .typ-regression{color:var(--red);border-color:var(--red);background:var(--red-pale)}
 
   /* ---------- activity ---------- */
   .evgroup{padding:16px 18px 6px;font-family:var(--mono);color:var(--ink-soft);font-size:10.5px;font-weight:700;
@@ -164,6 +213,10 @@
   /* ---------- drawer ---------- */
   .drawer{position:sticky;top:78px;background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);
     max-height:calc(100vh - 100px);display:flex;flex-direction:column;overflow:hidden}
+  /* board view: kanban takes the full width, the drawer floats over it */
+  body[data-view=board] .drawer{position:fixed;right:20px;top:74px;width:min(430px,92vw);z-index:45;display:none;
+    max-height:calc(100vh - 96px);box-shadow:6px 6px 0 var(--ink)}
+  body[data-view=board] .drawer.open{display:flex}
   .dhead{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:2px solid var(--ink);background:var(--beige-2)}
   .dhead .grow{flex:1}
   .iconbtn{width:26px;height:26px;display:grid;place-items:center;color:var(--ink);border:2px solid var(--ink);
@@ -207,22 +260,38 @@
   .empty{padding:52px 24px;text-align:center;color:var(--ink-soft);font-family:var(--mono);font-size:12.5px}
   .empty b{color:var(--ink)}
 
+  .toast{position:fixed;bottom:20px;left:50%;transform:translate(-50%,80px);background:var(--ink);color:var(--lime);
+    font-family:var(--mono);font-size:12px;font-weight:700;padding:11px 18px;border:2px solid var(--ink);
+    box-shadow:4px 4px 0 rgba(28,28,28,.35);z-index:70;transition:transform .18s;max-width:min(560px,90vw)}
+  .toast.show{transform:translate(-50%,0)}
+
   @media (max-width:1080px){
+    body{grid-template-columns:1fr}
+    .side{position:static;height:auto;flex-direction:row;align-items:center;border-right:none;border-bottom:2px solid var(--ink);overflow-x:auto}
+    .brand{border-bottom:none;flex:none}
+    .snav{flex-direction:row;padding:0 8px;align-items:center;overflow:visible}
+    .shead,.speople,.sfoot{display:none}
+    .sitem .n{margin-left:6px}
     .split{grid-template-columns:1fr}
-    .drawer{position:fixed;inset:auto 0 0 0;top:auto;max-height:76vh;z-index:40;box-shadow:0 -4px 0 var(--ink);
-      transform:translateY(105%);transition:transform .22s ease}
-    .drawer.open{transform:none}
+    .drawer,body[data-view=board] .drawer{position:fixed;inset:auto 0 0 0;top:auto;right:auto;width:auto;max-height:76vh;z-index:40;
+      box-shadow:0 -4px 0 var(--ink);transform:translateY(105%);transition:transform .22s ease;display:flex}
+    .drawer.open,body[data-view=board] .drawer.open{transform:none}
     .scrim{position:fixed;inset:0;background:rgba(28,28,28,.45);z-index:35;opacity:0;pointer-events:none;transition:.2s}
     .scrim.on{opacity:1;pointer-events:auto}
   }
   @media (min-width:1081px){ .scrim{display:none} }
 </style>
 </head>
-<body>
+<body data-view="board">
+<aside class="side">
+  <div class="brand"><span class="dot">D</span>DARBAR</div>
+  <nav class="snav" id="snav"></nav>
+  <div class="sfoot"><span class="live" id="livedot">live</span></div>
+</aside>
+
+<main>
 <header class="top">
-  <div class="brand"><span class="dot">H</span>DARBAR <span class="crumb">/</span>
-    <span id="pname">…</span> <span class="chip" id="pprefix"></span> <span class="live" id="livedot">live</span>
-  </div>
+  <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span></div>
   <div class="searchwrap">
     <label class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="q" placeholder="search tasks, feedback, ids…" autocomplete="off">
@@ -235,33 +304,43 @@
 <div class="page">
   <div class="pagehead"><h1 id="ptitle">…</h1><span class="sub" id="psub"></span></div>
   <section class="stats" id="stats"></section>
-  <div class="split">
+
+  <section class="kanban" id="kanban" hidden></section>
+
+  <div class="split" id="split">
     <section class="content">
-      <nav class="tabs" id="tabs"></nav>
+      <div class="viewbar" id="viewbar"></div>
       <div class="list" id="list"></div>
     </section>
-    <aside class="drawer" id="drawer"></aside>
+    <aside class="drawer" id="drawer" hidden></aside>
   </div>
+  <!-- board view reuses the same drawer node, floated -->
 </div>
+</main>
 <div class="scrim" id="scrim"></div>
+<div class="toast" id="toast"></div>
 
 <script>
 const capId = location.pathname.split('/').pop();
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+const KANBAN_COLS = ['backlog','todo','in_progress','in_review','qa','blocked','done'];
+
 const state = {
   data: null,
-  tab: 'tasks',            // tasks | feedback | activity
+  view: 'board',           // board | list | feedback | activity | lane
+  lane: null,              // active lane key when view === 'lane'
   fbFilter: 'open',        // open | all | closed
   taskFilter: 'all',       // all | active | done
   q: '',
   sel: null,               // {kind:'task'|'fb', id: shortId}
   stack: [],               // drawer back stack of sel objects
   collapsed: new Set(),    // task shortIds with hidden children
+  canWrite: null,          // null = unknown; probed once. Tunnel viewers get 403 on writes.
 };
 
-const initials = n => n.split(/\s+/).map(w=>w[0]).join('').slice(0,2).toUpperCase();
+const initials = n => n.split(/[\s-]+/).map(w=>w[0]).join('').slice(0,2).toUpperCase();
 const relTime = iso => {
   const s = (Date.now() - new Date(iso).getTime())/1000;
   if (s<60) return 'just now';
@@ -272,16 +351,25 @@ const relTime = iso => {
 };
 const nice = s => String(s||'').replace(/_/g,' ');
 const safeUrl = a => /^(https?:\/\/|\/)/i.test(String(a||'')); // block javascript:/data: schemes
+let toastT;
+function toast(msg){
+  const el=$('toast'); el.textContent=msg; el.classList.add('show');
+  clearTimeout(toastT); toastT=setTimeout(()=>el.classList.remove('show'), 3200);
+}
 
 // ---------- data helpers ----------
 const tasks = () => state.data?.tasks ?? [];
 const fbs = () => state.data?.feedback ?? [];
+const pipeline = () => state.data?.project?.pipeline ?? null;
 const byShort = id => tasks().find(t=>t.shortId===id);
 const fbByShort = id => fbs().find(f=>f.shortId===id);
 const childrenOf = t => tasks().filter(x=>x.parentTaskId===t._id);
+const reviewKidsOf = t => childrenOf(t).filter(k=>k.type==='review');
 const fbForTask = t => fbs().filter(f=>f.taskId===t._id);
 const openFb = f => !['resolved','rejected'].includes(f.status);
+const isClosed = t => ['done','cancelled'].includes(t.status);
 const eventsForTask = t => { const re = new RegExp('\\b'+t.shortId+'\\b'); return (state.data?.events??[]).filter(e=>e.taskId===t._id || re.test(e.text||'')); };
+const pipCls = s => s==='in_progress'||s==='in_review'||s==='qa' ? 'p-run' : s==='done' ? 'p-done' : s==='blocked' ? 'p-blocked' : s==='cancelled' ? 'p-cancelled' : '';
 
 // ---------- rendering ----------
 function render(){
@@ -291,21 +379,58 @@ function render(){
   $('pprefix').textContent = d.project.prefix;
   $('ptitle').textContent = d.project.name;
   $('psub').textContent = (d.project.repos||[]).join(' · ');
-  renderPeople(); renderStats(); renderTabs(); renderList(); renderDrawer();
+  document.body.dataset.view = state.view;
+  renderSide(); renderPeople(); renderStats(); renderContent(); renderDrawer();
+}
+
+const ICONS = {
+  board: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="5" height="16"/><rect x="10" y="4" width="5" height="10"/><rect x="17" y="4" width="4" height="13"/></svg>',
+  list: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>',
+  feedback: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.6 8.6 0 0 1-3.5-.7L3 21l1.8-4.4a8.4 8.4 0 1 1 16.2-5.1z"/></svg>',
+  activity: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>',
+  lane: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m9 11 3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>',
+};
+
+function renderSide(){
+  const pendFb = fbs().filter(f=>['pending','needs_clarification'].includes(f.status)).length;
+  const openTasks = tasks().filter(t=>!isClosed(t)&&t.type!=='review').length;
+  const views = [
+    {id:'board', label:'Board', n: openTasks, icon:'board'},
+    {id:'list', label:'List', n: tasks().length, icon:'list'},
+    {id:'feedback', label:'Feedback', n: pendFb, icon:'feedback', warn: pendFb>0},
+    {id:'activity', label:'Activity', n: null, icon:'activity'},
+  ];
+  let html = '<div class="shead">views</div>' + views.map(v =>
+    `<button class="sitem ${state.view===v.id?'on':''}" data-view-btn="${v.id}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
+  const lanes = pipeline()?.reviews ?? [];
+  if (lanes.length){
+    html += '<div class="shead">review lanes</div>' + lanes.map(l => {
+      const open = tasks().filter(t=>t.type==='review'&&t.lane===l.lane&&!isClosed(t)).length;
+      return `<button class="sitem ${state.view==='lane'&&state.lane===l.lane?'on':''}" data-lane-btn="${esc(l.lane)}">${ICONS.lane}${esc(l.label)}<span class="n ${open?'':'zero'}">${open}</span></button>`;
+    }).join('');
+  }
+  const ppl = state.data.project.stakeholders||[];
+  const agents = [...new Set(tasks().filter(t=>t.assigneeType==='agent'&&t.assignee).map(t=>t.assignee))];
+  html += '<div class="shead">people</div><div class="speople">'
+    + ppl.map(p=>`<span class="ava" title="${esc(p.name)} · ${esc(p.role||'stakeholder')}">${esc(initials(p.name))}</span>`).join('')
+    + agents.map(a=>`<span class="ava" title="${esc(a)} · agent" style="background:var(--ink);color:var(--lime)">${esc(initials(a))}</span>`).join('')
+    + '</div>';
+  $('snav').innerHTML = html;
 }
 
 function renderPeople(){
   const ppl = state.data.project.stakeholders||[];
-  const agents = [...new Set(tasks().filter(t=>t.assigneeType==='agent'&&t.assignee).map(t=>t.assignee))];
   $('people').innerHTML = ppl.map(p=>
-    `<span class="ava" title="${esc(p.name)} · ${esc(p.role||'stakeholder')}">${esc(initials(p.name))}</span>`).join('')
-    + (agents.length?`<span class="ava" title="${agents.length} agent${agents.length>1?'s':''}: ${esc(agents.join(', '))}" style="background:var(--ink);color:var(--lime)">AI</span>`:'');
+    `<span class="ava" title="${esc(p.name)}">${esc(initials(p.name))}</span>`).join('');
 }
 
 function renderStats(){
-  const ts = tasks(); const done = ts.filter(t=>t.status==='done').length;
-  const open = fbs().filter(openFb).length;
+  const ts = tasks().filter(t=>t.type!=='review');
+  const done = ts.filter(t=>t.status==='done').length;
+  const reviews = tasks().filter(t=>t.type==='review');
+  const openRev = reviews.filter(t=>!isClosed(t)).length;
   const pend = fbs().filter(f=>['pending','needs_clarification'].includes(f.status)).length;
+  const open = fbs().filter(openFb).length;
   const humans = new Set(fbs().filter(f=>f.authorType==='human').map(f=>f.author));
   const agents = new Set(fbs().filter(f=>f.authorType==='agent').map(f=>f.author));
   const days=[...Array(7)].map((_,i)=>{const d=new Date();d.setDate(d.getDate()-(6-i));return d.toDateString();});
@@ -316,33 +441,51 @@ function renderStats(){
       <div class="progress"><i style="width:${ts.length?Math.round(done/ts.length*100):0}%"></i></div></div>
     <div class="stat"><div class="lbl">Feedback inbox</div><div class="val">${pend}</div>
       <div class="hint">${pend? 'waiting for the orchestrator' : '<b>clear</b>, nothing waiting'}</div></div>
-    <div class="stat"><div class="lbl">Open threads</div><div class="val">${open}</div>
-      <div class="hint">${fbs().length-open} closed, all replied to</div></div>
+    <div class="stat"><div class="lbl">Reviews in flight</div><div class="val">${openRev}<span class="of">${reviews.length?` / ${reviews.length}`:''}</span></div>
+      <div class="hint">${pipeline()?.reviews?.length ? (openRev ? 'lanes working' : '<b>clear</b>, no open lanes') : 'no pipeline configured'}</div></div>
     <div class="stat"><div class="lbl">Activity · 7 days</div>
       <div class="spark">${per.map((n,i)=>`<i class="${i===6?'hot':''}" style="height:${Math.max(12,n/mx*100)}%" title="${days[i].slice(0,10)}: ${n} events"></i>`).join('')}</div>
       <div class="hint">${per[6]} today · ${humans.size} human${humans.size===1?'':'s'}, ${agents.size} agent${agents.size===1?'':'s'} active</div></div>`;
 }
 
-function renderTabs(){
-  const open = fbs().filter(openFb).length;
-  const tabsDef = [
-    {id:'tasks', label:'Tasks', n: tasks().length},
-    {id:'feedback', label:'Feedback', n: open||fbs().length},
-    {id:'activity', label:'Activity', n: null},
-  ];
-  let seg = '';
-  if (state.tab==='feedback')
-    seg = `<div class="filters">${['open','all','closed'].map(f=>`<button class="seg ${state.fbFilter===f?'on':''}" data-fbf="${f}">${f}</button>`).join('')}</div>`;
-  if (state.tab==='tasks')
-    seg = `<div class="filters">${['all','active','done'].map(f=>`<button class="seg ${state.taskFilter===f?'on':''}" data-tf="${f}">${f}</button>`).join('')}</div>`;
-  $('tabs').innerHTML = tabsDef.map(t=>
-    `<button class="tab ${state.tab===t.id?'on':''}" data-tab="${t.id}">${t.label}${t.n!==null?`<span class="n">${t.n}</span>`:''}</button>`).join('') + seg;
-}
-
 const matches = (txt) => !state.q || txt.toLowerCase().includes(state.q);
 
+// ---------- kanban ----------
+function cardHtml(t){
+  const kids = reviewKidsOf(t);
+  const fb = fbForTask(t); const fbOpen = fb.filter(openFb).length;
+  const parent = t.parentTaskId ? tasks().find(x=>x._id===t.parentTaskId) : null;
+  const sel = state.sel?.kind==='task' && state.sel.id===t.shortId;
+  return `<div class="kcard ${sel?'sel':''}" draggable="true" data-drag="${esc(t.shortId)}" data-task="${esc(t.shortId)}">
+    <div class="krow1"><span class="id">${esc(t.shortId)}</span>
+      <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
+      ${parent?`<span class="id" title="subtask of ${esc(parent.shortId)}">└ ${esc(parent.shortId)}</span>`:''}
+    </div>
+    <div class="ttl">${esc(t.title)}</div>
+    <div class="kfoot">
+      ${kids.length?`<span class="pips" title="${kids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · ')}"><span class="plbl">REV</span>${kids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
+      ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">${ICONS.feedback}${fbOpen||fb.length}</span>`:''}
+      ${t.blocker?`<span class="typ" style="color:var(--red);border-color:var(--red);background:var(--red-pale)" title="${esc(t.blocker)}">BLK</span>`:''}
+      <span style="flex:1"></span>
+      ${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:''}
+    </div></div>`;
+}
+
+function renderKanban(){
+  const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled' && matches(t.title+' '+t.shortId+' '+(t.assignee||'')));
+  $('kanban').innerHTML = KANBAN_COLS.map(col=>{
+    const cards = visible.filter(t=>t.status===col);
+    return `<div class="kcol" data-col="${col}">
+      <div class="khead">${nice(col)}<span class="n">${cards.length}</span></div>
+      <div class="kcards" data-col="${col}">${cards.map(cardHtml).join('') || `<div class="kempty">—</div>`}</div>
+    </div>`;
+  }).join('');
+}
+
+// ---------- content (list / feedback / activity / lane) ----------
 function taskRowHtml(t, isSub){
   const kids = childrenOf(t);
+  const revKids = reviewKidsOf(t);
   const fb = fbForTask(t); const fbOpen = fb.filter(openFb).length;
   const sel = state.sel?.kind==='task' && state.sel.id===t.shortId;
   const caret = kids.length
@@ -354,18 +497,27 @@ function taskRowHtml(t, isSub){
     <span class="id">${esc(t.shortId)}</span>
     <span class="col"><div class="ttl">${esc(t.title)}</div></span>
     <span class="rmeta">
-      ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.6 8.6 0 0 1-3.5-.7L3 21l1.8-4.4a8.4 8.4 0 1 1 16.2-5.1z"/></svg>${fbOpen||fb.length}</span>`:''}
+      ${revKids.length?`<span class="pips" title="${revKids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · ')}"><span class="plbl">REV</span>${revKids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
+      ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">${ICONS.feedback}${fbOpen||fb.length}</span>`:''}
+      ${t.type&&t.type!=='feature'?`<span class="typ typ-${esc(t.type)}">${esc(t.type)}</span>`:''}
       ${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:''}
       <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span>
     </span></div>`;
 }
 
-function renderList(){
-  const el = $('list');
-  if (state.tab==='tasks'){
+function renderContent(){
+  const board = state.view==='board';
+  $('kanban').hidden = !board;
+  $('split').style.display = board ? 'none' : '';
+  $('drawer').hidden = false;
+  if (board){ renderKanban(); return; }
+
+  const vb = $('viewbar'); const el = $('list');
+  if (state.view==='list'){
+    vb.innerHTML = `<span class="vtitle">All tasks</span><span class="vn">${tasks().length}</span>
+      <div class="filters">${['all','active','done'].map(f=>`<button class="seg ${state.taskFilter===f?'on':''}" data-tf="${f}">${f}</button>`).join('')}</div>`;
     let roots = tasks().filter(t=>!t.parentTaskId);
-    if (state.taskFilter==='active') roots = roots.filter(t=>!['done','cancelled'].includes(t.status)||childrenOf(t).some(k=>!['done','cancelled'].includes(k.status)));
+    if (state.taskFilter==='active') roots = roots.filter(t=>!isClosed(t)||childrenOf(t).some(k=>!isClosed(k)));
     if (state.taskFilter==='done') roots = roots.filter(t=>t.status==='done');
     const rows = [];
     for (const t of roots){
@@ -377,11 +529,21 @@ function renderList(){
     }
     el.innerHTML = rows.join('') || `<div class="empty">${state.q?`nothing matches “<b>${esc(state.q)}</b>”`:'no tasks yet. the orchestrator will seed them'}</div>`;
   }
-  else if (state.tab==='feedback'){
+  else if (state.view==='lane'){
+    const lanes = pipeline()?.reviews ?? [];
+    const lane = lanes.find(l=>l.lane===state.lane);
+    const list = tasks().filter(t=>t.type==='review'&&t.lane===state.lane&&matches(t.title+' '+t.shortId));
+    const openN = list.filter(t=>!isClosed(t)).length;
+    vb.innerHTML = `<span class="vtitle">${esc(lane?.label ?? state.lane)} lane</span><span class="vn">${openN} open · manager ${esc(lane?.manager ?? '?')}</span>`;
+    el.innerHTML = list.map(t=>taskRowHtml(t,false)).join('') || '<div class="empty">no reviews spawned in this lane yet</div>';
+  }
+  else if (state.view==='feedback'){
     let list = fbs();
     if (state.fbFilter==='open') list = list.filter(openFb);
     if (state.fbFilter==='closed') list = list.filter(f=>!openFb(f));
     list = list.filter(f=>matches([f.body,f.shortId,f.author,f.taskShortId].join(' ')));
+    vb.innerHTML = `<span class="vtitle">Feedback</span><span class="vn">${list.length}</span>
+      <div class="filters">${['open','all','closed'].map(f=>`<button class="seg ${state.fbFilter===f?'on':''}" data-fbf="${f}">${f}</button>`).join('')}</div>`;
     el.innerHTML = list.map(f=>{
       const sel = state.sel?.kind==='fb' && state.sel.id===f.shortId;
       return `<div class="frow ${sel?'sel':''}" data-fb="${esc(f.shortId)}">
@@ -397,6 +559,7 @@ function renderList(){
       </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}</div>`;
   }
   else {
+    vb.innerHTML = `<span class="vtitle">Activity</span>`;
     const evs = (state.data.events||[]).filter(e=>matches(e.text));
     const groups = {};
     for (const e of evs){
@@ -436,23 +599,32 @@ function renderDrawer(){
   if (state.sel.kind==='task'){
     const t = byShort(state.sel.id); if(!t){ state.sel=null; return renderDrawer(); }
     const kids = childrenOf(t), fb = fbForTask(t), parent = t.parentTaskId ? tasks().find(x=>x._id===t.parentTaskId) : null;
+    const revKids = reviewKidsOf(t);
     const evs = eventsForTask(t).slice(0,8);
+    const laneInfo = t.type==='review' ? (pipeline()?.reviews??[]).find(l=>l.lane===t.lane) : null;
     dr.innerHTML = `
-      <div class="dhead">${backBtn}<span class="id">${esc(t.shortId)}</span><span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span><span class="grow"></span>${closeBtn}</div>
+      <div class="dhead">${backBtn}<span class="id">${esc(t.shortId)}</span>
+        <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
+        <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
-        ${parent?`<div class="note">subtask of <a href="#" data-go-task="${esc(parent.shortId)}">${esc(parent.shortId)} · ${esc(parent.title)}</a></div>`:''}
+        ${parent?`<div class="note">${t.type==='review'?'review lane of':'subtask of'} <a href="#" data-go-task="${esc(parent.shortId)}">${esc(parent.shortId)} · ${esc(parent.title)}</a></div>`:''}
         <div class="dtitle">${esc(t.title)}</div>
         ${t.description?`<p style="color:var(--ink-soft);margin-top:6px">${esc(t.description)}</p>`:''}
         <div class="dgrid">
           <span class="k">Assignee</span><span>${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:'<span style="color:var(--ink-faint)">unassigned</span>'}</span>
+          ${t.lane?`<span class="k">Lane</span><span class="id">${esc(t.lane)}${laneInfo?` · manager ${esc(laneInfo.manager)}`:''}</span>`:''}
           ${t.origin?`<span class="k">Origin</span><span>${esc(t.origin)}</span>`:''}
           ${t.blocker?`<span class="k">Blocked by</span><span style="color:var(--red);font-weight:600">${esc(t.blocker)}</span>`:''}
           <span class="k">Created</span><span title="${new Date(t.createdAt).toLocaleString('en-GB')}">${relTime(t.createdAt)}</span>
           <span class="k">Updated</span><span title="${new Date(t.updatedAt).toLocaleString('en-GB')}">${relTime(t.updatedAt)}</span>
         </div>
         ${t.notes?`<div class="dsec"><h3>Notes</h3><div class="quote">${esc(t.notes)}</div></div>`:''}
-        ${kids.length?`<div class="dsec"><h3>Subtasks · ${kids.filter(k=>k.status==='done').length}/${kids.length} done</h3>
-          <div class="mini">${kids.map(k=>`<div class="trow" data-task="${esc(k.shortId)}"><span></span><span class="id">${esc(k.shortId)}</span>
+        ${revKids.length?`<div class="dsec"><h3>Review lanes · ${revKids.filter(isClosed).length}/${revKids.length} closed</h3>
+          <div class="mini">${revKids.map(k=>`<div class="trow" data-task="${esc(k.shortId)}"><span></span><span class="id">${esc(k.shortId)}</span>
+            <span class="col"><div class="ttl">${esc(k.title)}</div></span><span class="rmeta">${k.assignee?`<span class="who agent"><span class="a">${esc(initials(k.assignee))}</span>${esc(k.assignee)}</span>`:''}<span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></span></div>`).join('')}</div>
+          ${pipeline()?.autoAdvance!==false?'<div class="note">auto-advance on: this task moves out of in review when the last lane closes</div>':'<div class="note">auto-advance off: needs an explicit push once lanes close</div>'}</div>`:''}
+        ${kids.filter(k=>k.type!=='review').length?`<div class="dsec"><h3>Subtasks · ${kids.filter(k=>k.type!=='review'&&k.status==='done').length}/${kids.filter(k=>k.type!=='review').length} done</h3>
+          <div class="mini">${kids.filter(k=>k.type!=='review').map(k=>`<div class="trow" data-task="${esc(k.shortId)}"><span></span><span class="id">${esc(k.shortId)}</span>
             <span class="col"><div class="ttl">${esc(k.title)}</div></span><span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></div>`).join('')}</div></div>`:''}
         <div class="dsec"><h3>Feedback on this task · ${fb.filter(openFb).length} open</h3>
           ${fb.length?`<div class="mini">${fb.map(f=>`<div class="frow" data-fb="${esc(f.shortId)}"><span class="id">${esc(f.shortId)}</span>
@@ -500,12 +672,12 @@ function select(kind, id, push=true){
   state.sel = {kind, id};
   if (push) state.stack.push(state.sel);
   history.replaceState(null,'',`#/${kind==='task'?'t':'f'}/${id}`);
-  renderList(); renderDrawer();
+  renderContent(); renderDrawer();
 }
 function clearSel(){
   state.sel=null; state.stack=[];
   history.replaceState(null,'',location.pathname);
-  renderList(); renderDrawer();
+  renderContent(); renderDrawer();
 }
 function goBack(){
   if (state.stack.length<2) return;
@@ -513,37 +685,85 @@ function goBack(){
   const prev = state.stack[state.stack.length-1];
   state.sel = prev;
   history.replaceState(null,'',`#/${prev.kind==='task'?'t':'f'}/${prev.id}`);
-  renderList(); renderDrawer();
+  renderContent(); renderDrawer();
 }
 function applyHash(){
   const m = location.hash.match(/^#\/(t|f)\/([A-Za-z0-9-]+)$/);
   if (m) { state.sel={kind:m[1]==='t'?'task':'fb', id:m[2].toUpperCase()}; state.stack=[state.sel]; }
 }
+function setView(v, lane=null){
+  state.view = v; state.lane = lane;
+  document.body.dataset.view = v;
+  renderSide(); renderContent(); renderDrawer();
+}
+
+// ---------- drag & drop (status moves; server enforces gates, tunnel viewers get 403) ----------
+let dragging = null;
+document.addEventListener('dragstart', e=>{
+  const c = e.target.closest?.('[data-drag]'); if(!c) return;
+  dragging = c.dataset.drag;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', dragging);
+  requestAnimationFrame(()=>c.classList.add('ghost'));
+});
+document.addEventListener('dragend', e=>{
+  dragging = null;
+  document.querySelectorAll('.kcard.ghost').forEach(x=>x.classList.remove('ghost'));
+  document.querySelectorAll('.kcol.over').forEach(x=>x.classList.remove('over'));
+});
+document.addEventListener('dragover', e=>{
+  const col = e.target.closest?.('.kcol'); if(!col || !dragging) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.kcol.over').forEach(x=>x!==col&&x.classList.remove('over'));
+  col.classList.add('over');
+});
+document.addEventListener('drop', async e=>{
+  const col = e.target.closest?.('.kcol'); if(!col || !dragging) return;
+  e.preventDefault();
+  const id = dragging, status = col.dataset.col;
+  const t = byShort(id);
+  col.classList.remove('over');
+  if (!t || t.status === status) return;
+  try {
+    const r = await fetch(`/api/tasks/${id}`, {
+      method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify({status}),
+    });
+    if (!r.ok){
+      const j = await r.json().catch(()=>({}));
+      toast(j.error || (r.status===403 ? 'this board is read-only through the share link' : `move failed (http ${r.status})`));
+    } else if (status==='in_review' && (pipeline()?.reviews??[]).length){
+      toast(`${id} → in review · spawning ${(pipeline().reviews).length} review lane${pipeline().reviews.length>1?'s':''}`);
+    }
+  } catch { toast('move failed: network'); }
+  load();
+});
 
 // ---------- events ----------
 document.addEventListener('click', e=>{
+  const vbtn = e.target.closest('[data-view-btn]');
+  if (vbtn){ setView(vbtn.dataset.viewBtn); return; }
+  const lbtn = e.target.closest('[data-lane-btn]');
+  if (lbtn){ setView('lane', lbtn.dataset.laneBtn); return; }
   const caret = e.target.closest('[data-caret]');
   if (caret){ e.stopPropagation();
     const id = caret.dataset.caret;
     state.collapsed.has(id) ? state.collapsed.delete(id) : state.collapsed.add(id);
-    renderList(); return; }
+    renderContent(); return; }
   const goTask = e.target.closest('[data-go-task]');
   if (goTask){ e.preventDefault(); select('task', goTask.dataset.goTask); return; }
   const tr = e.target.closest('[data-task]');
   if (tr){ select('task', tr.dataset.task); return; }
   const fr = e.target.closest('[data-fb]');
   if (fr){ select('fb', fr.dataset.fb); return; }
-  const tab = e.target.closest('[data-tab]');
-  if (tab){ state.tab = tab.dataset.tab; renderTabs(); renderList(); return; }
   const fbf = e.target.closest('[data-fbf]');
-  if (fbf){ state.fbFilter = fbf.dataset.fbf; renderTabs(); renderList(); return; }
+  if (fbf){ state.fbFilter = fbf.dataset.fbf; renderContent(); return; }
   const tf = e.target.closest('[data-tf]');
-  if (tf){ state.taskFilter = tf.dataset.tf; renderTabs(); renderList(); return; }
+  if (tf){ state.taskFilter = tf.dataset.tf; renderContent(); return; }
   if (e.target.closest('#dback')) return goBack();
   if (e.target.closest('#dclose')) return clearSel();
   if (e.target.id==='scrim') return clearSel();
 });
-$('q').addEventListener('input', e=>{ state.q = e.target.value.trim().toLowerCase(); renderList(); });
+$('q').addEventListener('input', e=>{ state.q = e.target.value.trim().toLowerCase(); renderContent(); });
 document.addEventListener('keydown', e=>{
   if ((e.metaKey||e.ctrlKey) && e.key==='k'){ e.preventDefault(); $('q').focus(); $('q').select(); }
   if (e.key==='Escape'){ if (document.activeElement===$('q')) { $('q').blur(); } else clearSel(); }
@@ -563,6 +783,8 @@ es.onopen = ()=> $('livedot')?.classList.remove('off');
 es.onerror = ()=> $('livedot')?.classList.add('off');
 
 applyHash();
+if (state.sel) state.view = 'list'; // deep links land on the flat list where the row is visible
+document.body.dataset.view = state.view;
 load();
 </script>
 </body>
