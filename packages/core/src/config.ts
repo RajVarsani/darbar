@@ -8,7 +8,8 @@ const baseUrl = env.BASE_URL || `http://localhost:${port}`;
 export const config = {
   port,
   baseUrl,
-  apiUrl: env.MC_API || `${baseUrl}/api`,
+  // BASE_URL is what LINKS point at (tunnel when sharing); internal API calls stay local
+  apiUrl: env.MC_API || `http://localhost:${port}/api`,
   mongoUri: env.MONGO_URI || 'mongodb://localhost:27017',
   dbName: env.DB_NAME || 'mission_control',
   filesDir: env.FILES_DIR || new URL('../../../data/files/', import.meta.url).pathname,
