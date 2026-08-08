@@ -16,6 +16,9 @@ export const config = {
   slackAppToken: env.SLACK_APP_TOKEN || '',
   slackApiBase: env.SLACK_API_BASE || 'https://slack.com/api',
   bindHost: env.BIND_HOST || '127.0.0.1', // loopback only; a tunnel fronts anything public
+  proxyPort: Number(env.PROXY_PORT || 4800),
+  proxyAdminToken: env.PROXY_ADMIN_TOKEN || '',
+  ngrokDomain: env.NGROK_DOMAIN || '',
   sseKeepaliveMs: 25_000,
   eventsBoardLimit: 50,
   capIdLen: 21,

@@ -5,7 +5,9 @@
   "scripts": {
     "server": "bun --env-file=.env src/server.ts",
     "gabbar": "bun --env-file=.env gabbar/bot.ts",
-    "mcp": "bun --env-file=.env mcp/server.ts"
+    "mcp": "bun --env-file=.env mcp/server.ts",
+    "proxy": "bun --env-file=.env proxy/server.ts",
+    "tunnel": "sh scripts/tunnel.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

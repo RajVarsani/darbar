@@ -20,10 +20,24 @@ fill in the Slack tokens, done. All defaults live in `src/config.ts` and nowhere
 
 ## Run
 ```
-bun run server   # API + boards (binds 127.0.0.1; use a tunnel to share boards)
+bun run server   # API + boards (binds 127.0.0.1)
 bun run gabbar   # needs SLACK_BOT_TOKEN + SLACK_APP_TOKEN (Socket Mode)
 bun run mcp      # stdio MCP server, no extra env needed
+bun run proxy    # dynamic front door on :4800 (routes in data/routes.json)
+bun run tunnel   # ngrok -> proxy, uses NGROK_DOMAIN from .env when set
 ```
+
+## Sharing / the front door
+ngrok fronts ONLY the proxy. The proxy enforces the public surface per route:
+tunneled requests (x-forwarded-host present) must match a route's `public` regex
+list; everything else 403s. Default route -> houston with boards, board API and
+files public. Add more services at runtime:
+```
+curl -X POST localhost:4800/-/route -H "Authorization: Bearer $PROXY_ADMIN_TOKEN"   -d '{"prefix":"fe","target":"http://127.0.0.1:5173","public":["^/"]}'
+```
+`/-/` admin endpoints require the token and are invisible through the tunnel.
+Set BASE_URL to the tunnel domain so board links in Gabbar replies work for
+stakeholders. Free-plan ngrok shows visitors a one-click interstitial.
 Mongo: reuses the saturn-v2 docker container (db `mission_control`, override via DB_NAME).
 
 ## MCP registration (orchestrator sessions)
