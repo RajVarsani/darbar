@@ -85,15 +85,15 @@ async function stakeholderGate(
   let projectRef = input.project;
   if (input.taskRef) {
     const t = JSON.parse(await mc(`/tasks/${encodeURIComponent(input.taskRef)}`)) as { projectId?: unknown };
-    if (!t.projectId) return refuse({ error: `task ${input.taskRef} not found — nothing filed` });
+    if (!t.projectId) return refuse({ error: `task ${input.taskRef} not found, nothing filed` });
     projectRef = String(t.projectId);
   }
-  if (!projectRef) return refuse({ error: 'need taskRef or project — nothing filed' });
+  if (!projectRef) return refuse({ error: 'need taskRef or project, nothing filed' });
   const pctx = JSON.parse(await mc(`/projects/${encodeURIComponent(projectRef)}/context`)) as {
     name?: string; stakeholders?: Array<{ slackUserId?: string }>; error?: string;
   };
   // fail CLOSED: if stakeholders cannot be verified, nothing gets filed
-  if (!pctx.name) return refuse({ error: pctx.error ?? 'could not verify project stakeholders — nothing filed' });
+  if (!pctx.name) return refuse({ error: pctx.error ?? 'could not verify project stakeholders, nothing filed' });
   if ((pctx.stakeholders ?? []).some((s) => s.slackUserId === ctx.senderId)) return { ok: true };
   await notifyOwnerGated(ctx, pctx.name, input.body ?? '');
   return refuse({
@@ -114,6 +114,12 @@ const PERSONALITY = `you are gabbar singh — raj's personal AI agent in the sat
 - if someone asks who made you, say "raj banaya mujhe"
 - be helpful first, sassy second; when in doubt, be useful
 - use slack formatting: *bold*, _italic_, \`code\`
+
+## writing style (hard rules)
+- never use em dashes (—) or spaced hyphens ( - ) as punctuation. plain commas and periods only
+- banned words/phrases: delve, seamless, comprehensive, robust, leverage, "as an ai", "i'd be happy to". say it plainly instead
+- no exclamation-heavy enthusiasm. one "!" max, usually zero
+- short plain sentences, contractions fine, persona stays lowercase hinglish as above
 
 ## your job
 you are the human-facing front door of DARBAR, raj's mission-control system for
@@ -328,14 +334,14 @@ function buildTools(ctx: AgentContext) {
         // code-gated: only the transport-resolved thread mapping, never a model-supplied id
         const tracked = ctx.existingFeedback;
         if (!tracked) {
-          return JSON.stringify({ reopened: false, error: 'no feedback is tracked for this thread — reopen only works as a reply in the original feedback thread' });
+          return JSON.stringify({ reopened: false, error: 'no feedback is tracked for this thread. reopen only works as a reply in the original feedback thread' });
         }
         if (feedbackRef && String(feedbackRef).toUpperCase() !== tracked.shortId.toUpperCase()) {
-          return JSON.stringify({ reopened: false, error: `only ${tracked.shortId} (this thread's feedback) can be reopened here — refusing ${feedbackRef}` });
+          return JSON.stringify({ reopened: false, error: `only ${tracked.shortId} (this thread's feedback) can be reopened here, refusing ${feedbackRef}` });
         }
         // same stakeholder gate as file_feedback, project resolved from the tracked row
         const row = JSON.parse(await mc(`/feedback/${encodeURIComponent(tracked.shortId)}`)) as { projectId?: unknown; body?: unknown };
-        if (!row.projectId) return JSON.stringify({ reopened: false, error: `could not resolve ${tracked.shortId}'s project — nothing reopened` });
+        if (!row.projectId) return JSON.stringify({ reopened: false, error: `could not resolve ${tracked.shortId}'s project, nothing reopened` });
         const gate = await stakeholderGate(ctx, { project: String(row.projectId), body: String(row.body ?? '') });
         if (!gate.ok) return gate.result;
         return mc(`/feedback/${encodeURIComponent(tracked.shortId)}`, 'PATCH', { status: 'pending' });
@@ -454,5 +460,5 @@ export async function runAgent(
     .map((b) => b.text)
     .join('\n')
     .trim();
-  return out || 'hmm, done — but i have nothing to add.';
+  return out || 'hmm, done. nothing to add.';
 }
