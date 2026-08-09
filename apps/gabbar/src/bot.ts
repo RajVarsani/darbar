@@ -107,40 +107,76 @@ async function react(client: any, method: 'add' | 'remove', channel: string, tim
   }
 }
 
-// "Gabbar is thinking..." via the Assistants status API; probed once, auto-clears on reply
-let statusUsable: boolean | null = null;
+// "Gabbar is thinking..." via the Assistants status API; probed once, auto-clears on reply.
+// DM and channel-thread surfaces latch independently — the API may accept one, refuse the other.
+let statusUsable: boolean | null = null; // im
+let channelStatusUnusable = false; // non-im: latched real API error → hourglass fallback
 let statusWarned = false;
-async function setThinking(client: any, channel: string, threadTs: string) {
-  if (statusUsable === false) return;
+async function setThinking(client: any, channel: string, threadTs: string, isIm: boolean): Promise<boolean> {
+  if (isIm ? statusUsable === false : channelStatusUnusable) return false;
   try {
     await client.apiCall('assistant.threads.setStatus', { channel_id: channel, thread_ts: threadTs, status: 'is thinking...' });
-    statusUsable = true;
+    if (isIm) statusUsable = true;
+    return true;
   } catch (e: any) {
     const apiErr = typeof e?.data?.error === 'string' ? e.data.error : null;
     if (!statusWarned) {
       statusWarned = true;
-      console.error(`gabbar: assistant status unavailable (${apiErr ?? e}), reactions only`);
+      console.error(`gabbar: assistant status unavailable on ${isIm ? 'DM' : 'channel'} surface (${apiErr ?? e})`);
     }
-    if (apiErr) statusUsable = false; // real API error latches; network blips stay retryable
+    if (apiErr) { // real API error latches; network blips stay retryable
+      if (isIm) statusUsable = false;
+      else channelStatusUnusable = true;
+    }
+    return false;
   }
 }
-async function clearThinking(client: any, channel: string, threadTs: string) {
-  if (statusUsable === false) return;
+async function clearThinking(client: any, channel: string, threadTs: string, isIm: boolean) {
+  if (isIm ? statusUsable === false : channelStatusUnusable) return;
   try {
     await client.apiCall('assistant.threads.setStatus', { channel_id: channel, thread_ts: threadTs, status: '' });
   } catch {}
 }
 
+// status set is fire-and-forget, but the clear must chain on it or a slow set (rate-limit
+// retries back off for minutes) lands after the clear → permanent stale "is thinking..."
+const pendingStatus = new Map<string, Promise<boolean>>();
+function thinkingOn(client: any, channel: string, threadTs: string, isIm: boolean): Promise<boolean> {
+  const p = setThinking(client, channel, threadTs, isIm);
+  pendingStatus.set(`${channel}:${threadTs}`, p);
+  return p;
+}
+function thinkingOff(client: any, channel: string, threadTs: string, isIm: boolean) {
+  const key = `${channel}:${threadTs}`;
+  const set = pendingStatus.get(key) ?? Promise.resolve(false);
+  pendingStatus.delete(key); // exactly-once chain; a later call falls through to a direct clear
+  void set.catch(() => false).then(() => clearThinking(client, channel, threadTs, isIm));
+}
+
 // eyes add is fire-and-forget, but removal must chain on it or a slow add outruns the remove
 const pendingEyes = new Map<string, Promise<void>>();
+const pendingHourglass = new Map<string, Promise<void>>();
 function eyesOn(client: any, channel: string, ts: string) {
   pendingEyes.set(`${channel}:${ts}`, react(client, 'add', channel, ts, 'eyes'));
 }
+// in-progress fallback where the status API refuses: hourglass chained after the eyes ack
+function hourglassOn(client: any, channel: string, ts: string) {
+  const key = `${channel}:${ts}`;
+  const eyes = pendingEyes.get(key);
+  if (!eyes) return; // final swap already ran — too late for a progress marker
+  pendingHourglass.set(key, eyes.then(() => react(client, 'add', channel, ts, 'hourglass_flowing_sand')));
+}
 function eyesOff(client: any, channel: string, ts: string, finalEmoji?: string) {
   const key = `${channel}:${ts}`;
-  const p = pendingEyes.get(key) ?? Promise.resolve();
+  const eyes = pendingEyes.get(key) ?? Promise.resolve();
+  const hourglass = pendingHourglass.get(key);
   pendingEyes.delete(key);
-  void p.then(() => react(client, 'remove', channel, ts, 'eyes'))
+  pendingHourglass.delete(key);
+  void Promise.all([eyes, hourglass])
+    .then(() => Promise.all([
+      react(client, 'remove', channel, ts, 'eyes'),
+      hourglass ? react(client, 'remove', channel, ts, 'hourglass_flowing_sand') : undefined,
+    ]))
     .then(() => { if (finalEmoji) void react(client, 'add', channel, ts, finalEmoji); });
 }
 
@@ -152,7 +188,9 @@ async function handle({ message, event, client, say }: any) {
   if (!text && !m.files?.length) return;
 
   eyesOn(client, m.channel, m.ts);
-  if (m.channel_type === 'im') void setThinking(client, m.channel, threadTs ?? m.ts);
+  const isIm = m.channel_type === 'im';
+  void thinkingOn(client, m.channel, threadTs ?? m.ts, isIm)
+    .then((shown) => { if (!shown && !isIm) hourglassOn(client, m.channel, m.ts); });
 
   const [name, attachments, history, fb] = await Promise.all([
     senderName(client, m.user),
@@ -164,7 +202,7 @@ async function handle({ message, event, client, say }: any) {
     // files-only message whose downloads all failed: resolve the ack, don't vanish
     await say({ thread_ts: threadTs ?? m.ts, text: "couldn't read those files, try re-uploading or add a line of text" }).catch(() => {});
     eyesOff(client, m.channel, m.ts, 'x');
-    if (m.channel_type === 'im') void clearThinking(client, m.channel, threadTs ?? m.ts);
+    thinkingOff(client, m.channel, threadTs ?? m.ts, isIm);
     return;
   }
 
@@ -183,6 +221,9 @@ async function handle({ message, event, client, say }: any) {
   const reply = await runAgent(ctx, history, text);
   await say({ thread_ts: threadTs ?? m.ts, text: reply });
   eyesOff(client, m.channel, m.ts, 'white_check_mark');
+  // chained clear on every surface: drains pendingStatus, and on DMs (which auto-clear on
+  // reply) it still catches a rate-limit-delayed set landing after the reply
+  thinkingOff(client, m.channel, threadTs ?? m.ts, isIm);
 }
 
 // intake must never die silently: any unexpected failure still answers the human
@@ -194,7 +235,7 @@ async function safeHandle(args: any) {
     const m = args.message ?? args.event;
     if (m?.channel && m?.ts) {
       eyesOff(args.client, m.channel, m.ts, 'x');
-      void clearThinking(args.client, m.channel, m.thread_ts ?? m.ts);
+      thinkingOff(args.client, m.channel, m.thread_ts ?? m.ts, m.channel_type === 'im');
     }
     await args.say?.({ thread_ts: m?.thread_ts ?? m?.ts, text: `kuch toot gaya (${String(e).slice(0, 120)}). try again in a bit.` }).catch(() => {});
   }
