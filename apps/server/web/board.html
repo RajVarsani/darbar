@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Darbar</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23d8ff7c'/%3E%3Cpath d='M6.5 24.5V10.5l5.5 5L16 6.5l4 9 5.5-5v14z' fill='%231c1c1c' stroke='%231c1c1c' stroke-width='3' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='19.5' r='2.5' fill='%23d8ff7c'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231c1c1c'/%3E%3Cpath fill-rule='evenodd' d='M8 7h8.5c5 0 7.5 3.8 7.5 9s-2.5 9-7.5 9H8V7zm4.5 4.5v9H16c2.6 0 3.7-1.7 3.7-4.5s-1.1-4.5-3.7-4.5h-3.5z' fill='%23d8ff7c'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
@@ -243,6 +243,7 @@
     color:var(--ink);border-bottom:2px solid var(--ink);padding-bottom:5px;margin-bottom:10px}
   .mini{border:2px solid var(--ink);background:var(--beige-2)}
   .mini .trow,.mini .frow{padding-left:12px}
+  .mini .trow.flat{grid-template-columns:auto minmax(0,1fr) auto}
   .quote{background:var(--beige-2);border:2px solid var(--ink);padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-weight:500}
   .shots{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
   .shots a img{width:100px;height:70px;object-fit:cover;border:2px solid var(--ink);transition:.1s;display:block}
@@ -321,6 +322,7 @@
     </div>
     <div class="people" id="people"></div>
     <span class="live" id="livedot">live</span>
+    <button class="iconbtn" id="refresh" title="Refresh" type="button"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg></button>
   </div>
   <div class="toprow toprow2">
     <nav class="views" id="views"></nav>
@@ -394,6 +396,11 @@ const FB_LABEL = {pending:'NEEDS TRIAGE', triaged:'TRIAGED', accepted:'PROMOTED'
   needs_clarification:'WAITING ON AUTHOR', resolved:'RESOLVED', rejected:'NOT ACTIONED'};
 const fbLabel = s => FB_LABEL[s] || nice(s);
 const safeUrl = a => /^(https?:\/\/|\/)/i.test(String(a||'')); // block javascript:/data: schemes
+// escape, then turn known shortIds into drawer links (matched ids are [A-Z0-9-] only, safe post-esc)
+const linkifyIds = s => esc(s).replace(/\b([A-Z]+-FB-\d+|[A-Z]+-\d+)\b/g, id =>
+  id.includes('-FB-')
+    ? (fbByShort(id) ? `<a href="#/f/${id}" data-go-fb="${id}">${id}</a>` : id)
+    : (byShort(id) ? `<a href="#/t/${id}" data-go-task="${id}">${id}</a>` : id));
 let toastT;
 function toast(msg){
   const el=$('toast'); el.textContent=msg; el.classList.add('show');
@@ -659,18 +666,20 @@ function renderDrawer(){
         <div class="dgrid">
           <span class="k">Assignee</span><span>${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:'<span style="color:var(--ink-faint)">unassigned</span>'}</span>
           ${t.lane?`<span class="k">Lane</span><span class="id">${esc(t.lane)}${laneInfo?` · manager ${esc(laneInfo.manager)}`:''}</span>`:''}
-          ${t.origin?`<span class="k">Origin</span><span>${esc(t.origin)}</span>`:''}
+          ${t.origin?`<span class="k">Origin</span><span>${linkifyIds(t.origin)}</span>`:''}
           ${t.blocker?`<span class="k">Blocked by</span><span style="color:var(--red);font-weight:600">${esc(t.blocker)}</span>`:''}
           <span class="k">Created</span><span title="${new Date(t.createdAt).toLocaleString('en-GB')}">${relTime(t.createdAt)}</span>
           <span class="k">Updated</span><span title="${new Date(t.updatedAt).toLocaleString('en-GB')}">${relTime(t.updatedAt)}</span>
         </div>
         ${t.notes?`<div class="dsec"><h3>Notes</h3><div class="quote">${esc(t.notes)}</div></div>`:''}
         ${revKids.length?`<div class="dsec"><h3>Review lanes · ${revKids.filter(isClosed).length}/${revKids.length} closed</h3>
-          <div class="mini">${revKids.map(k=>`<div class="trow" data-task="${esc(k.shortId)}"><span></span><span class="id">${esc(k.shortId)}</span>
-            <span class="col"><div class="ttl">${esc(k.title)}</div></span><span class="rmeta">${k.assignee?`<span class="who agent"><span class="a">${esc(initials(k.assignee))}</span>${esc(k.assignee)}</span>`:''}<span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></span></div>`).join('')}</div>
+          <div class="mini">${revKids.map(k=>{
+            const li=(pipeline()?.reviews??[]).find(l=>l.lane===k.lane);
+            return `<div class="trow flat" data-task="${esc(k.shortId)}"><span class="id">${esc(k.shortId)}</span>
+            <span class="col"><div class="ttl">${esc(li?.label ?? k.lane ?? 'review')}</div></span><span class="rmeta">${k.assignee?`<span class="who agent"><span class="a">${esc(initials(k.assignee))}</span>${esc(k.assignee)}</span>`:''}<span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></span></div>`;}).join('')}</div>
           ${pipeline()?.autoAdvance!==false?'<div class="note">auto-advance on: this task moves out of in review when the last lane closes</div>':'<div class="note">auto-advance off: needs an explicit push once lanes close</div>'}</div>`:''}
         ${kids.filter(k=>k.type!=='review').length?`<div class="dsec"><h3>Subtasks · ${kids.filter(k=>k.type!=='review'&&k.status==='done').length}/${kids.filter(k=>k.type!=='review').length} done</h3>
-          <div class="mini">${kids.filter(k=>k.type!=='review').map(k=>`<div class="trow" data-task="${esc(k.shortId)}"><span></span><span class="id">${esc(k.shortId)}</span>
+          <div class="mini">${kids.filter(k=>k.type!=='review').map(k=>`<div class="trow flat" data-task="${esc(k.shortId)}"><span class="id">${esc(k.shortId)}</span>
             <span class="col"><div class="ttl">${esc(k.title)}</div></span><span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></div>`).join('')}</div></div>`:''}
         <div class="dsec"><h3>Feedback on this task · ${fb.filter(openFb).length} open</h3>
           ${fb.length?`<div class="mini">${fb.map(f=>`<div class="frow" data-fb="${esc(f.shortId)}"><span class="id">${esc(f.shortId)}</span>
@@ -765,7 +774,8 @@ function select(kind, id, push=true){
   if (state.sel && state.sel.kind===kind && state.sel.id===id) { renderDrawer(); return; }
   state.sel = {kind, id};
   if (push) state.stack.push(state.sel);
-  history.replaceState(null,'',`#/${kind==='task'?'t':'f'}/${id}`);
+  const hash = `#/${kind==='task'?'t':'f'}/${id}`;
+  if (location.hash !== hash) history.pushState(null,'',hash); // real entries so browser back/forward walk drawers
   renderContent(); renderDrawer();
 }
 function clearSel(){
@@ -775,16 +785,31 @@ function clearSel(){
 }
 function goBack(){
   if (state.stack.length<2) return;
-  state.stack.pop();
-  const prev = state.stack[state.stack.length-1];
-  state.sel = prev;
-  history.replaceState(null,'',`#/${prev.kind==='task'?'t':'f'}/${prev.id}`);
-  renderContent(); renderDrawer();
+  history.back(); // one history model: hashchange pops the stack and renders
 }
-function applyHash(){
+const parseHash = () => {
   const m = location.hash.match(/^#\/(t|f)\/([A-Za-z0-9-]+)$/);
-  if (m) { state.sel={kind:m[1]==='t'?'task':'fb', id:m[2].toUpperCase()}; state.stack=[state.sel]; }
+  return m ? {kind: m[1]==='t'?'task':'fb', id: m[2].toUpperCase()} : null;
+};
+function applyHash(){
+  const t = parseHash();
+  if (t) { state.sel=t; state.stack=[t]; }
 }
+// browser back/forward (and the drawer back button, via history.back) drive the drawer
+window.addEventListener('hashchange', ()=>{
+  const target = parseHash();
+  if (target){
+    const same = state.sel && state.sel.kind===target.kind && state.sel.id===target.id;
+    const prev = state.stack[state.stack.length-2];
+    if (prev && prev.kind===target.kind && prev.id===target.id) state.stack.pop(); // back
+    else if (!same) state.stack.push(target);                                     // forward / new hop
+    state.sel = target;
+    // restore the view under the drawer (mirror palGo)
+    if (target.kind==='fb'){ if (state.view!=='feedback') return setView('feedback'); }
+    else if (state.view==='feedback'||state.view==='activity') return setView('board');
+  } else { state.sel = null; state.stack = []; }
+  renderContent(); renderDrawer();
+});
 function setView(v, lane=null){
   state.view = v; state.lane = lane;
   document.body.dataset.view = v;
@@ -849,6 +874,8 @@ document.addEventListener('click', e=>{
     renderContent(); return; }
   const goTask = e.target.closest('[data-go-task]');
   if (goTask){ e.preventDefault(); select('task', goTask.dataset.goTask); return; }
+  const goFb = e.target.closest('[data-go-fb]');
+  if (goFb){ e.preventDefault(); if (state.view!=='feedback') setView('feedback'); select('fb', goFb.dataset.goFb); return; }
   const tr = e.target.closest('[data-task]');
   if (tr){ select('task', tr.dataset.task); return; }
   const fr = e.target.closest('[data-fb]');
@@ -887,14 +914,15 @@ async function load(){
   state.data = await r.json();
   render();
 }
-let reloadT;
+$('refresh').addEventListener('click', ()=>load());
+let reloadT, esDropped = false;
 const es = new EventSource(`/api/p/${capId}/stream`);
 es.addEventListener('message', ()=>{ clearTimeout(reloadT); reloadT=setTimeout(load, 250); });
-es.onopen = ()=> $('livedot')?.classList.remove('off');
-es.onerror = ()=> $('livedot')?.classList.add('off');
+es.onopen = ()=>{ $('livedot')?.classList.remove('off'); if (esDropped){ esDropped=false; load(); } }; // catch up after a drop
+es.onerror = ()=>{ esDropped=true; $('livedot')?.classList.add('off'); };
 
 applyHash();
-if (state.sel) state.view = 'list'; // deep links land on the flat list where the row is visible
+if (state.sel?.kind==='fb') state.view = 'feedback'; // fb deep links land in context; task links stay on board (drawer overlays)
 document.body.dataset.view = state.view;
 load();
 </script>
