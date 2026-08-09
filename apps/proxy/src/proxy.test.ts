@@ -12,6 +12,8 @@
 // torn down afterwards. The live proxy, its port and the real data/routes.json are never touched.
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdir, rm, symlink, copyFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createServer, type Server as NetServer, type Socket } from 'node:net';
 import type { Subprocess } from 'bun';
 
 const SRC = new URL('./proxy.ts', import.meta.url).pathname;
@@ -21,8 +23,11 @@ const TUNNELED = { 'x-forwarded-host': 'test.ngrok.app' }; // what ngrok sets; t
 
 let proxyPort = 0;
 let upPort = 0;
+let mutePort = 0;
 let proc: Subprocess | null = null;
 let upstream: ReturnType<typeof Bun.serve> | null = null;
+let mute: NetServer | null = null;
+const muteSockets = new Set<Socket>();
 
 // Bound all at once, then released, so two rigs can never be handed the same port.
 function freePorts(n: number): number[] {
@@ -48,8 +53,30 @@ function resolveLikeStaticServer(raw: string): string {
   return `/${out.join('/')}`;
 }
 
+// A WebSocket upstream that completes the handshake by hand and then never reads its socket again:
+// no pong, ever, and no drain. That is the "upstream that ignores pings entirely" case the proxy's
+// budgets name, and it is what makes in-flight bytes accumulate DETERMINISTICALLY — against the Bun
+// upstream above, an automatic pong lands within a millisecond and empties the figure under test.
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+function serveMute(port: number): NetServer {
+  return createServer((sock) => {
+    muteSockets.add(sock);
+    sock.on('error', () => {});
+    sock.on('close', () => muteSockets.delete(sock));
+    const onData = (chunk: Buffer) => {
+      if (!chunk.toString('latin1').startsWith('GET ')) return;
+      const key = /sec-websocket-key:\s*(\S+)/i.exec(chunk.toString('latin1'))?.[1] ?? '';
+      const accept = createHash('sha1').update(key + WS_GUID).digest('base64');
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      sock.off('data', onData);
+      sock.pause(); // from here the receive window fills and the proxy holds what it is handed
+    };
+    sock.on('data', onData);
+  }).listen(port, '127.0.0.1');
+}
+
 beforeAll(async () => {
-  [upPort, proxyPort] = freePorts(2) as [number, number];
+  [upPort, mutePort, proxyPort] = freePorts(3) as [number, number, number];
 
   upstream = Bun.serve({
     port: upPort,
@@ -61,8 +88,13 @@ beforeAll(async () => {
       }
       return new Response(`served ${resolveLikeStaticServer(u.pathname)}`);
     },
-    websocket: { open(ws) { ws.send(`served ${resolveLikeStaticServer((ws.data as { path: string }).path)}`); }, message() {} },
+    // Echoes, so a socket can be shown to be still round-tripping and not merely still open.
+    websocket: {
+      open(ws) { ws.send(`served ${resolveLikeStaticServer((ws.data as { path: string }).path)}`); },
+      message(ws, m) { ws.send(`echo ${typeof m === 'string' ? m.length : m.byteLength}`); },
+    },
   });
+  mute = serveMute(mutePort);
 
   await rm(RIG, { recursive: true, force: true });
   await mkdir(PROXY_DIR, { recursive: true });
@@ -88,6 +120,8 @@ beforeAll(async () => {
 afterAll(async () => {
   proc?.kill();
   upstream?.stop(true);
+  for (const s of muteSockets) s.destroy(); // paused sockets would otherwise outlive the server
+  mute?.close();
   await rm(RIG, { recursive: true, force: true });
 });
 
@@ -178,3 +212,102 @@ test('"/" and "/*" serve every path; "/*$" is exact and stops at a segment', asy
   expect((await get(deep, TUNNELED)).status).toBe(403);
   expect((await get('/pub/top', TUNNELED)).status).toBe(200); // top level only, hence not a catch-all
 });
+
+// ── process-wide ceilings ───────────────────────────────────────────────────────────────────────
+// The per-socket byte budgets predate these tests; what follows covers the two PROCESS-wide ceilings.
+// Measured on this rig with only the per-socket caps in place: 50 sockets each holding 16 MiB, every
+// one of them individually legal and none of them closed, took the proxy from 61 MB to 972 MB RSS.
+// The three tests below need routes of their own, so they write routes.json (it hot-reloads on mtime)
+// rather than depending on the shape beforeAll installed or on the test above it.
+const MAX_CONNECTIONS = 64; // must match WS_MAX_CONNECTIONS in proxy.ts
+
+async function setRoutes(prefixes: Record<string, { target: string; public: string[] }>) {
+  await writeFile(`${RIG}data/routes.json`, JSON.stringify({ default: { target: `http://127.0.0.1:${upPort}`, public: [] }, prefixes }));
+  await Bun.sleep(80); // hot-reloads on mtime, same as setPattern above
+}
+
+// A socket plus the close it eventually gets. The close is half of what is under test: a ceiling has
+// to say what actually happened, and a previous round shipped one that closed healthy upstreams with
+// the reason "upstream cannot keep up", which sent people debugging Vite.
+type Tracked = { ws: WebSocket; closed: { code: number; reason: string } | null; msgs: number };
+async function open(path: string): Promise<Tracked> {
+  const ws = new WebSocket(`ws://127.0.0.1:${proxyPort}${path}`);
+  const t: Tracked = { ws, closed: null, msgs: 0 };
+  // Both listeners are attached BEFORE the handshake settles: the upstream greeting and a close that
+  // races the open would otherwise land in the gap and go uncounted.
+  ws.onmessage = () => { t.msgs++; };
+  ws.addEventListener('close', (e) => { t.closed ??= { code: (e as CloseEvent).code, reason: (e as CloseEvent).reason }; });
+  const ok = await new Promise<boolean>((res) => {
+    ws.onopen = () => res(true);
+    ws.addEventListener('close', () => res(false), { once: true });
+    setTimeout(() => res(false), 4_000);
+  });
+  if (!ok) t.closed ??= { code: 0, reason: 'never opened' };
+  return t;
+}
+const closeAll = (ts: Tracked[]) => { for (const t of ts) { try { t.ws.close(); } catch {} } };
+
+// First of the three, deliberately: it needs every socket slot free, so it runs before the tests that
+// hold dozens open.
+test('at the concurrent-socket cap the newcomer is refused, with a 503 that names the proxy', async () => {
+  await setRoutes({ ok: { target: `http://127.0.0.1:${upPort}`, public: ['/'] } });
+  const held = await Promise.all(Array.from({ length: MAX_CONNECTIONS }, () => open('/ok/hmr')));
+  expect(held.filter((t) => t.closed)).toEqual([]); // the cap is exactly this many, so none refused
+
+  // The refusal is an HTTP answer rather than a 101 that dies a second later, so it is assertable
+  // directly. Only the `upgrade` header decides which branch of the proxy answers.
+  const res = await fetch(`http://127.0.0.1:${proxyPort}/ok/hmr`, { headers: { upgrade: 'websocket' } });
+  const body = await res.text();
+  expect({ status: res.status, body }).toEqual({
+    status: 503,
+    body: `503 · proxy is at its limit of ${MAX_CONNECTIONS} concurrent websockets; a proxy-wide cap, not an upstream fault`,
+  });
+  expect(await upgrades('/ok/hmr')).toBe(false); // and a real client gets no socket either
+
+  // A live counter, not a high-water mark: freeing slots frees the cap.
+  closeAll(held);
+  let recovered = false;
+  for (let i = 0; i < 20 && !recovered; i++) { await Bun.sleep(100); recovered = await upgrades('/ok/hmr'); }
+  expect(recovered).toBe(true);
+}, 30_000);
+
+// The ceiling is worthless if it fires on real traffic. HMR frames are KBs, so this is the shape of
+// every day: a lot of sockets moving very little each.
+test('HMR-scale traffic on many sockets never reaches either ceiling', async () => {
+  await setRoutes({ ok: { target: `http://127.0.0.1:${upPort}`, public: ['/'] } });
+  const socks = await Promise.all(Array.from({ length: 24 }, () => open('/ok/hmr')));
+  const frame = 'x'.repeat(8 * 1024); // 8 KiB, a generous single HMR update
+  for (let round = 0; round < 40; round++) for (const t of socks) t.ws.send(frame);
+  // 24 sockets x 320 KiB = 7.5 MiB in total, which is under HALF what ONE socket may hold in flight.
+  for (let i = 0; i < 40 && !socks.every((t) => t.msgs >= 41); i++) await Bun.sleep(100);
+  expect(socks.filter((t) => t.closed)).toEqual([]);
+  expect(socks.every((t) => t.msgs >= 41)).toBe(true); // greeting + all 40 echoes: still round-tripping
+  closeAll(socks);
+});
+
+test('the process-wide in-flight ceiling sheds the biggest holder, and says what happened', async () => {
+  await setRoutes({ mute: { target: `http://127.0.0.1:${mutePort}`, public: ['/'] } });
+  const CHUNK = new Uint8Array(4 * 1024 * 1024);
+  const thin = await open('/mute/hmr'); // HMR-scale, and therefore never the biggest holder
+  thin.ws.send(new Uint8Array(64 * 1024));
+
+  // Each socket parks 12 MiB, inside its own 16 MiB budget, so nothing here trips the PER-SOCKET cap.
+  // Grown one socket at a time until something is shed rather than sized against the constant, so the
+  // test still means what it says if the budget is retuned.
+  const fat: Tracked[] = [];
+  let shed: { code: number; reason: string } | null = null;
+  for (let i = 0; i < 30 && !shed; i++) {
+    const t = await open('/mute/hmr');
+    fat.push(t);
+    for (let k = 0; k < 3; k++) t.ws.send(CHUNK);
+    await Bun.sleep(200);
+    shed = fat.find((f) => f.closed)?.closed ?? null;
+  }
+  expect(shed).not.toBeNull();
+  expect(shed!.code).toBe(1013); // 1013 "try again later": a temporary condition on OUR side
+  // Names the proxy's own budget and the socket's own share of it, and blames neither end. The 1008
+  // per-socket reason ("no upstream pong") and the 1013 "client cannot keep up" would both be lies.
+  expect(shed!.reason).toMatch(/^proxy-wide \d+ MiB in-flight budget exceeded; this socket held the most \(\d+ MiB\)\. Not an upstream fault\.$/);
+  expect(thin.closed).toBeNull(); // the newcomer crosses the line; the biggest holder pays
+  closeAll([thin, ...fat]);
+}, 30_000); // measured 2.4s; the default 5s is thin margin for 30 sockets x 12 MiB

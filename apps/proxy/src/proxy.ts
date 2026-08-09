@@ -12,7 +12,8 @@
 // WebSockets: upgrade requests take the same route + public policy path, then the
 //   upstream socket is connected BEFORE the client handshake completes and frames are
 //   pumped both ways (fetch() cannot upgrade). This keeps Vite HMR alive through the
-//   tunnel, and both directions are capped in bytes — see the bridge section.
+//   tunnel. Both directions are capped in bytes per socket, and the process as a whole is
+//   capped in total in-flight bytes and in concurrent sockets — see the bridge section.
 // Routes live in data/routes.json (gitignored) and hot-reload on change.
 import { config, compilePublic, matchPathPattern, PATH_PATTERN_FORM } from '@darbar/core';
 import type { PathPattern } from '@darbar/core';
@@ -157,6 +158,37 @@ const WS_MAX_UNACKED = 16 * 1024 * 1024;  // client -> upstream, bytes IN FLIGHT
   // three orders of magnitude below the 1.2 GB this used to reach, but only one turn of burst.
 const WS_PROBE_BYTES = 1024 * 1024;       // ping the upstream after this much unacked traffic
 
+// Every budget above is PER SOCKET, and concurrency multiplies all of them. Measured on an isolated
+// rig: 25 sockets each parking 16 MiB, every one of them individually legal and none of them closed,
+// took the proxy from 62 MB to 585 MB RSS; 50 did 909 MB. That is the per-socket cap working 25 and 50
+// times over rather than a leak, but nothing bounded the PROCESS, and the process is what every share,
+// board and /files sits behind. The two ceilings below bound it: the same floods now peak at 408 MB
+// and 509 MB. What they do NOT do is bend that curve. Peak still grows linearly, about 17 MB per
+// socket; what the change buys is that the line STOPS, because the socket count does. So the process
+// peak is bounded by WS_MAX_CONNECTIONS times max frame size, NOT by WS_MAX_TOTAL_INFLIGHT: 64
+// sockets pushing 16 MiB frames (Bun's default maxPayloadLength, which nothing here overrides)
+// measured about 1.3 GB. WS_MAX_CONNECTIONS is the lever if that figure has to come down.
+const WS_MAX_TOTAL_INFLIGHT = 128 * 1024 * 1024; // bytes in flight summed over every live socket.
+  // 8x the 16 MiB ONE socket may hold, so four or five sockets can each be mid-burst at their own
+  // limit without reaching it, and ~4 orders of magnitude above what HMR moves (KB frames, a handful
+  // of stakeholders' tabs). What it does NOT do, plainly:
+  //  · It is not a memory limit. It counts the bytes WE hold (unacked to the upstream, queued to the
+  //    client, pending before the client opened). Bun materialises each frame in its own buffer before
+  //    message() can count it, so RSS peaks well above the budget and in proportion to FRAME size:
+  //    the same 800 MiB flood peaked at 531 MB in 4 MiB frames and 279 MB in 1 MiB ones. Allocator
+  //    retention keeps RSS up afterwards too.
+  //  · It is not a rate limit. A client may churn any volume through at full speed for as long as it
+  //    likes, provided little of it is in flight at once.
+  //  · It is not protection from denial of service. It buys degraded WebSocket service instead of an
+  //    OOM of the whole process: a sustained flood parks the proxy at the ceiling, and the sheds it
+  //    forces there will eventually take a legitimate socket with them.
+const WS_MAX_CONNECTIONS = 64;            // concurrent proxied upgrades. This is the constant the
+  // process peak actually hangs off, per the paragraph above, and it also bounds what bytes alone
+  // cannot: socket count. Thousands of near-idle sockets stay under any byte budget while still
+  // costing fds and a few KB of fixed state each. Real peak is one HMR socket per open tab per shared
+  // dev server, so single digits, low tens if everyone has everything open; 64 is several times that,
+  // and it also keeps the shed scan below O(64).
+
 type WsData = {
   up: WebSocket;
   target: string;                       // upstream URL — logs only, never sent to a viewer
@@ -165,6 +197,7 @@ type WsData = {
   pendingBytes: number;                 //   exists (microseconds, but a greeting frame fits)
   unacked: number;                      // bytes handed to the upstream since its last pong
   probeBytes: number;                   // unacked at the moment we pinged; 0 = no probe out
+  charged: number;                      // what this socket last contributed to totalInFlight
   dead: boolean;                        // teardown started on either side
 };
 const OPEN = 1;
@@ -177,9 +210,49 @@ const sendable = (c: number) =>
 const sizeOf = (m: unknown): number =>
   typeof m === 'string' ? Buffer.byteLength(m, 'utf8') : ((m as ArrayBufferView | ArrayBuffer | null)?.byteLength ?? 0);
 
+// Every live bridge, and the running sum of what they are holding. The sum is kept incrementally
+// because recomputing it per frame would mean a getBufferedAmount() call per socket per frame: each
+// socket remembers what it last contributed, and only the socket whose event we are handling is
+// re-measured. So an idle socket's contribution can sit stale HIGH (a client-side queue drains with
+// no event of ours to notice), which errs toward shedding early rather than late, 128 MiB away from
+// anything real traffic reaches.
+const live = new Set<WsData>();
+let totalInFlight = 0;
+function recharge(d: WsData) {
+  if (d.dead) return;
+  const cost = d.unacked + d.pendingBytes + (d.client?.getBufferedAmount() ?? 0);
+  totalInFlight += cost - d.charged;
+  d.charged = cost;
+}
+const mib = (n: number) => `${Math.round(n / (1024 * 1024))} MiB`;
+
+// The bytes are already here by the time we notice, so refusing the NEXT upgrade would hand none of
+// them back: relief has to come from a socket that is already holding some. We shed the largest holder
+// rather than the newest arrival, because the largest holder is the one that created the condition —
+// an HMR socket carrying KB frames can never be the maximum while somebody is pushing MB ones, so the
+// newcomer that happened to cross the line is not automatically the one that pays. One socket per
+// crossing; the next frame re-checks, so a single hostile socket cannot cascade into a mass close.
+// Picking the maximum also gives a floor rather than a plausibility argument: crossing 128 MiB across
+// at most 64 sockets forces the largest holder above WS_MAX_TOTAL_INFLIGHT / WS_MAX_CONNECTIONS, so
+// nothing holding 2 MiB or less can ever be the socket shed. Measured: a 3 MiB holder was shed while
+// 63 sockets sitting at exactly 2 MiB survived. HMR moves KB frames, so an HMR socket is safe by that
+// arithmetic and not by luck. Raising the socket cap lowers the floor.
+function shedWorst() {
+  let worst: WsData | null = null;
+  for (const d of live) if (!worst || d.charged > worst.charged) worst = d;
+  if (!worst) return;
+  console.error(`ws shed · proxy over its ${mib(WS_MAX_TOTAL_INFLIGHT)} total in-flight budget across ${live.size} sockets; closing the largest holder (${mib(worst.charged)}, upstream ${worst.target})`);
+  // Says what happened. The budget is the PROXY's and it is the sum across sockets that broke it, so
+  // the reason must not blame this socket's upstream or its client: a previous round shipped a cap
+  // that closed healthy upstreams with "upstream cannot keep up", which sent people debugging Vite.
+  teardown(worst, 1013, `proxy-wide ${mib(WS_MAX_TOTAL_INFLIGHT)} in-flight budget exceeded; this socket held the most (${mib(worst.charged)}). Not an upstream fault.`);
+}
+
 function teardown(d: WsData, code: number, reason: string) {
   if (d.dead) return;
   d.dead = true;
+  if (live.delete(d)) totalInFlight -= d.charged;
+  d.charged = 0;
   d.pending.length = 0;
   try { d.client?.close(sendable(code), reason.slice(0, 123)); } catch {}
   try { if (d.up.readyState <= OPEN) d.up.close(); } catch {}
@@ -191,9 +264,10 @@ async function openUpstream(target: string, headers: Record<string, string>, pro
   let up: WebSocket;
   try { up = new WebSocket(target, { headers, protocols } as any); } catch { return null; }
   up.binaryType = 'arraybuffer';
-  const d: WsData = { up, target, client: null, pending: [], pendingBytes: 0, unacked: 0, probeBytes: 0, dead: false };
+  const d: WsData = { up, target, client: null, pending: [], pendingBytes: 0, unacked: 0, probeBytes: 0, charged: 0, dead: false };
+  live.add(d); // counted from here, not from the 101: a socket stuck in the upstream handshake is real
 
-  up.addEventListener('pong', () => { d.unacked = Math.max(0, d.unacked - d.probeBytes); d.probeBytes = 0; });
+  up.addEventListener('pong', () => { d.unacked = Math.max(0, d.unacked - d.probeBytes); d.probeBytes = 0; recharge(d); });
   up.onmessage = (e) => {
     if (d.dead) return;
     const c = d.client;
@@ -201,12 +275,14 @@ async function openUpstream(target: string, headers: Record<string, string>, pro
       d.pendingBytes += sizeOf(e.data);
       if (d.pendingBytes > WS_MAX_BUFFERED) return teardown(d, 1011, 'upstream over budget before client open');
       d.pending.push(e.data as string | ArrayBuffer);
-      return;
+    } else {
+      // upstream -> client backpressure: a fast upstream with a slow tunneled viewer buffers
+      // exactly like the other direction, so it gets the same budget.
+      if (c.getBufferedAmount() > WS_MAX_BUFFERED) return teardown(d, 1013, 'client cannot keep up');
+      c.send(e.data as any);
     }
-    // upstream -> client backpressure: a fast upstream with a slow tunneled viewer buffers
-    // exactly like the other direction, so it gets the same budget.
-    if (c.getBufferedAmount() > WS_MAX_BUFFERED) return teardown(d, 1013, 'client cannot keep up');
-    c.send(e.data as any);
+    recharge(d);
+    if (totalInFlight > WS_MAX_TOTAL_INFLIGHT) shedWorst();
   };
   up.onclose = (e) => teardown(d, e.code, e.reason || 'upstream closed');
   up.onerror = () => teardown(d, 1011, 'upstream error');
@@ -231,6 +307,7 @@ const websocket: WebSocketHandler<WsData> = {
     for (const m of d.pending) ws.send(m as any);
     d.pending.length = 0;
     d.pendingBytes = 0;
+    recharge(d); // pending moved into the client's queue; re-measure where it landed
   },
   message(ws, msg) {
     const d = ws.data;
@@ -248,7 +325,11 @@ const websocket: WebSocketHandler<WsData> = {
     if (d.unacked > WS_MAX_UNACKED) {
       return teardown(d, 1008, `over the ${WS_MAX_UNACKED >> 20} MiB in-flight budget: bytes sent with no upstream pong`);
     }
-    if (!d.probeBytes && d.unacked > WS_PROBE_BYTES) {
+    // Per-socket first, so a socket that blew its OWN budget dies with its own reason; the
+    // process-wide one only fires on sockets that are each individually within their limit.
+    recharge(d);
+    if (totalInFlight > WS_MAX_TOTAL_INFLIGHT) shedWorst();
+    if (!d.dead && !d.probeBytes && d.unacked > WS_PROBE_BYTES) {
       d.probeBytes = d.unacked;
       try { (d.up as unknown as { ping(): void }).ping(); } catch {}
     }
@@ -283,6 +364,24 @@ async function proxy(req: Request, server: Server<WsData>): Promise<Response | u
 
   // Upgrade takes the same route + public policy above; only the transport differs.
   if ((req.headers.get('upgrade') ?? '').toLowerCase().includes('websocket')) {
+    // At the socket cap we refuse the NEWCOMER rather than shedding an existing session. A newcomer
+    // has invested nothing and gets a reload; shedding would let anyone knocking evict a live HMR or
+    // board socket, which is a cheaper attack than the one being prevented. The cost, accepted, and
+    // nothing bounds it: a squatter that got here first keeps its slot for as long as it sends
+    // anything at all. idleTimeout above is not that bound, since it resets on every frame and so
+    // reclaims ABANDONED sockets only, and the byte ceiling never sees a squatter either. Measured: 64
+    // sockets sending one byte a second held every slot with 1216 bytes in flight in total, and every
+    // legitimate upgrade got a 503 for as long as they stayed. Still the right trade against an OOM of
+    // the one process every share, board and /files sits behind, but it is a real denial of the
+    // WebSocket surface rather than a bounded inconvenience. (The BYTE ceiling makes the opposite call,
+    // and for the opposite reason — see shedWorst.) Slots are held from openUpstream and not from the
+    // 101, so PENDING upgrades occupy the cap too: a burst of upgrades to a wedged dev server can 503
+    // a healthy route for up to WS_CONNECT_MS (8s) while they time out. 503 before any upstream
+    // connect, so a refusal costs nothing and never touches the dev server.
+    if (live.size >= WS_MAX_CONNECTIONS) {
+      console.error(`ws 503 · at the ${WS_MAX_CONNECTIONS}-socket proxy-wide limit; refused an upgrade to ${route.target}${path}`);
+      return new Response(`503 · proxy is at its limit of ${WS_MAX_CONNECTIONS} concurrent websockets; a proxy-wide cap, not an upstream fault`, { status: 503, headers: { 'content-type': 'text/plain', 'retry-after': '5' } });
+    }
     const h: Record<string, string> = {};
     // sec-websocket-* is per-hop handshake state (key/version/extensions) — the
     // upstream client regenerates it; protocols are re-offered explicitly below.
