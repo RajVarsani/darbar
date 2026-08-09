@@ -496,7 +496,8 @@ async function maybeAdvanceParent(parentId: ObjectId) {
     await logEvent(parent.projectId, `${parent.shortId}: all reviews closed — awaiting explicit push out of in_review`, parent._id);
     return;
   }
-  await Tasks.updateOne({ _id: parentId }, { $set: { status: 'done', updatedAt: new Date() } });
+  // dispatchedAt goes with the status change here too: a shipped task has nothing outstanding
+  await Tasks.updateOne({ _id: parentId }, { $set: { status: 'done', dispatchedAt: null, updatedAt: new Date() } });
   await logEvent(parent.projectId, `${parent.shortId} auto-advanced → done (all reviews closed)`, parent._id);
   const shipped = await Tasks.findOne({ _id: parentId });
   if (shipped) await resolvePromotedFeedback(shipped);

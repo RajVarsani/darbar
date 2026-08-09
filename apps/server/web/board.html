@@ -136,6 +136,14 @@
      backlog rail takes only its own width instead of a full column. */
   .kanban{display:grid;grid-template-columns:auto repeat(6,minmax(238px,1fr));gap:14px;overflow-x:auto;
     align-items:start;padding-bottom:10px}
+  /* columns narrow to fit the window first (colMin), so this only scrolls when even the floor width
+     does not fit — a small window, or a search that leaves seven wide columns. When it does, the hint
+     has to be visible: macOS overlay scrollbars vanish, so nothing said Done continued past the right
+     edge. This bar is drawn in the board's own ink and shows while there is somewhere to scroll to. */
+  .kanban::-webkit-scrollbar{height:10px}
+  .kanban::-webkit-scrollbar-track{background:var(--beige-2);border:1.5px solid var(--ink)}
+  .kanban::-webkit-scrollbar-thumb{background:var(--ink)}
+  .kanban::-webkit-scrollbar-thumb:hover{background:var(--green-deep)}
   .kcol{background:var(--beige);border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);min-width:0}
   .kcol.over{background:var(--lime);outline:2px dashed var(--ink);outline-offset:-7px}
   .khead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:2px solid var(--ink);
@@ -179,6 +187,9 @@
   .disp{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;padding:1px 5px;
     border:1.5px solid var(--green-deep);color:var(--green-deep);background:var(--beige)}
   .disp.stale{border-color:var(--red);color:var(--red);background:var(--red-pale)}
+  /* folded backlog rail: no room for the badge across, so it reads down the rail like the label under
+     it, in the badge's own colours */
+  .disp.rail{writing-mode:vertical-rl;font-size:9px;padding:5px 1px}
   .kcard.dispatched{box-shadow:inset 4px 0 0 var(--green-deep)}
   .kcard.dispatched:hover{box-shadow:inset 4px 0 0 var(--green-deep),3px 3px 0 var(--ink)}
   .kcard.dispatched.late{box-shadow:inset 4px 0 0 var(--red)}
@@ -917,15 +928,20 @@ const ICONS = {
 
 function renderTopNav(){
   const openFbN = fbs().filter(openFb).length; // matches the feedback view's default "open" filter
-  const openTasks = tasks().filter(t=>!isClosed(t)&&t.type!=='review').length;
+  // one composition for open work across the whole screen: the same rows the stats bar calls
+  // committed. Counting backlog here put a bigger, differently-built number one row above a
+  // progress bar that had already left backlog out.
+  const backlogN = tasks().filter(t=>t.type!=='review'&&t.status==='backlog').length;
+  const openTasks = tasks().filter(t=>!isClosed(t)&&t.type!=='review'&&t.status!=='backlog').length;
   const views = [
-    {id:'board', label:'Board', n: openTasks, icon:'board'},
-    {id:'list', label:'List', n: tasks().length, icon:'list'},
-    {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback'},
-    {id:'activity', label:'Activity', n: null, icon:'activity'},
+    {id:'board', label:'Board', n: openTasks, icon:'board',
+     title:`${openTasks} open committed task${openTasks===1?'':'s'}${backlogN?` · ${backlogN} in backlog, not counted`:''}`},
+    {id:'list', label:'List', n: tasks().length, icon:'list', title:`every row, including backlog, reviews and closed work`},
+    {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback', title:`${openFbN} open feedback`},
+    {id:'activity', label:'Activity', n: null, icon:'activity', title:'project event log'},
   ];
   $('views').innerHTML = views.map(v =>
-    `<button class="vtab ${state.view===v.id?'on':''}" data-view-btn="${v.id}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
+    `<button class="vtab ${state.view===v.id?'on':''}" data-view-btn="${v.id}" title="${esc(v.title)}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
   const lanes = pipeLanes();
   $('lanes').innerHTML = lanes.map(l => {
     const open = tasks().filter(t=>t.type==='review'&&t.lane===l.lane&&!isClosed(t)).length;
@@ -1015,11 +1031,14 @@ function renderStats(){
   const el = $('stats');
   if (state.view !== 'board'){ el.hidden = true; el.innerHTML = ''; return; }
   el.hidden = false;
-  // "completed" is a ratio of COMMITTED work: backlog rows are candidates, not promises, and counting
-  // them in the denominator made the progress bar shrink every time someone filed an idea.
-  // The backlog count still shows, right under the bar, so nothing is hidden by leaving it out.
-  const ts = tasks().filter(t=>t.type!=='review' && t.status!=='backlog');
+  // "completed" is a ratio of the work that has a card on this board: backlog rows are candidates,
+  // not promises, and cancelled rows are work nobody will ever do, so neither belongs in a denominator
+  // the progress bar is read off. Both counts are stated under the bar, so nothing is hidden by
+  // leaving them out, and the hint names whatever the number left behind.
+  const ts = tasks().filter(t=>t.type!=='review' && t.status!=='backlog' && t.status!=='cancelled');
   const backlog = tasks().filter(t=>t.type!=='review' && t.status==='backlog').length;
+  const cancelled = tasks().filter(t=>t.type!=='review' && t.status==='cancelled').length;
+  const uncounted = [backlog?`${backlog} in backlog`:'', cancelled?`${cancelled} cancelled`:''].filter(Boolean).join(', ');
   const done = ts.filter(t=>t.status==='done').length;
   const reviews = tasks().filter(t=>t.type==='review');
   const openRev = reviews.filter(t=>!isClosed(t)).length;
@@ -1031,9 +1050,9 @@ function renderStats(){
   const per=days.map(ds=>(state.data?.events||[]).filter(e=>new Date(e.at).toDateString()===ds).length);
   const mx=Math.max(...per,1);
   el.innerHTML = `
-    <div class="stat"><div class="lbl">Tasks completed</div><div class="val">${done}<span class="of"> / ${ts.length}</span></div>
+    <div class="stat" title="committed work: every non-review task except backlog candidates (not promised yet) and cancelled rows (nobody will do them). Both are excluded from the total as well as the bar"><div class="lbl">Tasks completed</div><div class="val">${done}<span class="of"> / ${ts.length}</span></div>
       <div class="progress"><i style="width:${ts.length?Math.round(done/ts.length*100):0}%"></i></div>
-      <div class="hint" style="margin-top:7px">${backlog?`${backlog} more in backlog, not counted here`:'committed work only'}</div></div>
+      <div class="hint" style="margin-top:7px">${uncounted?`${uncounted} · not counted here`:'committed work only'}</div></div>
     <div class="stat"><div class="lbl">Feedback · needs triage</div><div class="val">${pend}</div>
       <div class="hint">${pend? `awaiting triage · ${open} open total` : open? `<b>triage clear</b> · ${open} open total` : '<b>clear</b>, nothing waiting'}</div></div>
     <div class="stat"><div class="lbl">Reviews in flight</div><div class="val">${openRev}<span class="of">${reviews.length?` / ${reviews.length}`:''}</span></div>
@@ -1060,13 +1079,46 @@ const ageShort = iso => {
   if (s<86400) return `${Math.floor(s/3600)}h`;
   return `${Math.floor(s/86400)}d`;
 };
+// folded backlog rail: it can only speak for the group, so it says how many and whether the oldest
+// of them is already overdue
+const railWhy = (n, late) => `${n} dispatched in the backlog${late?', the oldest with no in_progress report yet':''} · open it to see which`;
+const dispWhy = (iso, late) => late
+  ? `dispatched ${relTime(iso)} and still no in_progress report. The builder may have died: re-dispatch it or mark it blocked`
+  : `dispatched ${relTime(iso)}, waiting for the builder to report in_progress itself`;
+// data-disp-badge carries the stamp so the age can be re-cut in place by the tick below, in whatever
+// view this badge was rendered into.
 function dispatchBadge(t){
   if (!dispatchPending(t)) return '';
   const late = dispatchLate(t);
-  const why = late
-    ? `dispatched ${relTime(t.dispatchedAt)} and still no in_progress report. The builder may have died: re-dispatch it or mark it blocked`
-    : `dispatched ${relTime(t.dispatchedAt)}, waiting for the builder to report in_progress itself`;
-  return `<span class="disp ${late?'stale':''}" title="${esc(why)}">DISPATCHED ${esc(ageShort(t.dispatchedAt))}</span>`;
+  return `<span class="disp ${late?'stale':''}" data-disp-badge="${esc(t.dispatchedAt)}" title="${esc(dispWhy(t.dispatchedAt, late))}">DISPATCHED ${esc(ageShort(t.dispatchedAt))}</span>`;
+}
+
+// A dispatch badge is only honest because it ages, and the board otherwise repaints only when
+// something happens. A dispatch that nobody picks up produces no events at all, which is exactly the
+// case that must go stale on screen. Re-cutting the stamps in place (rather than re-rendering one
+// view) covers every surface that shows one — board cards, List and lane rows, the folded backlog
+// rail, the drawer — and touches no scroll position, no open drawer and no drag in flight.
+function tickDispatchAges(){
+  const now = Date.now();
+  const isLate = iso => now - new Date(iso).getTime() > DISPATCH_STALE_MS;
+  for (const el of document.querySelectorAll('[data-disp-badge]')){
+    const iso = el.dataset.dispBadge, late = isLate(iso);
+    el.textContent = `DISPATCHED ${ageShort(iso)}`;
+    el.classList.toggle('stale', late);
+    el.title = dispWhy(iso, late);
+  }
+  // drawer row: full "x ago" wording, and it says out loud when the report is overdue
+  for (const el of document.querySelectorAll('[data-disp-rel]')){
+    const iso = el.dataset.dispRel;
+    el.textContent = relTime(iso) + (isLate(iso) ? ' · no in_progress report yet' : '');
+  }
+  // the card's edge stripe and the folded rail's pill turn red on the same clock
+  for (const el of document.querySelectorAll('[data-disp-card]')) el.classList.toggle('late', isLate(el.dataset.dispCard));
+  for (const el of document.querySelectorAll('[data-disp-rail]')){
+    const late = isLate(el.dataset.dispRail);
+    el.classList.toggle('stale', late);
+    el.title = railWhy(Number(el.dataset.dispN), late);
+  }
 }
 
 // ---------- kanban ----------
@@ -1075,7 +1127,8 @@ function cardHtml(t){
   const fb = fbForTask(t); const fbOpen = fb.filter(openFb).length;
   const parent = t.parentTaskId ? tasks().find(x=>x._id===t.parentTaskId) : null;
   const sel = state.sel?.kind==='task' && state.sel.id===t.shortId;
-  return `<div class="kcard ${sel?'sel':''} ${dispatchPending(t)?'dispatched':''} ${dispatchLate(t)?'late':''}" draggable="true" data-drag="${esc(t.shortId)}" data-task="${esc(t.shortId)}">
+  return `<div class="kcard ${sel?'sel':''} ${dispatchPending(t)?'dispatched':''} ${dispatchLate(t)?'late':''}"${
+    dispatchPending(t)?` data-disp-card="${esc(t.dispatchedAt)}"`:''} draggable="true" data-drag="${esc(t.shortId)}" data-task="${esc(t.shortId)}">
     <div class="krow1"><span class="id">${esc(t.shortId)}</span>
       <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
       ${laneChips(t)}
@@ -1094,19 +1147,40 @@ function cardHtml(t){
 
 const backlogFolded = () => !state.backlogOpen;
 
+// 238px is the width a column wants; it is not worth pushing Done off the right edge to keep it.
+// Unfolding the backlog adds a seventh column, which no laptop window fits at 238, so the columns
+// narrow to whatever the window actually has, down to a floor where a card still reads. Past the
+// floor the board scrolls, and .kanban's own scrollbar is drawn in so that reads as scrollable.
+const COL_WANT = 238, COL_FLOOR = 200, COL_GAP = 14, RAIL_W = 44;
+function colMin(el, flexCols, railed){
+  const box = el.clientWidth; // horizontal overflow does not change this, so it is safe to re-measure
+  if (!box) return COL_WANT;
+  const avail = box - (railed?RAIL_W:0) - COL_GAP*(flexCols + (railed?1:0) - 1);
+  return Math.max(COL_FLOOR, Math.min(COL_WANT, Math.floor(avail/flexCols)));
+}
+
 function renderKanban(){
   const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled' && matches(t.title+' '+t.shortId+' '+(t.assignee||'')));
   const k = $('kanban');
   // a folded backlog gets its own width, not a share of the board's
+  const railed = backlogFolded();
+  const min = colMin(k, KANBAN_COLS.length - (railed?1:0), railed);
   k.style.gridTemplateColumns = KANBAN_COLS
-    .map(col => col==='backlog' && backlogFolded() ? 'auto' : 'minmax(238px,1fr)').join(' ');
+    .map(col => col==='backlog' && railed ? 'auto' : `minmax(${min}px,1fr)`).join(' ');
   k.innerHTML = KANBAN_COLS.map(col=>{
     const cards = visible.filter(t=>t.status===col);
     if (col==='backlog' && backlogFolded()){
-      // the rail states the count and nothing else, and stays a drop target so a card can be demoted
+      // the rail states the count, and stays a drop target so a card can be demoted. A dispatch
+      // outstanding in there is the one thing that cannot wait for someone to unfold: it gets its own
+      // pill on the rail, on the same clock as the badges it stands in for.
+      const disp = cards.filter(dispatchPending);
+      const oldest = disp.map(t=>t.dispatchedAt).sort()[0]; // if any is overdue, this one is
+      const dispPill = disp.length ? `<span class="disp rail ${disp.some(dispatchLate)?'stale':''}"
+        data-disp-rail="${esc(oldest)}" data-disp-n="${disp.length}"
+        title="${esc(railWhy(disp.length, disp.some(dispatchLate)))}">${disp.length} DISPATCHED</span>` : '';
       return `<div class="kcol fold ${cards.length?'':'slim'}" data-col="${col}">
         <button class="foldbtn" data-bk-toggle title="${cards.length} in backlog · not committed work. click to open">
-          <span class="n">${cards.length}</span><span class="fl">Backlog</span></button>
+          <span class="n">${cards.length}</span>${dispPill}<span class="fl">Backlog</span></button>
         <div class="kcards" data-col="${col}" hidden></div></div>`;
     }
     let shown = cards, toggle = '';
@@ -1306,7 +1380,7 @@ function renderDrawer(){
           ${t.lane?`<span class="k">Lane</span><span class="id">${esc(t.lane)}${laneInfo?.manager?` · manager ${esc(laneInfo.manager)}`:''}</span>`:''}
           ${t.origin?`<span class="k">Origin</span><span>${linkifyIds(t.origin)}</span>`:''}
           ${t.blocker?`<span class="k">Blocked by</span><span style="color:var(--red);font-weight:600">${esc(t.blocker)}</span>`:''}
-          ${t.dispatchedAt?`<span class="k">Dispatched</span><span title="${new Date(t.dispatchedAt).toLocaleString('en-GB')}">${relTime(t.dispatchedAt)}${dispatchLate(t)?' · no in_progress report yet':''}</span>`:''}
+          ${t.dispatchedAt?`<span class="k">Dispatched</span><span${dispatchPending(t)?` data-disp-rel="${esc(t.dispatchedAt)}"`:''} title="${new Date(t.dispatchedAt).toLocaleString('en-GB')}">${relTime(t.dispatchedAt)}${dispatchLate(t)?' · no in_progress report yet':''}</span>`:''}
           <span class="k">Created</span><span title="${new Date(t.createdAt).toLocaleString('en-GB')}">${relTime(t.createdAt)}</span>
           <span class="k">Updated</span><span title="${new Date(t.updatedAt).toLocaleString('en-GB')}">${relTime(t.updatedAt)}</span>
         </div>
@@ -1580,14 +1654,16 @@ es.addEventListener('message', ()=>{ clearTimeout(reloadT); reloadT=setTimeout(l
 es.onopen = ()=>{ $('livedot')?.classList.remove('off'); if (esDropped){ esDropped=false; load(); } }; // catch up after a drop
 es.onerror = ()=>{ esDropped=true; $('livedot')?.classList.add('off'); };
 
-// A dispatch badge is only honest because it ages, and the board otherwise repaints only when
-// something happens. A dispatch that nobody picks up produces no events at all, which is exactly
-// the case that must go stale on screen, so tick the kanban while one is outstanding. Nothing else
-// is redrawn, and never mid-drag.
-setInterval(()=>{
-  if (state.view!=='board' || dragging || !tasks().some(dispatchPending)) return;
-  renderKanban();
-}, 60000);
+// see tickDispatchAges: the stamps are re-cut in place, so this runs in every view and is safe
+// mid-drag and with a drawer open.
+setInterval(()=>{ if (tasks().some(dispatchPending)) tickDispatchAges(); }, 60000);
+
+// column widths are measured (colMin), so a resized window has to re-measure or the board keeps a
+// minimum the window no longer has
+let resizeT;
+addEventListener('resize', ()=>{ clearTimeout(resizeT); resizeT = setTimeout(()=>{
+  if (state.view==='board' && !dragging) renderKanban();
+}, 150); });
 
 applyHash();
 if (state.sel?.kind==='fb') state.view = 'feedback'; // fb deep links land in context; task links stay on board (drawer overlays)

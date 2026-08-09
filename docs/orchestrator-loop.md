@@ -100,7 +100,14 @@ or the `get_project_context` MCP tool), that is where the prompt comes from: the
 agent's `brief` IS its standing charter — dispatch it verbatim plus that task's
 context. Do not improvise a charter for an agent that has one.
 
+Stamp the dispatch as you hand it out (`PATCH {"dispatched": true}`): the board then
+shows a DISPATCHED badge with its age, which turns red after 15 minutes with no
+`in_progress` report. Any status change clears the stamp server-side, so a builder
+that reports in retires its own badge.
+
 ```bash
+# orchestrator, at the moment the builder is handed the task:
+curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/json' -d '{"dispatched":true}'
 # builder, on start / on finish:
 curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/json' -d '{"status":"in_progress"}'
 curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/json' -d '{"status":"in_review","notes":"2-line summary"}'
@@ -216,6 +223,9 @@ Before sleeping, reconcile board vs. reality:
   that isn't on the board gets seeded (`POST /api/tasks`) before the round ends.
 - No task sits `in_progress` with a dead builder; re-dispatch or mark `blocked`
   (with `blocker`).
+- No dispatch stamp is older than 15 minutes: a `dispatchedAt` that old on a
+  `todo`/`backlog` row (the red DISPATCHED badge) means the builder never reported
+  in. Re-dispatch it or mark it `blocked`, and never assume it started.
 - Nothing gated: check for `in_review` parents whose lanes all closed under
   `autoAdvance:false`, and `blocked` tasks whose blocker has cleared.
 - If the project shares a surface, the live route still matches what you meant to
