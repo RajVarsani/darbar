@@ -37,6 +37,7 @@ server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only t
     parentTaskRef: z.string().optional(), assignee: z.string().optional(),
     assigneeType: z.enum(['agent', 'human']).optional(), origin: z.string().optional(),
     type: TYPE.optional(), status: STATUS.optional(),
+    lanes: z.array(z.string()).optional().describe('review lanes to spawn when this task hits in_review — pick by judgment: code-review for code changes, qa for behavior/outcomes, design-qa only for UI surfaces; [] = explicitly no reviews; omit = all configured lanes'),
   },
   (args) => call('/tasks', 'POST', args));
 
@@ -46,6 +47,7 @@ server.tool('update_task', 'Update a task row: status, blocker, notes, or append
     status: STATUS.optional(),
     assignee: z.string().optional(), blocker: z.string().nullable().optional(),
     notes: z.string().optional(), addCommit: z.string().optional(), type: TYPE.optional(),
+    lanes: z.array(z.string()).optional().describe('re-pick review lanes (code-review for code, qa for behavior, design-qa for UI; [] = none); only before the task enters in_review — frozen after'),
   },
   ({ taskRef, ...rest }) => call(`/tasks/${taskRef}`, 'PATCH', rest));
 

@@ -101,6 +101,9 @@ curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/j
 
 Entering `in_review` spawns the review lanes **server-side** (one `type=review`
 subtask per `project.pipeline.reviews` lane, assigned to that lane's manager).
+Pick a task's lanes by judgment at `create_task` time via `lanes` (code-review
+for code, qa for behavior/outcomes, design-qa only for UI; `[]` = no reviews;
+omit = all configured lanes).
 Never hand-create review tasks. Lane managers drain their queue, review, file
 findings as feedback on the parent, and close their lane:
 

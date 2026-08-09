@@ -23,6 +23,22 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : und
 const strOrNull = (v: unknown): string | null | undefined =>
   v === null ? null : typeof v === 'string' ? v : undefined;
 const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+// lanes: absent = untouched, null = default-all, [] = explicitly none, array = subset.
+// malformed shapes 400 instead of coercing — lanes:[123] must never read as "explicitly none"
+const LANES_SHAPE_ERROR = 'lanes must be null or an array of lane-key strings';
+const lanesShapeBad = (v: unknown): boolean =>
+  v !== undefined && v !== null && !(Array.isArray(v) && v.every((x) => typeof x === 'string'));
+const lanesArr = (v: unknown): string[] | null | undefined =>
+  v === null ? null : Array.isArray(v) ? (v as string[]) : undefined;
+
+// unknown lane keys are typos, not silent no-ops
+function laneError(p: { pipeline?: Pipeline } | null, want: string[]): string | null {
+  const valid = (p?.pipeline?.reviews ?? []).map((r) => r.lane);
+  const bad = want.filter((l) => !valid.includes(l));
+  return bad.length
+    ? `unknown lane(s): ${bad.join(', ')}; valid lane keys: ${valid.join(', ') || '(none configured)'}`
+    : null;
+}
 
 async function logEvent(projectId: ObjectId, text: string, taskId?: ObjectId | null) {
   await Events.insertOne({ projectId, taskId: taskId ?? null, text, at: new Date() });
@@ -80,12 +96,21 @@ const openFeedbackShortIds = async (taskId: ObjectId) =>
     .map((f) => f.shortId);
 
 // dev task entered in_review -> one review subtask per configured lane, assigned to the lane manager.
+// task.lanes narrows the configured lanes when set (null/absent = all).
 // A re-entry after rework spawns a fresh round only once the previous round is fully closed.
 async function spawnReviews(t: Task) {
   const p = await Projects.findOne({ _id: t.projectId });
-  const lanes = p?.pipeline?.reviews ?? [];
-  if (!p || lanes.length === 0) return;
+  if (!p) return;
+  const want = t.lanes ?? null;
+  const lanes = (p.pipeline?.reviews ?? []).filter((l) => !want || want.includes(l.lane));
   if (await openReviewCount(t._id!)) return;
+  if (lanes.length === 0) {
+    if (!want) return; // no pipeline configured: task waits in in_review as before
+    // explicit selection spawned nothing, so no child close will ever advance this task — do it now
+    await logEvent(p._id!, `${t.shortId}: no review lanes selected — skipping reviews`, t._id);
+    await maybeAdvanceParent(t._id!); // respects the feedback gate and autoAdvance
+    return;
+  }
   for (const l of lanes) {
     const doc: Task = {
       projectId: p._id!,
@@ -281,6 +306,12 @@ api.post('/tasks', async (c) => {
     if (!parent) return c.json({ error: `parent ${b.parentTaskRef} not found` }, 404);
     parentTaskId = parent._id!;
   }
+  if (lanesShapeBad(b.lanes)) return c.json({ error: LANES_SHAPE_ERROR }, 400);
+  const lanes = lanesArr(b.lanes) ?? null;
+  if (lanes) {
+    const laneErr = laneError(p, lanes);
+    if (laneErr) return c.json({ error: laneErr }, 400);
+  }
   const doc: Task = {
     projectId: p._id!,
     shortId: await nextShortId(p._id!, 'task'),
@@ -290,6 +321,7 @@ api.post('/tasks', async (c) => {
     status,
     type,
     lane: strOrNull(b.lane) ?? null,
+    lanes,
     assignee: strOrNull(b.assignee) ?? null,
     assigneeType: b.assigneeType === 'human' ? 'human' : 'agent',
     origin: strOrNull(b.origin) ?? null,
@@ -346,6 +378,23 @@ api.patch('/tasks/:ref', async (c) => {
     const v = strOrNull(b[k]); if (v !== undefined) set[k] = v;
   }
   if (b.assigneeType === 'human' || b.assigneeType === 'agent') set.assigneeType = b.assigneeType;
+  // lanes freeze once the review flow starts: reviews already spawned (or closed) from the old selection
+  if (lanesShapeBad(b.lanes)) return c.json({ error: LANES_SHAPE_ERROR }, 400);
+  const lanes = lanesArr(b.lanes);
+  if (lanes !== undefined) {
+    if ((['in_review', 'qa', 'done', 'cancelled'] as TaskStatus[]).includes(t.status)) {
+      return c.json({ error: `${t.shortId} is ${t.status}; lanes are frozen once the review flow starts` }, 409);
+    }
+    if (await Tasks.countDocuments({ parentTaskId: t._id, type: 'review' })) {
+      return c.json({ error: `${t.shortId} already has review children; lanes cannot change` }, 409);
+    }
+    if (lanes) {
+      const p = await Projects.findOne({ _id: t.projectId }, { projection: { pipeline: 1 } });
+      const laneErr = laneError(p, lanes);
+      if (laneErr) return c.json({ error: laneErr }, 400);
+    }
+    set.lanes = lanes;
+  }
   const addCommit = str(b.addCommit);
   if (Object.keys(set).length === 0 && !addCommit) return c.json(t); // nothing to do, no noise event
 

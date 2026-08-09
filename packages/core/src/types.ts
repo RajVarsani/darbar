@@ -38,6 +38,7 @@ export type Task = {
   status: TaskStatus;
   type: TaskType;
   lane: string | null; // review lane key (qa, code-review, …) on pipeline-spawned tasks
+  lanes?: string[] | null; // per-task review-lane subset; null/absent = all configured, [] = explicitly none
   assignee: string | null;
   assigneeType: 'agent' | 'human';
   origin: string | null;

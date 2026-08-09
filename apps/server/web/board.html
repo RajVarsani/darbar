@@ -206,6 +206,7 @@
   .typ-chore{color:var(--ink-soft);border-color:var(--ink-soft);background:var(--beige-2)}
   .typ-review{color:var(--green-deep);border-color:var(--green-deep);background:var(--green-pale)}
   .typ-regression{color:var(--red);border-color:var(--red);background:var(--red-pale)}
+  .typ-lane{color:var(--ink-soft);border-color:var(--ink-soft);background:var(--beige-2)} /* per-task lane selection chip */
 
   /* ---------- activity ---------- */
   .evgroup{padding:16px 18px 6px;font-family:var(--mono);color:var(--ink-soft);font-size:10.5px;font-weight:700;
@@ -420,6 +421,11 @@ const openFb = f => !['resolved','rejected'].includes(f.status);
 const isClosed = t => ['done','cancelled'].includes(t.status);
 const eventsForTask = t => { const re = new RegExp('\\b'+t.shortId+'\\b'); return (state.data?.events??[]).filter(e=>e.taskId===t._id || re.test(e.text||'')); };
 const pipCls = s => s==='in_progress'||s==='in_review'||s==='qa' ? 'p-run' : s==='done' ? 'p-done' : s==='blocked' ? 'p-blocked' : s==='cancelled' ? 'p-cancelled' : '';
+// per-task lane selection chips; default-all (null/absent) renders nothing to avoid noise
+const laneLabel = k => (pipeline()?.reviews??[]).find(l=>l.lane===k)?.label ?? k;
+const laneChips = t => !Array.isArray(t.lanes) ? '' : (t.lanes.length
+  ? t.lanes.map(k=>`<span class="typ typ-lane" title="review lane on in_review">${esc(laneLabel(k))}</span>`).join('')
+  : '<span class="typ typ-lane" title="explicitly no review lanes">no reviews</span>');
 
 // ---------- rendering ----------
 function render(){
@@ -502,6 +508,7 @@ function cardHtml(t){
   return `<div class="kcard ${sel?'sel':''}" draggable="true" data-drag="${esc(t.shortId)}" data-task="${esc(t.shortId)}">
     <div class="krow1"><span class="id">${esc(t.shortId)}</span>
       <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
+      ${laneChips(t)}
       ${t.status==='backlog'?'<span class="bklg">BACKLOG</span>':''}
       ${parent?`<span class="id" title="subtask of ${esc(parent.shortId)}">└ ${esc(parent.shortId)}</span>`:''}
     </div>
@@ -554,6 +561,7 @@ function taskRowHtml(t, isSub){
       ${revKids.length?`<span class="pips" title="${esc(revKids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · '))}"><span class="plbl">REV</span>${revKids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
       ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">${ICONS.feedback}${fbOpen||fb.length}</span>`:''}
       ${t.type&&t.type!=='feature'?`<span class="typ typ-${esc(t.type)}">${esc(t.type)}</span>`:''}
+      ${laneChips(t)}
       ${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:''}
       <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span>
     </span></div>`;
@@ -658,6 +666,7 @@ function renderDrawer(){
     dr.innerHTML = `
       <div class="dhead">${backBtn}<span class="id">${esc(t.shortId)}</span>
         <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
+        ${laneChips(t)}
         <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
         ${parent?`<div class="note">${t.type==='review'?'review lane of':'subtask of'} <a href="#" data-go-task="${esc(parent.shortId)}">${esc(parent.shortId)} · ${esc(parent.title)}</a></div>`:''}
