@@ -50,8 +50,10 @@ then sleep.
 ## 2. Triage verbs
 
 Every drained item gets exactly one verb, applied via `PATCH /api/feedback/:shortId`.
-`resolved`, `rejected` and `needs_clarification` auto-reply in the author's Slack
-thread, using the `resolution` **in that same request body**. Send it every time.
+`resolved`, `rejected` and `needs_clarification` auto-reply in the author's Slack thread,
+and that reply IS the `resolution`: the one in this body, or the one already on the row if
+you send none. With neither, the status **400s** rather than posting a placeholder. Send
+the reason in the same call.
 
 **Rework an existing task.** The defect belongs to a card already on the board:
 
@@ -75,9 +77,8 @@ curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-4 -H 'content-type: applicat
 Resolve immediately when "there is now a card" answers the author; keep it `accepted` or
 `triaged` plus `resolvedTaskRef` instead if they should only hear back on ship.
 
-**Reject.** Out of scope, working as intended, or will not do. Always give the reason:
-with no `resolution` the server posts `no reason given (that is a bug, flag it)` into the
-author's thread.
+**Reject.** Out of scope, working as intended, or will not do. Always give the reason; a
+rejection with none is refused (section 6).
 
 ```bash
 curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-5 -H 'content-type: application/json' \
@@ -140,17 +141,17 @@ A registry `trigger` is a hint. Nothing server-side dispatches helpers.
 ## 5. Lanes
 
 Entering `in_review` spawns one `type=review` child per selected lane, assigned to that
-lane's `manager` from `project.pipeline.reviews`. Spawning happens on the TRANSITION into
-`in_review`, so a task created at `in_review` never spawns anything, and a parent pushed
-out and back in spawns a whole fresh round.
+lane's `manager` from `project.pipeline.reviews`. Spawning runs on the TRANSITION into
+`in_review` and also at create for a row FILED at `in_review`, so a retro-filed card gets
+its lanes. A parent pushed out of `in_review` and back in spawns a whole fresh round.
 
 Selection: `["code-review"]` default, add `qa` only when the diff cannot answer the
 question (live data migration), add `design-qa` only for a UI surface a human will look
 at, `[]` for helper and bookkeeping rows, the full set only for the public front door or
 anything touching exposure.
 
-Lane keys are NOT on `/projects/:ref/context`. Read them from `GET /api/projects`
-(everything but the charter, and line 1 of the cold start) or the board payload
+Lane keys are on `GET /api/projects/:ref/context` (→ `pipeline.reviews[].lane`, alongside a
+`configured` map), on `GET /api/projects` and on the board payload
 (`/api/p/:capId` → `project.pipeline`); a wrong key also 400s with the valid list.
 
 Manager queue, finding, close:
@@ -181,9 +182,13 @@ gated.
 | `lanes` with an unknown key | 400 `unknown lane(s): x; valid lane keys: ...` |
 | `lanes: [123]` | 400 `lanes must be null or an array of lane-key strings` |
 | `dispatched: "yes"` | 400 `dispatched must be true (stamp now) or false (clear)` |
+| `origin`, `commits`, `shortId`, `parentTaskRef`/`parentTaskId`, `project`/`projectId` on `PATCH /tasks` | 400 `not settable on an existing task: origin — set at create only (POST /tasks {"origin": …})`, one clause per field sent |
 | prefix with a digit on `POST /projects` | 400 `name (string) and prefix (2-6 letters) required` |
 | duplicate project prefix | 409 |
-| `resolvedTaskRef` naming a task that does not exist | 200, silently unlinked. Read back `resolvedTaskShortId` |
+| malformed `stakeholders[].slackUserId` on `POST`/`PATCH /projects` | 400 naming the index and the `U`/`W` shape; on a POST nothing is created |
+| `resolvedTaskRef` naming a task that does not exist | 404 `task DAR-999 not found — resolvedTaskRef is the link the ship sweep follows ... so an unknown id would leave DAR-FB-3 promoted in name only` |
+| `resolved`/`rejected`/`needs_clarification` with no `resolution` in the body and none on the row | 400 `DAR-FB-3 → rejected replies to <author> in their own thread and that reply IS the resolution text, so "resolution" is required: ...` |
+| `limit` outside 1 to 1000, or a non-integer `limit`/`offset`, on `GET /tasks` | 400 `limit must be a whole number between 1 and 1000 (got "1001")`. Never clamped |
 
 Last review child closes and then, in order: open reviews? hold. Blocking feedback?
 log `reviews closed but N open feedback (...) — holding`. `autoAdvance:false`? log
@@ -198,23 +203,31 @@ an explicit push like any other.
 
 ## 7. Field allowlists
 
-Anything not listed is ignored with a 200, so a rejected field looks like a success.
+Anything not listed here and not named as a 400 in section 6 is ignored with a 200, so a
+rejected field looks like a success. Read back what you wrote.
 
 - `POST /tasks`: `project`, `title`, `description`, `status`, `type`, `parentTaskRef`,
   `lane`, `lanes`, `assignee`, `assigneeType`, `origin`, `notes`. No status gate: any
-  status, including `done`, is accepted at create.
+  status, including `done`, is accepted at create, and a row filed at `in_review` spawns
+  its lanes there and then (section 5).
 - `PATCH /tasks/:ref`: `title`, `description`, `status`, `notes`, `type`, `assignee`,
   `blocker`, `lane`, `assigneeType`, `dispatched`, `lanes`, `addCommit` (append-only,
-  one hash per call). NOT settable: `origin`, `commits`, `shortId`, `parentTaskRef`,
-  project. Origin and parentage are create-time only.
+  one hash per call). `origin`, `commits`, `shortId`, `parentTaskRef`/`parentTaskId` and
+  `project`/`projectId` 400 here and name what does the job instead: origin and parentage
+  are create-time only.
 - `POST /feedback`: `taskRef` or `project`, `author`, `authorType`, `type`, `body`,
   `attachments`, `slack`. Always lands at `pending`.
 - `PATCH /feedback/:shortId`: `status`, `resolution`, `type`, `resolvedTaskRef`.
   Promotion from `pending` with no explicit status auto-sets `triaged`.
-- `PATCH /projects/:ref`: `charter`, `slackChannel`, `pipeline`, `agents`, `proxy`.
-  Each replaces its value wholesale; read, edit, send whole. An empty body 400s.
-- `POST /projects`: `name`, `prefix`, `repos`, `charter`, `stakeholders`, `slackChannel`
-  only. `pipeline`, `agents` and `proxy` sent here are dropped silently.
+- `PATCH /projects/:ref`: `charter`, `slackChannel`, `stakeholders`, `pipeline`, `agents`,
+  `proxy`. Each replaces its value wholesale; read, edit, send whole. A body with none of
+  them 400s `nothing to update (charter, slackChannel, stakeholders, pipeline, agents,
+  proxy)`, which is also how you check the list.
+- `POST /projects`: `name`, `prefix`, `repos`, `charter`, `stakeholders`, `slackChannel`,
+  and `pipeline`, `agents` and `proxy` too. Registering a project is ONE call, not a POST
+  and then PATCHes. The config is validated before the insert, so a malformed one is a 400
+  with nothing created; the response carries `boardUrl` plus `warnings` (the things the
+  server declines to fail on, such as a pipeline manager missing from the registry).
 
 MCP tools cover most of this but not all: `update_task` has no `title`, `description`,
 `lane` or `assigneeType`; `create_task` has no `notes` or `lane`; there is no
@@ -227,28 +240,38 @@ What to run before sleeping. What each finding MEANS, and how to recover it, is 
 Part D; this is the sweep.
 
 ```bash
-curl -s "localhost:4899/api/p/$CAP" > /tmp/board.json   # every task, no 200-row cap
-python3 - <<'PY'
-import json, datetime
-d = json.load(open('/tmp/board.json'))
+PROJ=DAR CAP=<capId> python3 - <<'PY'
+import json, os, datetime, urllib.request
+API, PROJ, CAP = 'http://localhost:4899/api', os.environ['PROJ'], os.environ['CAP']
+get = lambda u: json.load(urllib.request.urlopen(u))
+# /api/tasks answers with a PAGE, never a bare list: total, returned, offset, limit,
+# truncated, and nextOffset when it withheld rows. Check truncated; page until it is false.
+tasks, off = [], 0
+while True:
+    page = get(f'{API}/tasks?project={PROJ}&offset={off}')
+    tasks += page['tasks']
+    if not page['truncated']: break
+    off = page['nextOffset']
+assert len(tasks) == page['total'], f'swept {len(tasks)} of {page["total"]}'
+board = get(f'{API}/p/{CAP}')   # feedback, events and the proxy pair in one payload
 now = datetime.datetime.now(datetime.timezone.utc)
 age = lambda s: (now - datetime.datetime.fromisoformat(s.replace('Z','+00:00'))).total_seconds()/60
-rev = [t for t in d['tasks'] if t['type'] == 'review']
+rev = [t for t in tasks if t['type'] == 'review']
 openrev = lambda p: [r for r in rev if r['parentTaskId'] == p['_id'] and r['status'] not in ('done','cancelled')]
-for t in d['tasks']:
+for t in tasks:
     if t['type'] == 'review': continue
     if t.get('dispatchedAt') and t['status'] in ('todo','backlog') and age(t['dispatchedAt']) > 15:
         print('STALE DISPATCH', t['shortId'], int(age(t['dispatchedAt'])), 'min, never reported in')
     if t['status'] == 'in_review' and not openrev(t):
         print('HELD IN REVIEW', t['shortId'], '(check feedback filed on it, then autoAdvance)')
     if t['status'] == 'in_review' and not [r for r in rev if r['parentTaskId'] == t['_id']]:
-        print('NO LANES EVER SPAWNED', t['shortId'], '(created at in_review?)')
+        print('NO LANES EVER SPAWNED', t['shortId'], '(no lanes selected, or none configured)')
     if t['status'] == 'blocked' and not t.get('blocker'):
         print('BLOCKED, NO REASON', t['shortId'])
-for f in d['feedback']:
+for f in board['feedback']:
     if f['status'] in ('triaged','accepted','in_progress') and not f.get('resolvedTaskShortId'):
         print('FEEDBACK PARKED, NO TASK', f['shortId'])
-print('proxy', d['project']['proxy'], '| published', d['project']['proxyPublished'])
+print('swept', len(tasks), 'of', page['total'], 'tasks |', 'proxy', board['project'].get('proxy'), '| published', board['project'].get('proxyPublished'))
 PY
 ```
 
@@ -296,8 +319,13 @@ curl -s 'localhost:4899/api/feedback/pending?project=DAR'
 curl -s 'localhost:4899/api/projects/DAR/events?limit=50'  # why the board looks like this
 ```
 
-`GET /api/tasks` caps at 200 rows sorted by `updatedAt` desc, so on a large project use
-the board payload (`/api/p/:capId`), which returns every task, as the authority.
+`GET /api/tasks` sorts by `updatedAt` desc and answers with a PAGE, not a bare array:
+`{total, returned, offset, limit, truncated, tasks}`, plus `nextOffset` and a `note`
+whenever it withheld rows. `limit` defaults to 1000 and maxes at 1000. Read `truncated`
+before you treat a page as the whole set: if it is true, repeat the same query with
+`offset=nextOffset` until it is false, or take the whole project in one payload from
+`/api/p/:capId`. The MCP `my_tasks` tool returns the same page and takes the same
+`limit`/`offset`.
 
 If that sequence would not tell your successor everything you know, the board is missing
 state. Fix that before ending the round.
