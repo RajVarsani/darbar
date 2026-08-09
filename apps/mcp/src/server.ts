@@ -31,7 +31,7 @@ server.tool('get_board', 'Full board for a project: tasks, feedback, recent even
 const STATUS = z.enum(['backlog', 'todo', 'in_progress', 'in_review', 'qa', 'blocked', 'done', 'cancelled']);
 const TYPE = z.enum(['feature', 'bug', 'chore', 'review', 'regression']);
 
-server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only the orchestrator promotes feedback into tasks. Review subtasks are pipeline-spawned by the server — do not create type=review tasks by hand.',
+server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only the orchestrator promotes feedback into tasks. Review subtasks are pipeline-spawned by the server — do not create type=review tasks by hand. Any status is accepted at create, including in_review for work already under review: creating one there spawns its review lanes immediately, exactly as moving a task there does. origin and parentTaskRef are create-time only and cannot be changed afterwards.',
   {
     project: z.string(), title: z.string(), description: z.string().optional(),
     parentTaskRef: z.string().optional(), assignee: z.string().optional(),
@@ -41,7 +41,7 @@ server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only t
   },
   (args) => call('/tasks', 'POST', args));
 
-server.tool('update_task', 'Update a task row: status, blocker, notes, dispatched, or append a commit hash. Moving a dev task to in_review auto-spawns the project pipeline review lanes; done is rejected (409) while review children are open; closing the last review child auto-advances the parent when the project has autoAdvance on.',
+server.tool('update_task', 'Update a task row: status, blocker, notes, dispatched, or append a commit hash. Moving a dev task to in_review auto-spawns the project pipeline review lanes; done is rejected (409) while review children are open; closing the last review child auto-advances the parent when the project has autoAdvance on. origin, parentage, shortId, the project and the commits array are create-time or append-only and are refused here with a 400 rather than accepted and ignored.',
   {
     taskRef: z.string().describe('short id like TST-1'),
     status: STATUS.optional(),
@@ -52,15 +52,19 @@ server.tool('update_task', 'Update a task row: status, blocker, notes, dispatche
   },
   ({ taskRef, ...rest }) => call(`/tasks/${taskRef}`, 'PATCH', rest));
 
-server.tool('my_tasks', 'Open tasks for an assignee (lane managers and builders start here). Optionally scope by project or lane.',
+server.tool('my_tasks', 'Open tasks for an assignee (lane managers and builders start here). Optionally scope by project or lane. Returns a PAGE, not a bare list: {total, returned, offset, limit, truncated, tasks[]}. `total` is how many tasks match the filter in full; `truncated` is true when this page is not all of them, and the reply then carries nextOffset. Never treat the rows as the whole set without checking `truncated` — if it is true, repeat with offset=nextOffset until it is false, or read the whole project in one payload with get_board.',
   {
     assignee: z.string().describe('exact assignee name, e.g. qa-lead'),
     project: z.string().optional(), lane: z.string().optional(),
+    limit: z.number().optional().describe('page size, 1-1000; default 1000 (whole matching set on any normal project)'),
+    offset: z.number().optional().describe('rows to skip, for reading the next page after a truncated one'),
   },
-  ({ assignee, project, lane }) => {
+  ({ assignee, project, lane, limit, offset }) => {
     const qs = new URLSearchParams({ assignee, open: 'true' });
     if (project) qs.set('project', project);
     if (lane) qs.set('lane', lane);
+    if (limit !== undefined) qs.set('limit', String(limit));
+    if (offset !== undefined) qs.set('offset', String(offset));
     return call(`/tasks?${qs}`);
   });
 
@@ -222,12 +226,12 @@ server.tool('next_pending_feedback', 'The manager inbox: oldest-first pending + 
   { project: z.string().optional() },
   ({ project }) => call(`/feedback/pending${project ? `?project=${encodeURIComponent(project)}` : ''}`));
 
-server.tool('resolve_feedback', 'Move feedback to a terminal or intermediate state. resolved/rejected/needs_clarification auto-reply in the original Slack thread.',
+server.tool('resolve_feedback', 'Move feedback to a terminal or intermediate state. resolved, rejected and needs_clarification auto-reply IN THE REPORTER\'S OWN SLACK THREAD, with no orchestrator between you and them, and the reply body is your resolution text — so for those three it is REQUIRED (400 without it) and must read as something a stakeholder understands, not a note to a developer. triaged/accepted/in_progress do not reply and do not need one.',
   {
     feedbackRef: z.string().describe('short id like TST-FB-1'),
     status: z.enum(['triaged', 'accepted', 'in_progress', 'resolved', 'rejected', 'needs_clarification']),
-    resolution: z.string().optional().describe('shown to the author — reason, fix note, or the clarifying question'),
-    resolvedTaskRef: z.string().optional().describe('task this feedback became/was fixed by'),
+    resolution: z.string().optional().describe('REQUIRED for resolved/rejected/needs_clarification: this exact text is posted to the reporter. What changed for them, why it is not being actioned, or what you need from them. Already-stored text counts, so a status flip after writing the reason is fine'),
+    resolvedTaskRef: z.string().optional().describe('task this feedback became/was fixed by; the link the ship sweep follows to auto-resolve this row. An id that does not exist is a 404, not a silent unlink'),
   },
   ({ feedbackRef, ...rest }) => call(`/feedback/${feedbackRef}`, 'PATCH', rest));
 

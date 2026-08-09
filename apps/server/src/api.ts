@@ -23,6 +23,29 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : und
 const strOrNull = (v: unknown): string | null | undefined =>
   v === null ? null : typeof v === 'string' ? v : undefined;
 const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+
+// str/strOrNull/strArr return "nothing" for a WRONG TYPE and for an ABSENT field alike, and every
+// caller then reads that as "not sent". So a field with the wrong type was dropped under a 200 —
+// the DAR-187 defect class, one layer down from the routes. This says so instead. Absent stays
+// absent; only a field the caller actually sent is judged.
+type FieldType = 'string' | 'string|null' | 'string[]';
+const FIELD_WANT: Record<FieldType, string> = {
+  string: 'a string',
+  'string|null': 'a string or null',
+  'string[]': 'an array of strings',
+};
+function typeErrors(b: Record<string, unknown>, spec: Record<string, FieldType>): string[] {
+  const errs: string[] = [];
+  for (const [k, want] of Object.entries(spec)) {
+    const v = b[k];
+    if (v === undefined) continue;
+    const ok = want === 'string' ? typeof v === 'string'
+      : want === 'string|null' ? v === null || typeof v === 'string'
+      : Array.isArray(v) && v.every((x) => typeof x === 'string');
+    if (!ok) errs.push(`${k} must be ${FIELD_WANT[want]} (got ${JSON.stringify(v)})`);
+  }
+  return errs;
+}
 // lanes: absent = untouched, null = default-all, [] = explicitly none, array = subset.
 // malformed shapes 400 instead of coercing — lanes:[123] must never read as "explicitly none"
 const LANES_SHAPE_ERROR = 'lanes must be null or an array of lane-key strings';
@@ -45,6 +68,17 @@ async function logEvent(projectId: ObjectId, text: string, taskId?: ObjectId | n
   const p = await Projects.findOne({ _id: projectId }, { projection: { capId: 1 } });
   if (p) emit(p.capId, { kind: 'event', text });
 }
+
+// The feedback statuses that make the server SPEAK TO A HUMAN in their own Slack thread. Every one
+// of them needs a resolution, because the resolution is the entire body of that message: there is no
+// fallback text worth sending, only a placeholder that reads as a system defect to the person who
+// reported something in good faith (DAR-189).
+const REPLYING: FeedbackStatus[] = ['resolved', 'rejected', 'needs_clarification'];
+const REPLY_ASKS: Record<string, string> = {
+  resolved: 'what actually changed for them',
+  rejected: 'why this is not being actioned',
+  needs_clarification: 'exactly what you need from them',
+};
 
 // resolution replies live in the SERVER, not the bot: Gabbar is intake-only.
 // A failed reply is logged as a project event so it is visible on the board.
@@ -628,10 +662,35 @@ api.post('/projects', async (c) => {
   if (!name || !prefix || !/^[A-Za-z]{2,6}$/.test(prefix)) {
     return c.json({ error: 'name (string) and prefix (2-6 letters) required' }, 400);
   }
+  const badTypes = typeErrors(b, { charter: 'string', slackChannel: 'string|null', repos: 'string[]' });
+  if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   // stakeholders were stored raw here, which let a malformed slackUserId in at CREATE time and then
   // silently refuse that person at Gabbar's gate forever. Same reader as every later write.
   const people = readStakeholders(b.stakeholders ?? []);
   if ('error' in people) return c.json({ error: people.error }, 400);
+  // pipeline, agents and proxy were DROPPED here under a 200, which is the only reason registering a
+  // project takes a POST and then a PATCH. They are honoured now, through applyConfig — the one
+  // config write path — so the readers, the event log, the proxy reconciliation and the warnings are
+  // identical to every later edit rather than a second implementation that can drift from it.
+  // Validated BEFORE the insert, so a malformed pipeline is a 400 with nothing created, not a project
+  // left half-configured. (The prefix claim is re-checked inside applyConfig; the pre-check exists so
+  // the 409 does not arrive after the project row is already written.)
+  const cfg: Record<string, unknown> = {};
+  for (const k of ['pipeline', 'agents', 'proxy'] as const) if (b[k] !== undefined) cfg[k] = b[k];
+  if (cfg.pipeline !== undefined) {
+    const parsed = readPipeline(cfg.pipeline);
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+  }
+  if (cfg.agents !== undefined) {
+    const parsed = readAgents(cfg.agents);
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+  }
+  if (cfg.proxy !== undefined && cfg.proxy !== null) {
+    const parsed = readProxy(cfg.proxy);
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    const owner = await Projects.findOne({ 'proxy.prefix': parsed.proxy.prefix });
+    if (owner) return c.json({ error: `proxy prefix "${parsed.proxy.prefix}" is already claimed by project ${owner.prefix} (${owner.name})` }, 409);
+  }
   const doc = {
     name,
     prefix: prefix.toUpperCase(),
@@ -649,8 +708,16 @@ api.post('/projects', async (c) => {
     if ((e as { code?: number }).code === 11000) return c.json({ error: `prefix ${doc.prefix} already exists` }, 409);
     throw e;
   }
-  await logEvent((doc as { _id?: ObjectId })._id!, `project created: ${doc.name}`);
-  return c.json({ ...doc, boardUrl: `${config.baseUrl}/p/${doc.capId}` });
+  const created = doc as unknown as Project;
+  await logEvent(created._id!, `project created: ${doc.name}`);
+  if (Object.keys(cfg).length === 0) return c.json({ ...doc, boardUrl: `${config.baseUrl}/p/${doc.capId}`, warnings: [] });
+  const r = await applyConfig(created, cfg);
+  // pre-validated above with the same readers, so this is reachable only if the prefix claim was won
+  // by another writer in between. Say what exists and what did not apply, rather than a bare 409.
+  if (failed(r)) {
+    return c.json({ error: `project ${doc.prefix} WAS created (board ${config.baseUrl}/p/${doc.capId}), but its ${Object.keys(cfg).join('/')} config was not applied: ${r.error}` }, r.status);
+  }
+  return c.json({ ...r.doc, boardUrl: `${config.baseUrl}/p/${doc.capId}`, warnings: r.warnings });
 });
 
 api.get('/projects', async (c) => {
@@ -686,6 +753,12 @@ const failed = (r: ConfigFail | ConfigOk): r is ConfigFail => 'error' in r;
 async function applyConfig(p: Project, b: Record<string, unknown>): Promise<ConfigFail | ConfigOk> {
   const warnings: string[] = [];
   const set: Record<string, unknown> = {};
+  // a non-string charter used to vanish whenever another valid field rode along in the same body:
+  // str() returned undefined, the field was skipped, and the write still reported success on
+  // everything sent. Every other field here already errors on a shape it cannot store; these two
+  // were the exceptions (DAR-187 item 5).
+  const badTypes = typeErrors(b, { charter: 'string', slackChannel: 'string|null' });
+  if (badTypes.length) return { error: badTypes.join(' | '), status: 400 };
   const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
   let pipeline: Pipeline | undefined;
@@ -1368,6 +1441,15 @@ api.post('/tasks', async (c) => {
   if (!TASK_STATUSES.includes(status)) return c.json({ error: `bad status; use ${TASK_STATUSES.join('|')}` }, 400);
   const type = (str(b.type) ?? 'feature') as TaskType;
   if (!TASK_TYPES.includes(type)) return c.json({ error: `bad type; use ${TASK_TYPES.join('|')}` }, 400);
+  const badTypes = typeErrors(b, {
+    description: 'string', notes: 'string', parentTaskRef: 'string',
+    lane: 'string|null', assignee: 'string|null', origin: 'string|null',
+  });
+  if (b.assigneeType !== undefined && b.assigneeType !== 'agent' && b.assigneeType !== 'human') {
+    // silently defaulting to 'agent' meant a task filed for a person was filed as agent work
+    badTypes.push(`assigneeType must be "agent" or "human" (got ${JSON.stringify(b.assigneeType)})`);
+  }
+  if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   const p = await resolveProject(str(b.project) ?? '');
   if (!p) return c.json({ error: 'project not found' }, 404);
   let parentTaskId: ObjectId | null = null;
@@ -1404,11 +1486,46 @@ api.post('/tasks', async (c) => {
   };
   await Tasks.insertOne(doc);
   await logEvent(p._id!, `${doc.shortId} created: ${doc.title}`, doc._id);
-  return c.json(doc);
+  // Review spawning hangs off the in_review TRANSITION in the PATCH route, so a task CREATED at
+  // in_review — a retro-init of work already under review, which this API explicitly allows at any
+  // status — spawned no lanes and had no transition left to make: it sat in in_review forever, with
+  // the board showing a review in flight that nobody was ever assigned. Spawning off the STATE here
+  // is the fix rather than refusing the create, because the create is legitimate and refusing it
+  // would leave no way to file a row at the status the work is actually at. Same guard as the PATCH
+  // path (spawnReviews is idempotent: it returns early when a round is already open).
+  if (doc.status === 'in_review' && doc.type !== 'review') await spawnReviews(doc);
+  // re-read: an explicit lanes:[] selection self-advances the parent inside spawnReviews, so the
+  // created doc in hand can already be stale about its own status
+  return c.json((await Tasks.findOne({ _id: doc._id })) ?? doc);
 });
 
-// my_tasks and lane views: filter by assignee/project/status, open=true for not-closed
+// my_tasks and lane views: filter by assignee/project/status, open=true for not-closed.
+//
+// This endpoint used to `.limit(200)` and return a bare array, so on a project past 200 rows the
+// answer was a silent sample: nothing on the payload said it had been cut, and this is the read every
+// AGENT resumes from (my_tasks, and every "what is still open" sweep). MRF returns 419 tasks from the
+// board and returned exactly 200 here. The board payload was never affected, which is why the
+// orchestrator loop routes its audit through /api/p/:capId to dodge this.
+// The rows now come back inside a page that always states `total` and `truncated`, so a partial
+// answer cannot be read as a complete one without ignoring a field that says otherwise, and
+// limit/offset make the rest actually reachable instead of merely knowable.
+const TASKS_PAGE_MAX = 1000;
+// out-of-range or non-numeric paging 400s rather than being clamped: a silently clamped limit is the
+// same lie in a smaller place
+function pageNum(raw: string | undefined, name: string, min: number, max: number, dflt: number): number | { error: string } {
+  if (raw === undefined) return dflt;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    const range = max === Number.MAX_SAFE_INTEGER ? `${min} or greater` : `between ${min} and ${max}`;
+    return { error: `${name} must be a whole number ${range} (got ${JSON.stringify(raw)})` };
+  }
+  return n;
+}
 api.get('/tasks', async (c) => {
+  const limit = pageNum(c.req.query('limit'), 'limit', 1, TASKS_PAGE_MAX, TASKS_PAGE_MAX);
+  if (typeof limit !== 'number') return c.json(limit, 400);
+  const offset = pageNum(c.req.query('offset'), 'offset', 0, Number.MAX_SAFE_INTEGER, 0);
+  if (typeof offset !== 'number') return c.json(offset, 400);
   const q: Record<string, unknown> = {};
   const assignee = c.req.query('assignee'); if (assignee) q.assignee = assignee;
   const lane = c.req.query('lane'); if (lane) q.lane = lane;
@@ -1421,7 +1538,26 @@ api.get('/tasks', async (c) => {
     if (!p) return c.json({ error: 'project not found' }, 404);
     q.projectId = p._id;
   }
-  return c.json(await Tasks.find(q as never).sort({ updatedAt: -1 }).limit(200).toArray());
+  const [total, tasks] = await Promise.all([
+    Tasks.countDocuments(q as never),
+    Tasks.find(q as never).sort({ updatedAt: -1 }).skip(offset).limit(limit).toArray(),
+  ]);
+  const seen = offset + tasks.length;
+  const truncated = seen < total;
+  return c.json({
+    total,
+    returned: tasks.length,
+    offset,
+    limit,
+    truncated,
+    ...(truncated
+      ? {
+          nextOffset: seen,
+          note: `PARTIAL ANSWER: ${tasks.length} of ${total} matching tasks, sorted by updatedAt desc. This is NOT the whole set — repeat the same query with offset=${seen} until truncated is false, or read GET /api/p/:capId for a whole project in one payload`,
+        }
+      : {}),
+    tasks,
+  });
 });
 
 api.get('/tasks/:ref', async (c) => {
@@ -1441,6 +1577,29 @@ api.patch('/tasks/:ref', async (c) => {
   if (b.type !== undefined && !TASK_TYPES.includes(b.type as TaskType)) {
     return c.json({ error: `bad type; use ${TASK_TYPES.join('|')}` }, 400);
   }
+  // Fields this route has never applied. They used to be accepted and dropped under a 200, so
+  // "correct the origin" or "fix the parent" read as done and changed nothing. A field that cannot
+  // be set after creation has to SAY it cannot, and point at whatever does the job (DAR-187 item 4).
+  const frozen = Object.entries({
+    origin: 'set at create only (POST /tasks {"origin": …})',
+    commits: 'append-only: one hash per call via {"addCommit": "<sha>"}',
+    shortId: 'assigned by the server at create and never changes',
+    parentTaskRef: 'parentage is set at create only (POST /tasks {"parentTaskRef": …})',
+    parentTaskId: 'parentage is set at create only (POST /tasks {"parentTaskRef": …})',
+    project: 'a task cannot move between projects; file it on the other project and cancel this row',
+    projectId: 'a task cannot move between projects; file it on the other project and cancel this row',
+  }).filter(([k]) => b[k] !== undefined);
+  if (frozen.length) {
+    return c.json({ error: `not settable on an existing task: ${frozen.map(([k, why]) => `${k} — ${why}`).join('; ')}` }, 400);
+  }
+  const badTypes = typeErrors(b, {
+    title: 'string', description: 'string', notes: 'string', addCommit: 'string',
+    assignee: 'string|null', blocker: 'string|null', lane: 'string|null',
+  });
+  if (b.assigneeType !== undefined && b.assigneeType !== 'agent' && b.assigneeType !== 'human') {
+    badTypes.push(`assigneeType must be "agent" or "human" (got ${JSON.stringify(b.assigneeType)})`);
+  }
+  if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   const set: Record<string, unknown> = {};
   for (const k of ['title', 'description', 'status', 'notes', 'type'] as const) {
     const v = str(b[k]); if (v !== undefined) set[k] = v;
@@ -1579,29 +1738,55 @@ api.patch('/feedback/:shortId', async (c) => {
   if (b.status !== undefined && !FEEDBACK_STATUSES.includes(b.status as FeedbackStatus)) {
     return c.json({ error: `bad status; use ${FEEDBACK_STATUSES.join('|')}` }, 400);
   }
+  const badTypes = typeErrors(b, { resolution: 'string|null', resolvedTaskRef: 'string' });
+  if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
+  // an unrecognised type was dropped here under a 200, like the status one line up is not
+  const type = str(b.type);
+  if (b.type !== undefined && !(type && FEEDBACK_TYPES.includes(type))) {
+    return c.json({ error: `bad type; use ${FEEDBACK_TYPES.join('|')}` }, 400);
+  }
   const set: Record<string, unknown> = { updatedAt: new Date() };
-  if (str(b.status)) set.status = b.status;
+  const next = str(b.status) as FeedbackStatus | undefined;
+  if (next) set.status = next;
   const resolution = strOrNull(b.resolution); if (resolution !== undefined) set.resolution = resolution;
-  const type = str(b.type); if (type && FEEDBACK_TYPES.includes(type)) set.type = type;
-  if (str(b.resolvedTaskRef)) {
-    const t = await resolveTaskRef(str(b.resolvedTaskRef)!);
-    if (t) {
-      set.resolvedTaskId = t._id; set.resolvedTaskShortId = t.shortId;
-      // promotion IS triage: a pending row promoted without an explicit status must not stay pending
-      if (fb.status === 'pending' && !str(b.status)) set.status = 'triaged';
+  if (type) set.type = type;
+  if (b.resolvedTaskRef !== undefined) {
+    // an unknown ref used to be ignored under a 200, so a promoted row kept NO link to the task meant
+    // to fix it: the ship sweep (resolvePromotedFeedback) follows resolvedTaskId and never found it,
+    // and the row sat open with the board saying it was promoted. A typo is a 404 now, not a ghost.
+    const ref = str(b.resolvedTaskRef)!.trim();
+    if (!ref) return c.json({ error: 'resolvedTaskRef must be a non-empty task short id, e.g. DAR-12' }, 400);
+    const t = await resolveTaskRef(ref);
+    if (!t) {
+      return c.json({ error: `task ${ref.toUpperCase()} not found — resolvedTaskRef is the link the ship sweep follows to auto-resolve this row when that task is done, so an unknown id would leave ${fb.shortId} promoted in name only` }, 404);
     }
+    set.resolvedTaskId = t._id; set.resolvedTaskShortId = t.shortId;
+    // promotion IS triage: a pending row promoted without an explicit status must not stay pending
+    if (fb.status === 'pending' && !next) set.status = 'triaged';
+  }
+  // Every status below REPLIES TO A HUMAN in their own Slack thread, and the reply text IS the
+  // resolution. Without one the server posted a developer placeholder ("no reason given (that is a
+  // bug, flag it)") or a bare header into a stakeholder's thread, with no orchestrator in the loop to
+  // catch it. A rejection with no reason is not something this system should be able to send, so the
+  // reason is required rather than substituted. The EFFECTIVE resolution is the one in this patch or
+  // the one already on the row, so writing the reason first and flipping the status after still works,
+  // and so does a re-send of the same status.
+  const effective = ((resolution !== undefined ? resolution : fb.resolution) ?? '').trim();
+  if (next && REPLYING.includes(next) && !effective) {
+    return c.json({ error: `${fb.shortId} → ${next} replies to ${fb.author} in their own thread and that reply IS the resolution text, so "resolution" is required: say ${REPLY_ASKS[next]}, in plain words that person will understand` }, 400);
   }
   await Feedback.updateOne({ _id: fb._id }, { $set: set });
-  const statusNote = str(b.status) ?? (set.status === 'triaged' ? 'triaged (auto: promoted)' : 'updated');
+  const statusNote = next ?? (set.status === 'triaged' ? 'triaged (auto: promoted)' : 'updated');
   await logEvent(fb.projectId, `${fb.shortId} → ${statusNote}${resolution ? `: ${resolution}` : ''}`, fb.taskId);
 
-  // every terminal state (and clarification) replies in the original thread; nothing dies silently
-  if (b.status === 'resolved') await slackThreadReply(fb, `*${fb.shortId} resolved.* ${resolution ?? ''}`.trim());
-  if (b.status === 'rejected') await slackThreadReply(fb, `*${fb.shortId} not actioned:* ${resolution ?? 'no reason given (that is a bug, flag it)'}`);
-  if (b.status === 'needs_clarification') await slackThreadReply(fb, `*${fb.shortId}:* quick question, ${resolution ?? 'can you add detail?'}`);
+  // every terminal state (and clarification) replies in the original thread; nothing dies silently.
+  // `effective` is non-empty for all three by the gate above, so no placeholder can reach a human.
+  if (next === 'resolved') await slackThreadReply(fb, `*${fb.shortId} resolved.* ${effective}`);
+  if (next === 'rejected') await slackThreadReply(fb, `*${fb.shortId} not actioned:* ${effective}`);
+  if (next === 'needs_clarification') await slackThreadReply(fb, `*${fb.shortId}:* quick question, ${effective}`);
 
   // a parent held in_review only by this feedback closes itself once the last blocking row resolves
-  if ((b.status === 'resolved' || b.status === 'rejected') && fb.taskId) await maybeAdvanceParent(fb.taskId);
+  if ((next === 'resolved' || next === 'rejected') && fb.taskId) await maybeAdvanceParent(fb.taskId);
   return c.json(await Feedback.findOne({ _id: fb._id }));
 });
 
