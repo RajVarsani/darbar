@@ -92,11 +92,67 @@ async function existingFeedback(channel: string, threadTs: string | null) {
   }
 }
 
+// immediate feedback: 👀 on intake, ✅/❌ on outcome — best-effort, never blocks the reply
+let reactWarned = false;
+async function react(client: any, method: 'add' | 'remove', channel: string, timestamp: string, name: string) {
+  try {
+    await client.reactions[method]({ channel, timestamp, name });
+  } catch (e: any) {
+    const err = e?.data?.error ?? String(e);
+    if (err === 'already_reacted' || err === 'no_reaction') return;
+    if (!reactWarned) {
+      reactWarned = true;
+      console.error(`gabbar: reactions.${method} failed (${err}) — check reactions:write scope`);
+    }
+  }
+}
+
+// "Gabbar is thinking..." via the Assistants status API; probed once, auto-clears on reply
+let statusUsable: boolean | null = null;
+let statusWarned = false;
+async function setThinking(client: any, channel: string, threadTs: string) {
+  if (statusUsable === false) return;
+  try {
+    await client.apiCall('assistant.threads.setStatus', { channel_id: channel, thread_ts: threadTs, status: 'is thinking...' });
+    statusUsable = true;
+  } catch (e: any) {
+    const apiErr = typeof e?.data?.error === 'string' ? e.data.error : null;
+    if (!statusWarned) {
+      statusWarned = true;
+      console.error(`gabbar: assistant status unavailable (${apiErr ?? e}), reactions only`);
+    }
+    if (apiErr) statusUsable = false; // real API error latches; network blips stay retryable
+  }
+}
+async function clearThinking(client: any, channel: string, threadTs: string) {
+  if (statusUsable === false) return;
+  try {
+    await client.apiCall('assistant.threads.setStatus', { channel_id: channel, thread_ts: threadTs, status: '' });
+  } catch {}
+}
+
+// eyes add is fire-and-forget, but removal must chain on it or a slow add outruns the remove
+const pendingEyes = new Map<string, Promise<void>>();
+function eyesOn(client: any, channel: string, ts: string) {
+  pendingEyes.set(`${channel}:${ts}`, react(client, 'add', channel, ts, 'eyes'));
+}
+function eyesOff(client: any, channel: string, ts: string, finalEmoji?: string) {
+  const key = `${channel}:${ts}`;
+  const p = pendingEyes.get(key) ?? Promise.resolve();
+  pendingEyes.delete(key);
+  void p.then(() => react(client, 'remove', channel, ts, 'eyes'))
+    .then(() => { if (finalEmoji) void react(client, 'add', channel, ts, finalEmoji); });
+}
+
 async function handle({ message, event, client, say }: any) {
   const m = message ?? event;
   if (m.subtype || m.user === SELF_USER || (!m.user && m.bot_id)) return; // edits, joins, our own replies
   const text: string = (m.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
   const threadTs: string | null = m.thread_ts && m.thread_ts !== m.ts ? m.thread_ts : null;
+  if (!text && !m.files?.length) return;
+
+  eyesOn(client, m.channel, m.ts);
+  if (m.channel_type === 'im') void setThinking(client, m.channel, threadTs ?? m.ts);
 
   const [name, attachments, history, fb] = await Promise.all([
     senderName(client, m.user),
@@ -104,7 +160,13 @@ async function handle({ message, event, client, say }: any) {
     buildHistory(client, m.channel, threadTs, m.ts),
     existingFeedback(m.channel, threadTs),
   ]);
-  if (!text && attachments.length === 0) return;
+  if (!text && attachments.length === 0) {
+    // files-only message whose downloads all failed: resolve the ack, don't vanish
+    await say({ thread_ts: threadTs ?? m.ts, text: "couldn't read those files, try re-uploading or add a line of text" }).catch(() => {});
+    eyesOff(client, m.channel, m.ts, 'x');
+    if (m.channel_type === 'im') void clearThinking(client, m.channel, threadTs ?? m.ts);
+    return;
+  }
 
   const ctx: AgentContext = {
     senderId: m.user,
@@ -120,6 +182,7 @@ async function handle({ message, event, client, say }: any) {
 
   const reply = await runAgent(ctx, history, text);
   await say({ thread_ts: threadTs ?? m.ts, text: reply });
+  eyesOff(client, m.channel, m.ts, 'white_check_mark');
 }
 
 // intake must never die silently: any unexpected failure still answers the human
@@ -129,6 +192,10 @@ async function safeHandle(args: any) {
   } catch (e) {
     console.error('gabbar handler error:', e);
     const m = args.message ?? args.event;
+    if (m?.channel && m?.ts) {
+      eyesOff(args.client, m.channel, m.ts, 'x');
+      void clearThinking(args.client, m.channel, m.thread_ts ?? m.ts);
+    }
     await args.say?.({ thread_ts: m?.thread_ts ?? m?.ts, text: `kuch toot gaya (${String(e).slice(0, 120)}). try again in a bit.` }).catch(() => {});
   }
 }
