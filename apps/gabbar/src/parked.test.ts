@@ -176,7 +176,7 @@ test('a stakeholder gap waits a day, because the owner was already pinged once',
   expect(P.dueForEscalation(now, [{ ...gap, createdAt: new Date(now - 25 * HOUR).toISOString() }])).toHaveLength(1);
 });
 
-test('escalating once buys a day of quiet, then it comes back', () => {
+test('escalating an outage buys a day of quiet, then it comes back', () => {
   const now = Date.now();
   const item = aged(input({ cause: 'outage' }), 5 * DAY);
   expect(P.dueForEscalation(now)).toHaveLength(1);
@@ -186,6 +186,93 @@ test('escalating once buys a day of quiet, then it comes back', () => {
   expect(P.dueForEscalation(now)).toHaveLength(0);
   // and it does NOT go quiet forever: still held tomorrow means told again tomorrow
   expect(P.dueForEscalation(now + DAY + 1000)).toHaveLength(1);
+});
+
+// ---------- the repeat is weekly now that the board carries the same report ----------
+// The daily repeat was set when the owner DM was the only place a held report existed. The board's
+// Feedback view now shows every one of them with reporter, cause, age, verbatim words, attachments,
+// whether the owner has been told, and the remedy, so a daily DM nags about something already on
+// screen. What the DM still uniquely does is reach somebody who is NOT looking, and that is worth
+// less often. These pin the new ladder, and the one cause that keeps the daily push.
+const escalatedAgo = (item: ParkedItem, createdMsAgo: number, escalatedMsAgo: number, now: number): ParkedItem => ({
+  ...item,
+  createdAt: new Date(now - createdMsAgo).toISOString(),
+  escalatedAt: new Date(now - escalatedMsAgo).toISOString(),
+  escalations: 1,
+});
+
+test('an already-reported gap waits a week, not a day: the board is carrying it', () => {
+  const now = Date.now();
+  const gap = P.parkReport(input({ cause: 'stakeholder_gap' }));
+  // told 25h ago, held 2 days: the old daily rule would have fired again by now
+  expect(P.dueForEscalation(now, [escalatedAgo(gap, 2 * DAY, 25 * HOUR, now)])).toHaveLength(0);
+  expect(P.dueForEscalation(now, [escalatedAgo(gap, 5 * DAY, 3 * DAY, now)])).toHaveLength(0);
+});
+
+test('an outage keeps the daily push: a held outage is a fault, not a queue', () => {
+  const now = Date.now();
+  const out = P.parkReport(input({ cause: 'outage' }));
+  expect(P.dueForEscalation(now, [escalatedAgo(out, 2 * DAY, 25 * HOUR, now)])).toHaveLength(1);
+  expect(P.dueForEscalation(now, [escalatedAgo(out, 2 * DAY, 2 * HOUR, now)])).toHaveLength(0);
+});
+
+// THE ASSERTION THAT WOULD HAVE CAUGHT THE FIRST ATTEMPT AT THIS. Escalating an old item back to
+// daily was tried and dropped: a daily DM about a report held for months does not raise pressure,
+// it teaches the owner to skim the digest, which costs tomorrow's report its one safety net. It was
+// also unreachable, since a week after a 1h-or-24h first ping is already past any week-old mark, so
+// "weekly" would have been a bound that never once held. Weekly means weekly, at any age.
+test('a report held for months is still weekly, never promoted back to daily', () => {
+  const now = Date.now();
+  const gap = P.parkReport(input({ cause: 'stakeholder_gap' }));
+  const ref = P.parkReport(input({ ts: '1754771234.777777', cause: 'bad_reference' }));
+  for (const [age, told] of [[40 * DAY, 25 * HOUR], [90 * DAY, 3 * DAY], [400 * DAY, 6 * DAY]] as const) {
+    expect(P.dueForEscalation(now, [escalatedAgo(gap, age, told, now)])).toHaveLength(0);
+    expect(P.dueForEscalation(now, [escalatedAgo(ref, age, told, now)])).toHaveLength(0);
+  }
+  // and it is silence, not amnesia: the week comes round and it is told again
+  expect(P.dueForEscalation(now, [escalatedAgo(gap, 400 * DAY, 7 * DAY + HOUR, now)])).toHaveLength(1);
+});
+
+// The ladder, pinned end to end, so "weekly" is a claim the code has to keep rather than a word in
+// a comment. A stakeholder gap: first ping on the 24h clock, then one every seven days, forever.
+test('the ladder is one early ping and then a reminder a week, at every age', () => {
+  const T = Date.parse('2026-08-01T00:00:00.000Z');
+  const run = (cause: 'stakeholder_gap' | 'outage', hours: number) => {
+    let item: ParkedItem = { ...P.parkReport(input({ cause })), createdAt: new Date(T).toISOString(), escalatedAt: null, escalations: 0 };
+    const pings: number[] = [];
+    for (let h = 0; h <= hours; h++) {
+      const now = T + h * HOUR;
+      if (!P.dueForEscalation(now, [item]).length) continue;
+      pings.push(h);
+      item = { ...item, escalatedAt: new Date(now).toISOString(), escalations: item.escalations + 1 };
+    }
+    return pings;
+  };
+  // 24h, then day 8, 15, 22, 29, 36: no day-7 switch, no daily tail
+  expect(run('stakeholder_gap', 40 * 24)).toEqual([24, 24 + 7 * 24, 24 + 14 * 24, 24 + 21 * 24, 24 + 28 * 24, 24 + 35 * 24]);
+  // an outage is the one that stays daily, and it starts within the hour
+  expect(run('outage', 5 * 24)).toEqual([1, 25, 49, 73, 97]);
+});
+
+test('the gap between reminders is a function of the cause and of nothing else', () => {
+  const now = Date.now();
+  const gap = P.parkReport(input({ cause: 'stakeholder_gap' }));
+  expect(P.repeatEscalationMs(gap)).toBe(7 * DAY);
+  expect(P.repeatEscalationMs({ ...gap, cause: 'bad_reference' })).toBe(7 * DAY);
+  expect(P.repeatEscalationMs({ ...gap, cause: 'outage' })).toBe(DAY);
+  // age cannot move it, and neither can a createdAt nothing can parse
+  for (const createdAt of [new Date(now - HOUR).toISOString(), new Date(now - 500 * DAY).toISOString(), 'not a date']) {
+    expect(P.repeatEscalationMs({ ...gap, createdAt })).toBe(7 * DAY);
+    expect(P.repeatEscalationMs({ ...gap, cause: 'outage', createdAt })).toBe(DAY);
+  }
+});
+
+test('a longer cadence still never deletes anything and still never escalates what is filed', () => {
+  const item = aged(input({ cause: 'stakeholder_gap' }), 90 * DAY);
+  expect(P.dueForEscalation(Date.now())).toHaveLength(1); // 90 days on, still owed a reminder
+  expect(P.readParked(item.parkId)?.status).toBe('parked');
+  P.markPromoted(item.parkId, 'MRF-FB-4', 'Raj');
+  expect(P.dueForEscalation(Date.now())).toHaveLength(0);
 });
 
 test('a held report is never deleted, only escalated', () => {
@@ -317,7 +404,7 @@ test('a big backlog names the oldest, counts the rest, and stays sendable', () =
   expect(text.length).toBeLessThan(40_000); // slack's hard limit, which 200 lines blew past
   expect(text).toContain('200 reports are still held and NOT filed');
   expect(text).toContain(`and ${omitted} more held reports not listed here`);
-  expect(text).toContain('none of this is on a board');
+  expect(text).toContain('nothing here is filed');
   expect(text).not.toMatch(/-FB-\d+/);
   expect(text).toContain('report number 0'); // the oldest is named, not an arbitrary 30
 });
@@ -328,6 +415,11 @@ test('a small backlog is listed in full with no count line', () => {
   expect(omitted).toBe(0);
   expect(text).toContain('a report is still held and NOT filed');
   expect(text).not.toContain('not listed here');
+  // the board carries held reports now, so the digest no longer claims otherwise. What it must
+  // still never do is imply something was filed, or hand over a link instead of the words.
+  expect(text).toContain('nothing here is filed. no feedback id, no triage queue, no orchestrator working it.');
+  expect(text).not.toContain('none of this is on a board');
+  expect(text).not.toMatch(/https?:\/\//);
 });
 
 test('the digest ages items against the clock it was given', () => {

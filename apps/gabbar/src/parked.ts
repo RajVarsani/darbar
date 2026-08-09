@@ -54,7 +54,7 @@ export type ParkedItem = {
   cause: ParkCause;
   /** last time the sweep spent a gate check on this item; null means never tried */
   lastAttemptAt: string | null;
-  /** last time the owner was told this is still sitting here, so a digest cannot repeat daily */
+  /** last time the owner was told this is still sitting here, so the digest cannot repeat every tick */
   escalatedAt: string | null;
   escalations: number;
   promotion: { at: string; feedbackShortId: string; promotedBy: string } | null;
@@ -269,20 +269,50 @@ export function withFilingNotice(reply: string, filedNow: string[]): string {
 //
 // The first delay depends on what the owner already knows. A stakeholder gap pinged them at park
 // time, so it waits a day before nagging. An outage or a bad reference pinged nobody at all, so
-// it surfaces within the hour. After that everything repeats daily, as ONE digest rather than a
-// message per item.
+// it surfaces within the hour. After that it repeats, as ONE digest rather than a message per item.
 export const FIRST_ESCALATION_MS: Record<ParkCause, number> = {
   stakeholder_gap: 24 * 60 * 60 * 1000,
   outage: 60 * 60 * 1000,
   bad_reference: 60 * 60 * 1000,
 };
-export const REPEAT_ESCALATION_MS = 24 * 60 * 60 * 1000;
+
+// THE REPEAT USED TO BE DAILY, and it was daily because the DM was the only place a held report
+// existed at all. That stopped being true: the board's Feedback view now carries a held band, with
+// the count on the tab from every view, and per report the reporter, the cause, the age, their
+// words verbatim, the attachments, whether the owner has already been told, and the remedy. Checked
+// against the rendering rather than taken on trust. Everything the digest says is visible without
+// it now, so what the digest still uniquely does is PUSH: reach somebody who is not looking.
+//
+// A push is worth less often, so the repeat is weekly and STAYS weekly however long the item sits.
+// Escalating an old item back to daily was considered and rejected on both counts. On the merits: a
+// daily DM about a ninety-day-old held report does not raise pressure, it teaches the owner to skim
+// past the digest, which costs the report that arrives tomorrow its one safety net. The ladder still
+// has its pressure step, and it is the FIRST ping at 1h or 24h; after that a steady weekly reminder
+// is a reminder rather than nagging. On the mechanics: any age-based switch to daily fires before a
+// weekly repeat ever can, because the first escalation lands at 1h or 24h and a week from there is
+// already past the age mark. "Weekly by default" would then have been a bound that never once held,
+// which is the same dead-config defect as a comment describing a limit the code does not apply.
+//
+// `outage` is the one exception and it is not a repeat at all in spirit: nobody was pinged at park
+// time for those, so daily is first contact rather than nagging, and an outage item still held means
+// the retry path never healed, which is a fault rather than a queue.
+export const REPEAT_ESCALATION_MS = 7 * 24 * 60 * 60 * 1000;
+export const OUTAGE_REPEAT_ESCALATION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long this item waits between reminders. A function of the CAUSE and nothing else: age does not
+ * enter into it, so the gap a held item gets on day 3 is the gap it still gets on day 300, and there
+ * is no clock in here that can silently reclassify an item as it sits.
+ */
+export function repeatEscalationMs(item: ParkedItem): number {
+  return item.cause === 'outage' ? OUTAGE_REPEAT_ESCALATION_MS : REPEAT_ESCALATION_MS;
+}
 
 /** held items the owner is owed an update about. Pure, so the clock can be tested. */
 export function dueForEscalation(now: number = Date.now(), items?: ParkedItem[]): ParkedItem[] {
   return (items ?? listParked({ status: 'parked' })).filter((item) => {
     if (item.status !== 'parked') return false;
-    if (item.escalatedAt) return now - Date.parse(item.escalatedAt) >= REPEAT_ESCALATION_MS;
+    if (item.escalatedAt) return now - Date.parse(item.escalatedAt) >= repeatEscalationMs(item);
     const age = now - Date.parse(item.createdAt);
     return Number.isFinite(age) && age >= FIRST_ESCALATION_MS[item.cause];
   });
@@ -348,7 +378,11 @@ export function buildEscalationDigest(due: ParkedItem[], now: number = Date.now(
   const head = due.length > 1 ? `${due.length} reports are still held and NOT filed:` : 'a report is still held and NOT filed:';
   const lines = [head, ...shown.map((i) => escalationLine(i, now))];
   if (omitted > 0) lines.push(`...and ${omitted} more held report${omitted > 1 ? 's' : ''} not listed here. ask me to list_parked for the full set.`);
-  lines.push('', 'none of this is on a board and no orchestrator has it. add the person as a stakeholder, or ask me to promote it.');
+  // "none of this is on a board" was true when it was written and is not any more: the board's
+  // Feedback view carries a held band now. What has not changed is that nothing here is filed and
+  // nobody is working it, which is the part that matters, so the claim narrows to that instead of
+  // being dropped. Still no feedback id and still no link, because a held report has neither.
+  lines.push('', 'nothing here is filed. no feedback id, no triage queue, no orchestrator working it. add the person as a stakeholder, or ask me to promote it.');
   let text = lines.join('\n');
   if (text.length > MAX_DIGEST_CHARS) text = `${text.slice(0, MAX_DIGEST_CHARS - 80)}\n...truncated. ask me to list_parked for the full set.`;
   return { text, listed: shown.length, omitted };
