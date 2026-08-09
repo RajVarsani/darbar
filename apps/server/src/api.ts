@@ -127,6 +127,28 @@ async function maybeAdvanceParent(parentId: ObjectId) {
   }
   await Tasks.updateOne({ _id: parentId }, { $set: { status: 'done', updatedAt: new Date() } });
   await logEvent(parent.projectId, `${parent.shortId} auto-advanced → done (all reviews closed)`, parent._id);
+  const shipped = await Tasks.findOne({ _id: parentId });
+  if (shipped) await resolvePromotedFeedback(shipped);
+}
+
+// task shipped -> feedback PROMOTED to it (resolvedTaskId) auto-resolves and the thread hears the ending.
+// Asymmetric with the done-gate on purpose: rows FILED ON a task (taskId) still block done.
+// Direct updateOne + reply here — never re-enters the PATCH /feedback route.
+const PROMOTED_OPEN: FeedbackStatus[] = ['triaged', 'accepted', 'in_progress'];
+async function resolvePromotedFeedback(task: Task) {
+  if (task.type === 'review') return; // reviews are never promotion targets
+  const rows = await Feedback.find({ resolvedTaskId: task._id, status: { $in: PROMOTED_OPEN } }).toArray();
+  if (rows.length === 0) return;
+  const last = task.commits[task.commits.length - 1];
+  const resolution = `shipped: ${task.shortId} (${task.title}) is done${last ? ` (commit ${last})` : ''}`;
+  for (const fb of rows) {
+    await Feedback.updateOne({ _id: fb._id }, { $set: { status: 'resolved', resolution, updatedAt: new Date() } });
+    await logEvent(fb.projectId, `${fb.shortId} auto-resolved: ${task.shortId} shipped`, fb.taskId);
+    await slackThreadReply(fb, `*${fb.shortId} resolved.* ${resolution}`.trim());
+  }
+  // rows just resolved may have been the last hold on the task they were FILED ON
+  const filedOn = new Map(rows.filter((fb) => fb.taskId).map((fb) => [fb.taskId!.toHexString(), fb.taskId!]));
+  for (const id of filedOn.values()) await maybeAdvanceParent(id);
 }
 
 async function resolveProject(ref: string) {
@@ -347,6 +369,7 @@ api.patch('/tasks/:ref', async (c) => {
   // closing the last review lane advances (or announces) the parent
   if (after && set.status === 'in_review' && t.status !== 'in_review' && t.type !== 'review') await spawnReviews(after);
   if (t.type === 'review' && CLOSED.includes(set.status as TaskStatus) && t.parentTaskId) await maybeAdvanceParent(t.parentTaskId);
+  if (after && set.status === 'done') await resolvePromotedFeedback(after);
   return c.json(after);
 });
 
@@ -427,10 +450,15 @@ api.patch('/feedback/:shortId', async (c) => {
   const type = str(b.type); if (type && FEEDBACK_TYPES.includes(type)) set.type = type;
   if (str(b.resolvedTaskRef)) {
     const t = await resolveTaskRef(str(b.resolvedTaskRef)!);
-    if (t) { set.resolvedTaskId = t._id; set.resolvedTaskShortId = t.shortId; }
+    if (t) {
+      set.resolvedTaskId = t._id; set.resolvedTaskShortId = t.shortId;
+      // promotion IS triage: a pending row promoted without an explicit status must not stay pending
+      if (fb.status === 'pending' && !str(b.status)) set.status = 'triaged';
+    }
   }
   await Feedback.updateOne({ _id: fb._id }, { $set: set });
-  await logEvent(fb.projectId, `${fb.shortId} → ${str(b.status) ?? 'updated'}${resolution ? `: ${resolution}` : ''}`, fb.taskId);
+  const statusNote = str(b.status) ?? (set.status === 'triaged' ? 'triaged (auto: promoted)' : 'updated');
+  await logEvent(fb.projectId, `${fb.shortId} → ${statusNote}${resolution ? `: ${resolution}` : ''}`, fb.taskId);
 
   // every terminal state (and clarification) replies in the original thread; nothing dies silently
   if (b.status === 'resolved') await slackThreadReply(fb, `*${fb.shortId} resolved.* ${resolution ?? ''}`.trim());
