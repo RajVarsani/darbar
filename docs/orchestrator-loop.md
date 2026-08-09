@@ -1,49 +1,69 @@
-# Orchestrator drain loop
+# Orchestrator loop, wire reference
 
-The standing manager loop a Darbar orchestrator session runs after
-`darbar-project-init` step 6. The orchestrator writes no code: it drains
-feedback, keeps the board truthful, and dispatches builders. All examples use
-`DAR` as the project prefix; swap in yours. API base: `http://localhost:4899/api`
-(MCP tools wrap the same routes — use either).
+The executable half of the orchestrator job: exact routes, bodies, field allowlists,
+error strings, and the cold-start sequence. All examples use `DAR` as the project
+prefix; swap in yours. API base: `http://localhost:4899/api`. The MCP tools wrap the
+same routes, so either is fine.
 
-## 1. The loop
+**The `darbar-project-init` skill is the authority**, and it is the full operating manual:
+every lifecycle as implemented, the reasoning behind each rule, and how to recover a board
+someone else left mid-flight. It is self-sufficient; this file is not. The division of
+labour, stated so the two do not drift:
 
-Poll pending feedback for your project; the route returns oldest-first already:
+- Every rule's **reasoning, edge cases and recovery** live only in the skill. Nothing here
+  is the sole home of a rule.
+- This file carries **commands, exact bodies, error strings and the per-round checklist**,
+  and states a binding rule as a bare imperative when a command is easy to fire with the
+  wrong expectation. Those imperatives are duplication on purpose, kept to one clause.
+- Where the two overlap, **the skill wins**. If you change a rule, change it there first
+  and reduce whatever is here to a pointer.
+
+Standing constraints in one block, so no command below is available without them:
+
+- The orchestrator writes no code. One subagent per task, each with its own board row.
+- One writer per file. Concurrent agents only on disjoint files.
+- `lanes` is mandatory and explicit at create. Default `["code-review"]`. Omitting the
+  field spawns every configured lane.
+- One review round is the norm. On BLOCK, fold accepted findings into ONE rework and
+  verify with tests plus a typecheck.
+- The board carries ALL known pending work, human-owned included, at all times.
+- Slack is draft-first. Never send without approval in that turn.
+- Commit per task after its lanes close; stage by explicit path; never `git add -A`.
+
+## 1. The round
+
+Poll pending feedback for your project; the route returns oldest-first already, and
+includes `needs_clarification`. A thread reply reopens such a row to `pending` with its
+body unchanged: the answer is in Slack, not on the row, so open the thread from
+`slack.channel` / `slack.ts` before re-triaging. A follow-up may also arrive as a separate
+row; dedupe it (skill, B3).
 
 ```bash
 curl -s 'localhost:4899/api/feedback/pending?project=DAR'
 ```
 
-Rows come back in `pending` or `needs_clarification` (a thread reply reopens a
-clarification row to `pending`; it re-appears here — never duplicate it).
-
-Self-paced: in a Claude session, pace with ScheduleWakeup-style waits rather
-than spinning. Active board = poll every few minutes; quiet board (empty result,
-no open dispatches) = back off to 20-30 min. Each wake is one **round**: drain
-the queue to empty, dispatch, audit (section 6), then sleep.
+Self-paced: pace with ScheduleWakeup-style waits rather than spinning. Active board =
+every few minutes; quiet board (empty result, no open dispatches) = back off to 20 to 30
+minutes. Each wake is one round: drain the queue to empty, dispatch, audit (section 8),
+then sleep.
 
 ## 2. Triage verbs
 
-Every drained item gets exactly one verb, applied via
-`PATCH /api/feedback/:shortId`. The three terminal-ish states
-(`resolved`, `rejected`, `needs_clarification`) auto-reply in the author's
-original Slack thread server-side — write `resolution` as a human-readable
-sentence, it is the reply text.
+Every drained item gets exactly one verb, applied via `PATCH /api/feedback/:shortId`.
+`resolved`, `rejected` and `needs_clarification` auto-reply in the author's Slack
+thread, using the `resolution` **in that same request body**. Send it every time.
 
-**Rework an existing task** — the defect belongs to a task already on the
-board. Reopen the task, park the feedback on it, resolve when the rework lands:
+**Rework an existing task.** The defect belongs to a card already on the board:
 
 ```bash
 curl -s -X PATCH localhost:4899/api/tasks/DAR-7 -H 'content-type: application/json' \
   -d '{"status":"todo","notes":"reopened for FB-3: button still clips on mobile"}'
 curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-3 -H 'content-type: application/json' \
   -d '{"status":"accepted","resolvedTaskRef":"DAR-7"}'
-# ...later, when DAR-7 closes:
-curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-3 -H 'content-type: application/json' \
-  -d '{"status":"resolved","resolution":"Fixed in DAR-7; mobile clipping gone."}'
+# ...later, when DAR-7 closes: nothing to do if FB-3 was promoted onto it (section 5).
 ```
 
-**Create a new task** — real work with no card yet:
+**Create a new task.** Real work with no card yet:
 
 ```bash
 curl -s -X POST localhost:4899/api/tasks -H 'content-type: application/json' \
@@ -52,31 +72,31 @@ curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-4 -H 'content-type: applicat
   -d '{"status":"resolved","resolvedTaskRef":"DAR-12","resolution":"Tracked as DAR-12, in this cycle."}'
 ```
 
-(Resolve immediately when "there is now a card" answers the author; keep it
-`accepted` + `resolvedTaskRef` instead if they should only hear back on ship.
-`lanes` is on the create call on purpose: see section 4 for how to pick it.)
+Resolve immediately when "there is now a card" answers the author; keep it `accepted` or
+`triaged` plus `resolvedTaskRef` instead if they should only hear back on ship.
 
-**Reject** — out of scope, working as intended, or won't do. Always give the reason:
+**Reject.** Out of scope, working as intended, or will not do. Always give the reason:
+with no `resolution` the server posts `no reason given (that is a bug, flag it)` into the
+author's thread.
 
 ```bash
 curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-5 -H 'content-type: application/json' \
   -d '{"status":"rejected","resolution":"Intentional: drafts autosave, no Save button planned."}'
 ```
 
-**Needs clarification** — cannot triage without more. `resolution` carries the question:
+**Needs clarification.** `resolution` carries the question. This state does NOT block the
+task's `done`, so do not use it as a hold:
 
 ```bash
 curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-6 -H 'content-type: application/json' \
   -d '{"status":"needs_clarification","resolution":"which browser and page? A screenshot would help."}'
 ```
 
-The author's thread reply flips the row back to `pending`; it returns in a
-later round with the answer appended.
-
 ## 3. Dedupe
 
-Same defect from two authors = **one task**, both feedback rows resolved
-pointing at it (each author gets their own thread reply):
+Same defect from two authors is ONE task and two rows pointing at it, so each author gets
+their own thread reply. Scan for an existing card before creating anything:
+`GET /api/tasks?project=DAR&open=true`.
 
 ```bash
 curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-8 -H 'content-type: application/json' \
@@ -85,25 +105,15 @@ curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-9 -H 'content-type: applicat
   -d '{"status":"resolved","resolvedTaskRef":"DAR-12","resolution":"Already tracked as DAR-12."}'
 ```
 
-Before creating any task, scan open tasks for an existing card
-(`GET /api/tasks?project=DAR&open=true`).
-
 ## 4. Dispatch
 
-One builder subagent per task, one scoped task each. The builder owns its own
-row: it PATCHes itself `in_progress` on start and `in_review` (with `notes`)
-when done. The orchestrator never moves a dispatched task's status by hand.
+One builder subagent per task, one scoped task each. The builder owns its row:
+`in_progress` on start, `in_review` with `notes` when done, `blocked` with `blocker` if
+stuck. The orchestrator never moves a dispatched task's status by hand.
 
-When the agent is in the project's agent registry
-(`GET /api/projects/DAR/context` → `agents: [{name, kind, brief, trigger?}]`,
-or the `get_project_context` MCP tool), that is where the prompt comes from: the
-agent's `brief` IS its standing charter — dispatch it verbatim plus that task's
-context. Do not improvise a charter for an agent that has one.
-
-Stamp the dispatch as you hand it out (`PATCH {"dispatched": true}`): the board then
-shows a DISPATCHED badge with its age, which turns red after 15 minutes with no
-`in_progress` report. Any status change clears the stamp server-side, so a builder
-that reports in retires its own badge.
+The prompt is the agent's registry `brief` verbatim
+(`GET /api/projects/DAR/context` → `agents: [{name, kind, brief, trigger?}]`) plus that
+task's context. Do not improvise a charter for an agent that has one.
 
 ```bash
 # orchestrator, at the moment the builder is handed the task:
@@ -113,28 +123,37 @@ curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/j
 curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/json' -d '{"status":"in_review","notes":"2-line summary"}'
 ```
 
-Entering `in_review` spawns the review lanes **server-side** (one `type=review`
-subtask per lane the task selected, each assigned to that lane's manager from
-`project.pipeline.reviews`). That makes `lanes` a decision you make when you FILE
-the task, and it is mandatory: always send it explicitly at `create_task`. Omit
-the field and the `in_review` PATCH spawns every configured lane, which is how one
-routine feature ate three review agents plus three rounds of re-verification.
+`dispatched` is a boolean verb; the server owns the clock. A status CHANGE clears the
+stamp (the agent's own report supersedes the hand-off); re-sending the same status does
+not. The board shows the badge with its age and reds it past 15 minutes, but only on
+`todo`/`backlog` rows.
 
-- `lanes: ["code-review"]` is the default and the right answer for ordinary work.
-- Add `qa` only when reading the diff cannot answer the question. A live data
-  migration is the standard case: the code can be correct while the migrated
-  rows are wrong.
-- Add `design-qa` only for a UI surface a human will actually look at.
-- Helper and bookkeeping rows get `lanes: []`, so `in_review` closes itself.
-- Keep the full set plus re-verification for work that can hurt someone: the
-  public front door, anything touching exposure.
+Helpers are dispatched the same way, with their own row and `lanes: []`:
 
-Lane keys must exist in the pipeline (unknown keys 400), and the selection
-freezes once the review flow starts — status in `in_review|qa|done|cancelled`
-(note `blocked` is not frozen), or any review child already spawned (closed ones
-included), both 409. So the lane you left off stays off; decide once, at filing.
-Never hand-create review tasks. Lane managers drain their queue, review, file
-findings as feedback on the parent, and close their lane:
+```bash
+curl -s -X POST localhost:4899/api/tasks -H 'content-type: application/json' \
+  -d '{"project":"DAR","title":"Deploy DAR-12 branch to devx","type":"chore","assignee":"deploy-devx","origin":"helper:DAR-12","lanes":[]}'
+```
+
+A registry `trigger` is a hint. Nothing server-side dispatches helpers.
+
+## 5. Lanes
+
+Entering `in_review` spawns one `type=review` child per selected lane, assigned to that
+lane's `manager` from `project.pipeline.reviews`. Spawning happens on the TRANSITION into
+`in_review`, so a task created at `in_review` never spawns anything, and a parent pushed
+out and back in spawns a whole fresh round.
+
+Selection: `["code-review"]` default, add `qa` only when the diff cannot answer the
+question (live data migration), add `design-qa` only for a UI surface a human will look
+at, `[]` for helper and bookkeeping rows, the full set only for the public front door or
+anything touching exposure.
+
+Lane keys are NOT on `/projects/:ref/context`. Read them from `GET /api/projects`
+(everything but the charter, and line 1 of the cold start) or the board payload
+(`/api/p/:capId` → `project.pipeline`); a wrong key also 400s with the valid list.
+
+Manager queue, finding, close:
 
 ```bash
 curl -s 'localhost:4899/api/tasks?assignee=staff-engineer&open=true'
@@ -144,58 +163,111 @@ curl -s -X PATCH localhost:4899/api/tasks/DAR-13 -H 'content-type: application/j
   -d '{"status":"done","notes":"lane passed"}'
 ```
 
-The parent takes care of itself: `done` is rejected (409) while review children
-are open, and closing the last lane auto-advances the parent to `done` (unless
-`pipeline.autoAdvance` is false — then push it explicitly). Lane findings
-arrive as agent-authored feedback in your normal drain; triage them like any
-other row (usually: rework verb on the parent).
+Never hand-create a `type=review` task; the route accepts one and it will have no gate
+behind it. Findings go on the PARENT, which is what holds the parent's `done`.
 
-**One review round is the norm.** A lane returns SHIP or BLOCK. On BLOCK, sort
-the findings first: the ones you accept go to ONE builder as a single rework
-task, and that rework is verified with tests plus a typecheck, not by opening a
-fresh lane. Findings that are real but not blocking become their own backlog
-tasks and never sit on a ship gate. Putting the same change through a second
-review round needs a reason you can say out loud, beyond wanting to be thorough.
+## 6. Gates and error strings
 
-**Helpers** (`kind: "helper"` in the registry — deploy, seeding, migrations,
-release notes) are dispatched exactly like builders. Give the run a task row,
-prompt the subagent with the helper's `brief` plus the task context, and let it
-PATCH its own row from `in_progress` to `in_review`/`done` — helper work shows
-on the board like everyone else's, never as an invisible side errand:
+Both `done` gates apply to non-review tasks only. A review child's own close is never
+gated.
+
+| Attempt | Result |
+|---|---|
+| `done` with an open review child | 409 `has N open review subtask(s); close them (or cancel them) first` |
+| `done` with feedback filed on it in `pending`/`triaged`/`accepted`/`in_progress` | 409 `has N open feedback row(s) (DAR-FB-3); resolve or reject them first` |
+| `done` with only `needs_clarification` feedback | allowed |
+| `lanes` on a task in `in_review`/`qa`/`done`/`cancelled` | 409 `lanes are frozen once the review flow starts` (`blocked` is NOT frozen) |
+| `lanes` on a task with any review child, closed ones included | 409 `already has review children; lanes cannot change` |
+| `lanes` with an unknown key | 400 `unknown lane(s): x; valid lane keys: ...` |
+| `lanes: [123]` | 400 `lanes must be null or an array of lane-key strings` |
+| `dispatched: "yes"` | 400 `dispatched must be true (stamp now) or false (clear)` |
+| prefix with a digit on `POST /projects` | 400 `name (string) and prefix (2-6 letters) required` |
+| duplicate project prefix | 409 |
+| `resolvedTaskRef` naming a task that does not exist | 200, silently unlinked. Read back `resolvedTaskShortId` |
+
+Last review child closes and then, in order: open reviews? hold. Blocking feedback?
+log `reviews closed but N open feedback (...) — holding`. `autoAdvance:false`? log
+`all reviews closed — awaiting explicit push out of in_review`. Otherwise set `done`,
+clear the dispatch stamp, and auto-resolve every row promoted onto it (`triaged`,
+`accepted`, `in_progress`) with `shipped: DAR-12 (title) is done (commit abc123)` plus a
+thread reply, then re-run the same check on whatever task those rows were filed on. That
+cascade is what closes a one-round BLOCK with no manual status moves.
+
+`lanes: []` self-closes only when `autoAdvance` is true. With it false the row waits for
+an explicit push like any other.
+
+## 7. Field allowlists
+
+Anything not listed is ignored with a 200, so a rejected field looks like a success.
+
+- `POST /tasks`: `project`, `title`, `description`, `status`, `type`, `parentTaskRef`,
+  `lane`, `lanes`, `assignee`, `assigneeType`, `origin`, `notes`. No status gate: any
+  status, including `done`, is accepted at create.
+- `PATCH /tasks/:ref`: `title`, `description`, `status`, `notes`, `type`, `assignee`,
+  `blocker`, `lane`, `assigneeType`, `dispatched`, `lanes`, `addCommit` (append-only,
+  one hash per call). NOT settable: `origin`, `commits`, `shortId`, `parentTaskRef`,
+  project. Origin and parentage are create-time only.
+- `POST /feedback`: `taskRef` or `project`, `author`, `authorType`, `type`, `body`,
+  `attachments`, `slack`. Always lands at `pending`.
+- `PATCH /feedback/:shortId`: `status`, `resolution`, `type`, `resolvedTaskRef`.
+  Promotion from `pending` with no explicit status auto-sets `triaged`.
+- `PATCH /projects/:ref`: `charter`, `slackChannel`, `pipeline`, `agents`, `proxy`.
+  Each replaces its value wholesale; read, edit, send whole. An empty body 400s.
+- `POST /projects`: `name`, `prefix`, `repos`, `charter`, `stakeholders`, `slackChannel`
+  only. `pipeline`, `agents` and `proxy` sent here are dropped silently.
+
+MCP tools cover most of this but not all: `update_task` has no `title`, `description`,
+`lane` or `assigneeType`; `create_task` has no `notes` or `lane`; there is no
+create-project tool; `resolve_feedback` cannot set `pending` (only Gabbar's thread reopen
+does). Use curl for those.
+
+## 8. End-of-round board audit
+
+What to run before sleeping. What each finding MEANS, and how to recover it, is the skill's
+Part D; this is the sweep.
 
 ```bash
-curl -s -X POST localhost:4899/api/tasks -H 'content-type: application/json' \
-  -d '{"project":"DAR","title":"Deploy DAR-12 branch to devx","type":"chore","assignee":"deploy-devx","origin":"helper:DAR-12","lanes":[]}'
+curl -s "localhost:4899/api/p/$CAP" > /tmp/board.json   # every task, no 200-row cap
+python3 - <<'PY'
+import json, datetime
+d = json.load(open('/tmp/board.json'))
+now = datetime.datetime.now(datetime.timezone.utc)
+age = lambda s: (now - datetime.datetime.fromisoformat(s.replace('Z','+00:00'))).total_seconds()/60
+rev = [t for t in d['tasks'] if t['type'] == 'review']
+openrev = lambda p: [r for r in rev if r['parentTaskId'] == p['_id'] and r['status'] not in ('done','cancelled')]
+for t in d['tasks']:
+    if t['type'] == 'review': continue
+    if t.get('dispatchedAt') and t['status'] in ('todo','backlog') and age(t['dispatchedAt']) > 15:
+        print('STALE DISPATCH', t['shortId'], int(age(t['dispatchedAt'])), 'min, never reported in')
+    if t['status'] == 'in_review' and not openrev(t):
+        print('HELD IN REVIEW', t['shortId'], '(check feedback filed on it, then autoAdvance)')
+    if t['status'] == 'in_review' and not [r for r in rev if r['parentTaskId'] == t['_id']]:
+        print('NO LANES EVER SPAWNED', t['shortId'], '(created at in_review?)')
+    if t['status'] == 'blocked' and not t.get('blocker'):
+        print('BLOCKED, NO REASON', t['shortId'])
+for f in d['feedback']:
+    if f['status'] in ('triaged','accepted','in_progress') and not f.get('resolvedTaskShortId'):
+        print('FEEDBACK PARKED, NO TASK', f['shortId'])
+print('proxy', d['project']['proxy'], '| published', d['project']['proxyPublished'])
+PY
 ```
 
-A registry `trigger` ("after a task's review lanes close") is a hint about when
-it usually fires, not an automatic rule — nothing server-side dispatches
-helpers. You still decide whether this task warrants one.
+Then the two checks no script can make: every piece of work you learned about this round
+has a card (human-owned included), and every `in_progress` row still has a live builder.
+Log anything worth a trace: `POST /api/events {"project":"DAR","text":"..."}`.
 
-## 5. The shared surface, if the project has one
+## 9. The shared surface
 
-Some projects publish one local dev server through the proxy at
-`<baseUrl>/<prefix>/` (configured by `set_proxy` at init, see the
-`darbar-project-init` skill). That URL is not a secret and must not be treated as one: the
-board link carries a 21-char random `capId` and is genuinely unguessable, but the prefix is
-a short word a human chose, so `<baseUrl>/<prefix>/` is guessable by anyone who knows the
-domain. The `public` patterns are the boundary; the prefix is not a credential. They match
-the path AFTER the prefix is stripped: at prefix `dar`, the public request
-`/dar/assets/app.js` is matched as `/assets/app.js`, so an entry written `/dar/assets/`
-matches nothing and the route serves nothing. Two things belong to the orchestrator.
+Full safety properties, and why teardown is not optional, are in the skill (Step 2 and B4).
+Two commands.
 
-**Announce it with the board link.** When Gabbar posts the project announcement,
-the shared URL goes right next to the board URL, with a line saying what it is
-("the dev server, live while I am working"). A link nobody was told about gets
-asked for in DMs instead. `GET /api/projects/DAR/context` has the config, and
-the board payload (`GET /api/p/:capId`) carries `baseUrl` plus the published
-prefix so you can state the link exactly as a stakeholder receives it. Do not
-paste the target host:port anywhere a link-holder can read: the public board
-redacts it on purpose, and only the local context route returns it.
+**Announce it with the board link.** `GET /api/projects/DAR/context` has the config; the
+board payload carries `baseUrl` plus the published prefix, so you can state the link
+exactly as a stakeholder receives it. Never paste the target host:port where a link-holder
+can read it.
 
-**Tear it down when the project closes.** There is no login in front of that route and
-nothing but the `public` list keeps a passer-by out, so a finished project with a live
-route is an open door nobody is watching. Withdraw it as part of closing out:
+**Withdraw it when the project closes.** Send the whole object; this config is replaced
+wholesale.
 
 ```bash
 # keep the config, take the URL down:
@@ -205,47 +277,35 @@ curl -s -X PATCH localhost:4899/api/projects/DAR -H 'content-type: application/j
 curl -s -X PATCH localhost:4899/api/projects/DAR -H 'content-type: application/json' -d '{"proxy":null}'
 ```
 
-The proxy config is replaced wholesale, so send the whole object when you
-disable. Then confirm rather than assume: the returned project doc carries
-`proxyPublished`, which is what the server reports it actually put in the route
-table and has not withdrawn, and the reconcile writes what it published or
-withdrew into the project event log (visible on the board payload). An empty
-`proxyPublished` is the state you want at close. If the reconcile could not reach
-the proxy it says so and leaves the route live, and the next change or a server
-restart converges it, so re-check instead of walking away on the first 200.
+Then verify rather than assume: `proxyPublished` on the returned doc is what is actually
+live. Empty is the state you want at close; anything else means the withdrawal did not
+land and the URL is still open, so re-check. Never hand-edit the proxy route table or
+`data/routes.json`.
 
-## 6. End-of-round board audit
+## 10. Resume contract
 
-Before sleeping, reconcile board vs. reality:
-
-- Every known pending piece of work has a card. Anything learned this round —
-  from feedback threads, builder notes, lane findings, your own observations —
-  that isn't on the board gets seeded (`POST /api/tasks`) before the round ends.
-- No task sits `in_progress` with a dead builder; re-dispatch or mark `blocked`
-  (with `blocker`).
-- No dispatch stamp is older than 15 minutes: a `dispatchedAt` that old on a
-  `todo`/`backlog` row (the red DISPATCHED badge) means the builder never reported
-  in. Re-dispatch it or mark it `blocked`, and never assume it started.
-- Nothing gated: check for `in_review` parents whose lanes all closed under
-  `autoAdvance:false`, and `blocked` tasks whose blocker has cleared.
-- If the project shares a surface, the live route still matches what you meant to
-  share: compare `proxy` against `proxyPublished`. Config off with a route still
-  published means the withdrawal did not land, and the URL is still open.
-- Log anything worth a trace: `POST /api/events {"project":"DAR","text":"..."}`.
-
-## 7. Resume contract
-
-A fresh session must be able to take over from the API alone — keep all state
-on the board (statuses, notes, blockers, origins), never only in session memory.
-Cold-start sequence:
+A fresh session must be able to take over from the API alone. Keep all state on the board
+(statuses, notes, blockers, origins), never only in session memory. Cold start:
 
 ```bash
 curl -s localhost:4899/api/projects                      # find project, capId, pending-fb counts
-curl -s localhost:4899/api/projects/DAR/context          # charter = standing protocols
-curl -s localhost:4899/api/p/<capId>                     # full board: tasks + feedback + events
+curl -s localhost:4899/api/projects/DAR/context          # charter + agent registry = standing orders
+curl -s localhost:4899/api/p/<capId>                     # full board: tasks + feedback + events + pipeline
 curl -s 'localhost:4899/api/tasks?project=DAR&open=true' # the working set
 curl -s 'localhost:4899/api/feedback/pending?project=DAR'
+curl -s 'localhost:4899/api/projects/DAR/events?limit=50'  # why the board looks like this
 ```
 
-If that sequence would not tell your successor everything you know, the board
-is missing state — fix that before ending the round.
+`GET /api/tasks` caps at 200 rows sorted by `updatedAt` desc, so on a large project use
+the board payload (`/api/p/:capId`), which returns every task, as the authority.
+
+If that sequence would not tell your successor everything you know, the board is missing
+state. Fix that before ending the round.
+
+## 11. Exercising the API safely
+
+Probe on a throwaway project prefix, never on a live one, and never against the running
+server's config for a real project. There is no `DELETE /api/projects` and no
+`DELETE /api/tasks`, so cleanup is direct Mongo against `mission_control`: delete the
+throwaway's `tasks`, `feedback` and `events` by `projectId`, then the project document.
+Verify nothing of it remains and touch no other prefix.
