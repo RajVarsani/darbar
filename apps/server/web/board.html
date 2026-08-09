@@ -167,14 +167,17 @@
   .kcol.slim .kcards{min-height:34px;padding:6px 10px}
   .kcol.slim .kempty{padding:6px 10px}
   .kcol.slim.over .khead{color:var(--ink)}
-  /* backlog: its own column so no other column's count carries uncommitted work, folded to a rail by
-     default so a long backlog never takes width from work that is actually committed. Still a drop
-     target — dragging a card onto the rail demotes it. */
+  /* the folded rail, used by both ends of the flow (backlog and done): each keeps its own column so
+     no other column's count carries uncommitted or finished work, and each folds to a rail by default
+     so neither takes width from the work in flight. Still a drop target — dropping a card on the
+     backlog rail demotes it, on the done rail ships it (subject to the server's done gate). */
   .kcol.fold{width:44px;min-width:44px}
   .kcol.fold .foldbtn{display:flex;flex-direction:column;align-items:center;gap:9px;width:100%;padding:9px 0 14px;
     font-family:var(--mono);font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;
     color:var(--ink-soft);transition:color .08s}
-  .kcol.fold .foldbtn .fl{writing-mode:vertical-rl}
+  /* the label is the column name straight from the status, so it capitalises here rather than in
+     one hand-written string per rail */
+  .kcol.fold .foldbtn .fl{writing-mode:vertical-rl;text-transform:capitalize}
   .kcol.fold .foldbtn .n{font-size:10px;color:var(--ink);background:var(--beige-2);border:1.5px solid var(--ink);
     padding:0 5px;font-variant-numeric:tabular-nums}
   .kcol.fold:hover .foldbtn,.kcol.fold.over .foldbtn{color:var(--ink)}
@@ -307,7 +310,10 @@
   /* identity badges live at the top of the body, not in .dhead — the header carries id/state/controls only.
      the 8px below is what binds the badge to its title; never widen it */
   .dbadges{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px}
-  .dgrid{display:grid;grid-template-columns:100px 1fr;row-gap:9px;column-gap:12px;margin:14px 0;font-size:13px}
+  /* minmax(0,1fr), never 1fr: a rendered-markdown cell (Blocked by) can hold a fenced code block,
+     and 1fr floors the TRACK at the item's min-content, so the pre's longest line widens the whole
+     drawer and min-width:0 on the item cannot reach it. Same idiom as .crow. */
+  .dgrid{display:grid;grid-template-columns:100px minmax(0,1fr);row-gap:9px;column-gap:12px;margin:14px 0;font-size:13px}
   .dgrid .k{font-family:var(--mono);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
     color:var(--ink-soft);padding-top:2px}
   .dsec{margin-top:22px}
@@ -353,6 +359,39 @@
   .devents{border-left:2px solid var(--ink);margin-left:3px;padding-left:14px;display:flex;flex-direction:column;gap:9px;
     font-size:12.5px;color:var(--ink-soft)}
   .devents .t{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--ink-faint);text-transform:uppercase}
+
+  /* ---------- rendered markdown ----------
+     Every tag under .md is written by mdBlocks() from literals in this file; nothing here styles
+     anything the author of a note could have chosen. Ink/lime/beige + JetBrains Mono only. */
+  .md{overflow-wrap:break-word}
+  .md>:first-child{margin-top:0}
+  .md>:last-child{margin-bottom:0}
+  /* pre-wrap belongs to raw source: rendered blocks carry their own spacing, and keeping it would
+     add a blank line after every one of them */
+  .quote.md{white-space:normal}
+  .md p{margin:0 0 9px}
+  .md h4.mdh{font-family:var(--mono);font-weight:700;line-height:1.35;color:var(--ink);margin:15px 0 7px}
+  .md .mdh-1{font-size:14.5px}
+  .md .mdh-2{font-size:13.5px}
+  .md .mdh-3,.md .mdh-4{font-size:12.5px}
+  .md .mdh-5,.md .mdh-6{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft)}
+  .md ul,.md ol{margin:0 0 9px;padding-left:21px}
+  .md li{margin:3px 0}
+  .md li::marker{font-family:var(--mono);font-weight:700;color:var(--ink-soft)}
+  .md strong{font-weight:700;color:var(--ink)}
+  .md em{font-style:italic}
+  .md code{font-family:var(--mono);font-size:.88em;background:var(--lime);border:1px solid var(--hair);
+    padding:0 4px;overflow-wrap:break-word}
+  /* a fenced block scrolls in its own box: the drawer has a fixed width and a long line must never
+     be the thing that widens it. min-width:0 is what allows the box to be narrower than its content. */
+  .md pre{min-width:0;max-width:100%;overflow-x:auto;background:var(--ink);border:2px solid var(--ink);
+    margin:0 0 10px;padding:9px 11px}
+  .md pre code{display:block;background:none;border:none;padding:0;color:var(--lime);font-size:11.5px;
+    line-height:1.55;white-space:pre;font-family:var(--mono)}
+  /* macOS overlay scrollbars vanish, and a code block that scrolls has to say so (same call as .kanban) */
+  .md pre::-webkit-scrollbar{height:9px}
+  .md pre::-webkit-scrollbar-track{background:rgba(216,255,124,.16)}
+  .md pre::-webkit-scrollbar-thumb{background:var(--lime)}
 
   /* ---------- project config panel rows ---------- */
   .crow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;
@@ -528,7 +567,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // one column per status, so a column count never means anything but "cards with this status".
-// backlog leads the flow and renders folded (state.backlogOpen) — see renderKanban.
+// backlog leads the flow and done ends it; both render folded to a rail (state.folded) — see FOLDABLE.
 const KANBAN_COLS = ['backlog','todo','in_progress','in_review','qa','blocked','done'];
 // a dispatch older than this with no in_progress report is a builder that probably died, not work in flight
 const DISPATCH_STALE_MS = 15*60*1000;
@@ -543,8 +582,8 @@ const state = {
   sel: null,               // {kind:'task'|'fb', id: shortId}
   stack: [],               // drawer back stack of sel objects
   collapsed: new Set(),    // task shortIds with hidden children
-  doneExpanded: false,     // done column: false = latest 5 only
-  backlogOpen: false,      // backlog column: false = folded to a rail
+  doneExpanded: false,     // done column, when open: false = latest 5 only
+  folded: new Set(['backlog','done']), // columns folded to a 44px rail; independent per column
   canWrite: null,          // null = unknown; probed once. Tunnel viewers get 403 on writes.
   pal: {open:false, q:'', sel:0},  // ⌘K palette; survives SSE re-renders
 };
@@ -570,6 +609,158 @@ const linkifyIds = s => esc(s).replace(/\b([A-Z]+-FB-\d+|[A-Z]+-\d+)\b/g, id =>
   id.includes('-FB-')
     ? (fbByShort(id) ? `<a href="#/f/${id}" data-go-fb="${id}">${id}</a>` : id)
     : (byShort(id) ? `<a href="#/t/${id}" data-go-task="${id}">${id}</a>` : id));
+// ---------- markdown, escape-first ----------
+// Task descriptions, notes, blockers, feedback bodies and resolutions are UNTRUSTED text: agents
+// write them and Slack forwards them, and this board is handed to stakeholders over a capability
+// URL. So the renderer has exactly one safety rule, and it is checkable by eye instead of by
+// tracing data flow across functions: esc() runs ONCE, over the whole source, on the first line of
+// mdBlocks. Every function below that line receives only already-escaped text and concatenates tag
+// literals written here. Nothing re-reads the raw source, nothing decodes an entity back, and no
+// branch can put an author's '<' into the DOM — so raw HTML in a note cannot be HTML, it can only
+// be the characters the author typed. Same for anything the grammar does not recognise: an
+// unclosed backtick, a stray asterisk, a bare URL, a rejected link all stay literal text rather
+// than mangling the rest of the block.
+//
+// Deliberately NOT a CommonMark implementation. The set these fields actually contain: bold,
+// italic, inline code, fenced code, links, ordered and unordered lists, headings, paragraphs.
+// Known omissions, each rendering as its literal source: nested lists (an indented marker becomes a
+// sibling item), blockquotes, tables, reference links, setext headings. Images are literal too and
+// that is a decision, not a gap: rendering one would make an untrusted field fetch an author-chosen
+// URL from a page reached by capability link, so ![alt](url) keeps its characters — in mdText as
+// well as here, which is why they share the pattern below rather than each carrying their own.
+
+// ---- bounds ----
+// Every inline pattern is bounded, and the bound IS the fix, not a length cap bolted onto the call
+// site. An unbounded class like [^\]\n]+ makes every '[' in the field a start position that scans to
+// the next ']' or newline, so a field with N of them costs O(N^2): measured 10k 72ms, 20k 219ms,
+// 40k 789ms, 80k 3106ms, and mdText the same, which is a hung tab once mdText runs per feedback row
+// on every palette keystroke and every open tab re-renders on an SSE tick. Bounded, one candidate
+// costs at most the bound, so a field costs O(length). A span longer than its bound is simply not
+// that construct and stays literal text, like every other near-miss here. The numbers are far above
+// anything these fields hold (the longest inline code on the board today is around 30 characters).
+const MD_MAX = { code: 400, text: 200, url: 500, emph: 300 };
+// one source per construct, shared by the renderer and the flattener so the two cannot drift
+const MD_CODE_SRC = `\`([^\`\\n]{1,${MD_MAX.code}})\``;
+const MD_LINK_SRC = `(!?)\\[([^\\]\\n]{1,${MD_MAX.text}})\\]\\(([^()\\s]{1,${MD_MAX.url}})\\)`;
+
+// href allowlist. It runs on the ESCAPED url, which is exactly as strict as running it on the raw
+// one: esc() touches only & < > ", so it can neither create nor erase a ':' — javascript:, data:
+// and vbscript: still look like themselves here and still fail the test, while an entity-spelled
+// scheme (java&#115;cript:) has already become the literal text java&amp;#115;cript: and has no
+// colon left to be a scheme with. A url that fails keeps its source characters instead of becoming
+// an <a> with a stripped href.
+// The relative branch rejects a following slash OR BACKSLASH: browsers read /\evil.com and //evil.com
+// the same way and both leave the origin, so a root-relative-looking link could resolve offsite. It
+// buys deception rather than a boundary break (https://anything is allowed here), which is exactly
+// why it has to be closed at the pattern instead of argued about.
+const MD_HREF_OK = /^(?:https?:\/\/|mailto:[^\s@]+@|\/(?![\/\\]))/i;
+const mdHref = u => (!/\s/.test(u) && MD_HREF_OK.test(u) ? u : null);
+
+// emphasis, over one already-escaped run that is known to contain no code span and no link
+const MD_STRONG_A = new RegExp(`\\*\\*(?=\\S)([\\s\\S]{0,${MD_MAX.emph}}?\\S)\\*\\*`, 'g');
+const MD_STRONG_B = new RegExp(`__(?=\\S)([\\s\\S]{0,${MD_MAX.emph}}?\\S)__`, 'g');
+// the [^\w*] / [^\w_] guards are what keep a stray marker and an intra-word underscore
+// (foo_bar_baz) literal instead of opening an emphasis run
+const MD_EM_A = new RegExp(`(^|[^\\w*])\\*(?=\\S)([^*\\n]{0,${MD_MAX.emph}}\\S)\\*(?!\\*)`, 'g');
+const MD_EM_B = new RegExp(`(^|[^\\w_])_(?=\\S)([^_\\n]{0,${MD_MAX.emph}}\\S)_(?!\\w)`, 'g');
+function mdEmph(s){
+  return s
+    .replace(MD_STRONG_A, '<strong>$1</strong>')
+    .replace(MD_STRONG_B, '<strong>$1</strong>')
+    .replace(MD_EM_A, '$1<em>$2</em>')
+    .replace(MD_EM_B, '$1<em>$2</em>');
+}
+
+// inline, one left-to-right scan: code spans and links are consumed WHOLE, so their contents are
+// never re-read as emphasis markers and a url is never rewritten by one. The plain runs between
+// them are the only thing mdEmph ever sees. The matcher is built per call rather than hoisted:
+// exec+lastIndex is the one piece of shared mutable state a regex has, and a fresh one cannot carry
+// a position out of a previous field.
+const MD_INLINE_SRC = `${MD_CODE_SRC}|${MD_LINK_SRC}`;
+function mdInline(s){
+  const re = new RegExp(MD_INLINE_SRC, 'g');
+  let out = '', i = 0, m;
+  while ((m = re.exec(s))){
+    out += mdEmph(s.slice(i, m.index));
+    if (m[1] !== undefined) out += `<code>${m[1]}</code>`;   // an unclosed ` cannot match, so it stays literal
+    else if (m[2]) out += m[0];                              // '!' = image: literal source, see the note above
+    else {
+      const href = mdHref(m[4]);
+      out += href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${mdEmph(m[3])}</a>` : m[0];
+    }
+    i = m.index + m[0].length;
+  }
+  return out + mdEmph(s.slice(i));
+}
+
+const MD_FENCE = /^\s{0,3}(?:```|~~~)/;
+const MD_HEAD = /^\s{0,3}(#{1,6})\s+(.*)$/;
+const MD_UL = /^\s*[-*+]\s+(.*)$/;
+const MD_OL = /^\s*(\d{1,9})[.)]\s+(.*)$/;
+const mdOpensBlock = l => MD_HEAD.test(l) || MD_FENCE.test(l) || MD_UL.test(l) || MD_OL.test(l);
+// agents write one thought per line, so a single newline inside a paragraph or a list item is kept
+// as a break rather than collapsed into a space
+const mdSoft = ls => ls.join('<br>');
+
+function mdBlocks(src){
+  const lines = esc(src).replace(/\r\n?/g, '\n').split('\n');   // THE escape. Everything below is escaped text.
+  const out = [];
+  let i = 0;
+  while (i < lines.length){
+    const line = lines[i];
+    if (!line.trim()){ i++; continue; }
+    if (MD_FENCE.test(line)){
+      // an unclosed fence takes the rest of the text (what CommonMark does): either way no line is
+      // dropped, and the alternative — falling back to paragraphs — would re-read the block
+      const body = []; i++;
+      while (i < lines.length && !MD_FENCE.test(lines[i])) body.push(lines[i++]);
+      if (i < lines.length) i++;   // the closing fence
+      out.push(`<pre><code>${body.join('\n')}</code></pre>`);
+      continue;
+    }
+    const h = line.match(MD_HEAD);
+    if (h){ out.push(`<h4 class="mdh mdh-${h[1].length}">${mdInline(h[2].trim())}</h4>`); i++; continue; }
+    const ol = line.match(MD_OL);
+    if (ol || MD_UL.test(line)){
+      const items = [];
+      while (i < lines.length){
+        const m = lines[i].match(ol ? MD_OL : MD_UL);
+        if (m){ items.push([ol ? m[2] : m[1]]); i++; continue; }
+        // a wrapped item continues the last one; a blank line, or the start of any other block
+        // (including a list of the other kind), ends this list
+        if (lines[i].trim() && items.length && !mdOpensBlock(lines[i])){ items[items.length-1].push(lines[i].trim()); i++; continue; }
+        break;
+      }
+      const lis = items.map(p=>`<li>${mdInline(mdSoft(p))}</li>`).join('');
+      // start comes from \d{1,9} only, so it can only ever be digits
+      out.push(ol ? `<ol${Number(ol[1])!==1?` start="${Number(ol[1])}"`:''}>${lis}</ol>` : `<ul>${lis}</ul>`);
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !mdOpensBlock(lines[i])) para.push(lines[i++].trim());
+    out.push(`<p>${mdInline(mdSoft(para))}</p>`);
+  }
+  return out.join('');
+}
+
+// One-line previews (list rows, the palette, tooltips) have to stay a single ellipsised line, so
+// they get the words without the markup: markers dropped, then escaped. This returns TEXT — never
+// a tag — which is why it is also the only form safe to drop into a title attribute.
+// Same bounded sources as the renderer, and the same verdict on every construct — an image keeps its
+// literal source here too, so a preview and the row it opens never disagree about what a field says.
+const MD_T_CODE = new RegExp(MD_CODE_SRC, 'g');
+const MD_T_LINK = new RegExp(MD_LINK_SRC, 'g');
+const MD_T_STRONG = new RegExp(`(\\*\\*|__)(?=\\S)([\\s\\S]{0,${MD_MAX.emph}}?\\S)\\1`, 'g');
+const mdText = src => esc(String(src ?? '')
+  .replace(/^\s{0,3}(?:```|~~~).*$/gm, ' ')
+  .replace(MD_T_CODE, '$1')
+  .replace(MD_T_LINK, (whole, bang, text) => bang ? whole : text)
+  .replace(MD_T_STRONG, '$2')
+  .replace(MD_EM_A, '$1$2')
+  .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+  .replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+/gm, '')
+  .replace(/\s+/g, ' ').trim());
+
 let toastT;
 function toast(msg){
   const el=$('toast'); el.textContent=msg; el.classList.add('show');
@@ -1139,50 +1330,62 @@ function cardHtml(t){
     <div class="kfoot">
       ${kids.length?`<span class="pips" title="${esc(kids.map(k=>`${k.lane??'review'}: ${nice(k.status)}`).join(' · '))}"><span class="plbl">REV</span>${kids.map(k=>`<span class="pip ${pipCls(k.status)}"></span>`).join('')}</span>`:''}
       ${fb.length?`<span class="fbn ${fbOpen?'warn':''}" title="${fb.length} feedback, ${fbOpen} open">${ICONS.feedback}${fbOpen||fb.length}</span>`:''}
-      ${t.blocker?`<span class="typ" style="color:var(--red);border-color:var(--red);background:var(--red-pale)" title="${esc(t.blocker)}">BLK</span>`:''}
+      ${t.blocker?`<span class="typ" style="color:var(--red);border-color:var(--red);background:var(--red-pale)" title="${mdText(t.blocker)}">BLK</span>`:''}
       <span style="flex:1"></span>
       ${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:''}
     </div></div>`;
 }
 
-const backlogFolded = () => !state.backlogOpen;
+// The two ends of the flow fold to a rail: backlog is work nobody has committed to yet, done is work
+// nobody has to look at again (MRF carries 368 done cards). Both start folded so the committed middle
+// owns the width, and each remembers its own state — opening Done to find a card must not drag the
+// backlog open with it. ONE rail implementation for both: a second copy of this affordance is how two
+// versions of it drift apart.
+const FOLDABLE = ['backlog','done'];
+const isFolded = col => state.folded.has(col);
+// what the rail says the column is, since a count alone cannot say why it is folded
+const FOLD_WHY = {backlog:'not committed work', done:'finished work, kept for the record'};
 
 // 238px is the width a column wants; it is not worth pushing Done off the right edge to keep it.
-// Unfolding the backlog adds a seventh column, which no laptop window fits at 238, so the columns
-// narrow to whatever the window actually has, down to a floor where a card still reads. Past the
-// floor the board scrolls, and .kanban's own scrollbar is drawn in so that reads as scrollable.
+// Unfolding a rail adds a full column, which no laptop window fits at 238 once both are open, so the
+// columns narrow to whatever the window actually has, down to a floor where a card still reads. Past
+// the floor the board scrolls, and .kanban's own scrollbar is drawn in so that reads as scrollable.
 const COL_WANT = 238, COL_FLOOR = 200, COL_GAP = 14, RAIL_W = 44;
-function colMin(el, flexCols, railed){
+function colMin(el, flexCols, rails){
   const box = el.clientWidth; // horizontal overflow does not change this, so it is safe to re-measure
   if (!box) return COL_WANT;
-  const avail = box - (railed?RAIL_W:0) - COL_GAP*(flexCols + (railed?1:0) - 1);
+  const avail = box - RAIL_W*rails - COL_GAP*(flexCols + rails - 1);
   return Math.max(COL_FLOOR, Math.min(COL_WANT, Math.floor(avail/flexCols)));
+}
+
+// a folded column: its own 44px of width, the count, and still a live drop target so a card can be
+// dropped straight onto it. A dispatch outstanding inside one is the only thing that cannot wait for
+// someone to unfold, so it gets its own pill on the same 15-minute clock as the badges it stands in
+// for (only backlog can hold one — dispatchPending is gated to todo/backlog — so the generic code
+// simply renders nothing for done).
+function railCol(col, cards){
+  const disp = cards.filter(dispatchPending);
+  const oldest = disp.map(t=>t.dispatchedAt).sort()[0]; // if any is overdue, this one is
+  const dispPill = disp.length ? `<span class="disp rail ${disp.some(dispatchLate)?'stale':''}"
+    data-disp-rail="${esc(oldest)}" data-disp-n="${disp.length}"
+    title="${esc(railWhy(disp.length, disp.some(dispatchLate)))}">${disp.length} DISPATCHED</span>` : '';
+  return `<div class="kcol fold ${cards.length?'':'slim'}" data-col="${col}">
+    <button class="foldbtn" data-fold="${col}" title="${cards.length} ${nice(col)} · ${FOLD_WHY[col]}. click to open">
+      <span class="n">${cards.length}</span>${dispPill}<span class="fl">${nice(col)}</span></button>
+    <div class="kcards" data-col="${col}" hidden></div></div>`;
 }
 
 function renderKanban(){
   const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled' && matches(t.title+' '+t.shortId+' '+(t.assignee||'')));
   const k = $('kanban');
-  // a folded backlog gets its own width, not a share of the board's
-  const railed = backlogFolded();
-  const min = colMin(k, KANBAN_COLS.length - (railed?1:0), railed);
+  // a folded column gets its own width, not a share of the board's
+  const rails = KANBAN_COLS.filter(isFolded).length;
+  const min = colMin(k, KANBAN_COLS.length - rails, rails);
   k.style.gridTemplateColumns = KANBAN_COLS
-    .map(col => col==='backlog' && railed ? 'auto' : `minmax(${min}px,1fr)`).join(' ');
+    .map(col => isFolded(col) ? 'auto' : `minmax(${min}px,1fr)`).join(' ');
   k.innerHTML = KANBAN_COLS.map(col=>{
     const cards = visible.filter(t=>t.status===col);
-    if (col==='backlog' && backlogFolded()){
-      // the rail states the count, and stays a drop target so a card can be demoted. A dispatch
-      // outstanding in there is the one thing that cannot wait for someone to unfold: it gets its own
-      // pill on the rail, on the same clock as the badges it stands in for.
-      const disp = cards.filter(dispatchPending);
-      const oldest = disp.map(t=>t.dispatchedAt).sort()[0]; // if any is overdue, this one is
-      const dispPill = disp.length ? `<span class="disp rail ${disp.some(dispatchLate)?'stale':''}"
-        data-disp-rail="${esc(oldest)}" data-disp-n="${disp.length}"
-        title="${esc(railWhy(disp.length, disp.some(dispatchLate)))}">${disp.length} DISPATCHED</span>` : '';
-      return `<div class="kcol fold ${cards.length?'':'slim'}" data-col="${col}">
-        <button class="foldbtn" data-bk-toggle title="${cards.length} in backlog · not committed work. click to open">
-          <span class="n">${cards.length}</span>${dispPill}<span class="fl">Backlog</span></button>
-        <div class="kcards" data-col="${col}" hidden></div></div>`;
-    }
+    if (isFolded(col)) return railCol(col, cards);
     let shown = cards, toggle = '';
     if (col==='done'){
       shown = [...cards].sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
@@ -1193,7 +1396,7 @@ function renderKanban(){
     }
     return `<div class="kcol ${cards.length?'':'slim'}" data-col="${col}">
       <div class="khead">${nice(col)}<span class="n">${cards.length}</span>${
-        col==='backlog'?'<button class="foldx" data-bk-toggle title="fold the backlog back to a rail">FOLD</button>':''}</div>
+        FOLDABLE.includes(col)?`<button class="foldx" data-fold="${col}" title="fold ${nice(col)} back to a rail">FOLD</button>`:''}</div>
       <div class="kcards" data-col="${col}">${shown.map(cardHtml).join('') || `<div class="kempty">—</div>`}</div>
       ${toggle}</div>`;
   }).join('');
@@ -1266,7 +1469,7 @@ function renderContent(){
       const sel = state.sel?.kind==='fb' && state.sel.id===f.shortId;
       return `<div class="frow ${sel?'sel':''}" data-fb="${esc(f.shortId)}">
         <span class="id">${esc(f.shortId)}</span>
-        <span class="col"><div class="fbody">${esc(f.body)||'<i style="color:var(--ink-faint)">screenshot only</i>'}</div>
+        <span class="col"><div class="fbody">${mdText(f.body)||'<i style="color:var(--ink-faint)">screenshot only</i>'}</div>
           <div class="fsub"><span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span>
             <span class="typ typ-${esc(f.type)}">${esc(f.type)}</span>
             ${f.taskShortId?`<span class="id">on ${esc(f.taskShortId)}</span>`:'<span class="id">project-level</span>'}
@@ -1374,17 +1577,17 @@ function renderDrawer(){
         ${parent?`<div class="note">${t.type==='review'?'review lane of':'subtask of'} <a href="#" data-go-task="${esc(parent.shortId)}">${esc(parent.shortId)} · ${esc(parent.title)}</a></div>`:''}
         <div class="dbadges"><span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span></div>
         <div class="dtitle">${esc(t.title)}</div>
-        ${t.description?`<p style="color:var(--ink-soft);margin-top:6px">${esc(t.description)}</p>`:''}
+        ${t.description?`<div class="md" style="color:var(--ink-soft);margin-top:6px">${mdBlocks(t.description)}</div>`:''}
         <div class="dgrid">
           <span class="k">Assignee</span><span>${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:'<span style="color:var(--ink-faint)">unassigned</span>'}</span>
           ${t.lane?`<span class="k">Lane</span><span class="id">${esc(t.lane)}${laneInfo?.manager?` · manager ${esc(laneInfo.manager)}`:''}</span>`:''}
           ${t.origin?`<span class="k">Origin</span><span>${linkifyIds(t.origin)}</span>`:''}
-          ${t.blocker?`<span class="k">Blocked by</span><span style="color:var(--red);font-weight:600">${esc(t.blocker)}</span>`:''}
+          ${t.blocker?`<span class="k">Blocked by</span><div class="md" style="color:var(--red);font-weight:600">${mdBlocks(t.blocker)}</div>`:''}
           ${t.dispatchedAt?`<span class="k">Dispatched</span><span${dispatchPending(t)?` data-disp-rel="${esc(t.dispatchedAt)}"`:''} title="${new Date(t.dispatchedAt).toLocaleString('en-GB')}">${relTime(t.dispatchedAt)}${dispatchLate(t)?' · no in_progress report yet':''}</span>`:''}
           <span class="k">Created</span><span title="${new Date(t.createdAt).toLocaleString('en-GB')}">${relTime(t.createdAt)}</span>
           <span class="k">Updated</span><span title="${new Date(t.updatedAt).toLocaleString('en-GB')}">${relTime(t.updatedAt)}</span>
         </div>
-        ${t.notes?`<div class="dsec"><h3>Notes</h3><div class="quote">${esc(t.notes)}</div></div>`:''}
+        ${t.notes?`<div class="dsec"><h3>Notes</h3><div class="quote md">${mdBlocks(t.notes)}</div></div>`:''}
         ${/* existing children first: real spawned lanes are always worth showing, so an unexpected
               combination shows them rather than hiding them behind the type test */''}
         ${revKids.length?`<div class="dsec"><h3>Review lanes · ${revKids.filter(isClosed).length}/${revKids.length} closed</h3>
@@ -1400,7 +1603,7 @@ function renderDrawer(){
             <span class="col"><div class="ttl">${esc(k.title)}</div></span><span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></div>`).join('')}</div></div>`:''}
         <div class="dsec"><h3>Feedback on this task · ${fb.filter(openFb).length} open</h3>
           ${fb.length?`<div class="mini">${fb.map(f=>`<div class="frow" data-fb="${esc(f.shortId)}"><span class="id">${esc(f.shortId)}</span>
-            <span class="col"><div class="fbody">${esc(f.body)}</div><div class="fsub"><span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span></div></span>
+            <span class="col"><div class="fbody">${mdText(f.body)}</div><div class="fsub"><span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span></div></span>
             <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span></div>`).join('')}</div>`
           :'<div class="note">none yet. DM Gabbar with “'+esc(t.shortId)+' …” to file the first</div>'}</div>
         ${t.commits?.length?`<div class="dsec"><h3>Commits</h3><div class="commits">${t.commits.map(c=>`<span>· ${esc(c)}</span>`).join('')}</div></div>`:''}
@@ -1422,12 +1625,12 @@ function renderDrawer(){
           <span class="typ typ-${esc(f.type)}">${esc(f.type)}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span>
         </div>
-        <div class="quote">${esc(f.body)||'<i>screenshot only</i>'}</div>
+        <div class="quote md">${mdBlocks(f.body)||'<i>screenshot only</i>'}</div>
         ${f.attachments?.length?`<div class="shots">${f.attachments.filter(safeUrl).map(a=>`<a href="${esc(a)}" target="_blank"><img src="${esc(a)}" alt="attachment"></a>`).join('')}</div>`:''}
         ${f.slack?'<div class="note">came in via Slack. every status change below replies in that thread</div>':''}
         <div class="dsec"><h3>Lifecycle</h3><div class="flow">${flow}</div></div>
         ${f.resolution?`<div class="dsec"><h3>${f.status==='rejected'?'Reason':'Resolution'}</h3>
-          <div class="resol ${f.status==='rejected'?'neg':''}">${esc(f.resolution)}</div></div>`:''}
+          <div class="resol md ${f.status==='rejected'?'neg':''}">${mdBlocks(f.resolution)}</div></div>`:''}
         <div class="dsec"><h3>Task</h3>
           ${t?`<div class="taskcard" data-task="${esc(t.shortId)}">
               <span class="id">${esc(t.shortId)}</span><span class="col" style="flex:1"><div class="ttl">${esc(t.title)}</div></span>
@@ -1468,8 +1671,10 @@ function renderPal(){
   if (state.pal.sel >= rows.length) state.pal.sel = Math.max(0, rows.length-1);
   const pill = r => r.kind==='config' ? '<span class="pill">PANEL</span>'
     : `<span class="pill st-${esc(r.status)}">${esc(r.kind==='fb'?fbLabel(r.status):nice(r.status))}</span>`;
+  // a feedback snippet is markdown source on one ellipsised line: same flattener as the list rows,
+  // so the palette and the row it jumps to read the same. Titles are plain text already.
   const rowHtml = (r,i) => `<div class="palrow ${i===state.pal.sel?'selp':''}" data-pal-row="${i}">
-    <span class="id">${esc(r.id)}</span><span class="snippet">${esc(r.text)}</span>
+    <span class="id">${esc(r.id)}</span><span class="snippet">${r.kind==='fb'?mdText(r.text):esc(r.text)}</span>
     ${pill(r)}</div>`;
   const group = (label, kind) => {
     const parts = rows.map((r,i)=>r.kind===kind?rowHtml(r,i):'').filter(Boolean);
@@ -1614,8 +1819,12 @@ document.addEventListener('click', e=>{
   if (tf){ state.taskFilter = tf.dataset.tf; renderContent(); return; }
   const dt = e.target.closest('[data-done-toggle]');
   if (dt){ state.doneExpanded = !state.doneExpanded; renderContent(); return; }
-  const bk = e.target.closest('[data-bk-toggle]');
-  if (bk){ state.backlogOpen = !state.backlogOpen; renderContent(); return; }
+  // one toggle for every foldable column, keyed by the column itself, so the two fold states are
+  // independent by construction rather than by remembering to keep two flags apart
+  const fd = e.target.closest('[data-fold]');
+  if (fd){ const col = fd.dataset.fold;
+    state.folded.has(col) ? state.folded.delete(col) : state.folded.add(col);
+    renderContent(); return; }
   // the shared link is meant to be handed to someone: confirm in place, and re-render safely
   const cp = e.target.closest('[data-copy]');
   if (cp){ copyLink(cp); return; }
