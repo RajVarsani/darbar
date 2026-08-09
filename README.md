@@ -32,16 +32,58 @@ bun run tunnel   # ngrok -> proxy, uses NGROK_DOMAIN from .env when set
 
 ## Sharing / the front door
 ngrok fronts ONLY the proxy. The proxy enforces the public surface per route:
-tunneled requests (x-forwarded-host present) must match a route's `public` regex
-list; everything else 403s. Default route -> darbar with boards, board API and
-files public. Add more services at runtime:
+tunneled requests (x-forwarded-host present) must match one of a route's `public`
+path patterns; everything else 403s. Default route -> darbar with boards, board API
+and files public. Add more services at runtime:
 ```
-curl -X POST localhost:4800/-/route -H "Authorization: Bearer $PROXY_ADMIN_TOKEN"   -d '{"prefix":"fe","target":"http://127.0.0.1:5173","public":["^/"]}'
+curl -X POST localhost:4800/-/route -H "Authorization: Bearer $PROXY_ADMIN_TOKEN" \
+  -d '{"prefix":"fe","target":"http://127.0.0.1:5173","public":["/"]}'
 ```
 `/-/` admin endpoints require the token and are invisible through the tunnel.
 Set BASE_URL to the tunnel domain so board links in Gabbar replies work for
 stakeholders. Free-plan ngrok shows visitors a one-click interstitial.
 Mongo: reuses the saturn-v2 docker container (db `mission_control`, override via DB_NAME).
+
+### `public` is a path language, not regexes
+Entries are matched with string operations only — `===`, `startsWith`, `indexOf` — so
+there is no engine to backtrack and no pattern anyone writes can hang the front door.
+Each entry is a literal path starting with `/`:
+
+- `/assets/` — PREFIX, the default. Any path that starts with it, `/` included:
+  `/assets/deep/b.js` matches, `/assetsx` does not.
+- `/$` — EXACT. A trailing `$` means the path must equal the literal: `/` and not
+  `/index.html`.
+- `/assets/*.js$` — GLOB. At most one `*`, and it never matches across `/`:
+  `/assets/a.js` matches, `/assets/deep/a.js` does not.
+- `/` — the prefix that matches every path. This is what the old `^/` was written for.
+
+A leading `^`, a `.*`, a second `*`, or any character a URL path does not carry is
+refused by name, and the error spells out the form. Write patterns in the form above and
+never with a `^`: `PATCH /api/projects/:ref {proxy}` rejects an anchored entry outright,
+so `"public":["^/"]` 400s there with the rewrite spelled out in the message.
+
+Only the on-disk read path is lenient, and only so far. An `^`-anchored entry already in
+routes.json is migrated when it is a pure literal path once the anchors come off
+(`^/p/` -> `/p/`, `^/$` -> `/$`, `^/` -> `/`), which is why an existing routes.json keeps
+serving after the language changed. Anything carrying real regex metacharacters
+(`^/assets/.*\.js$`, `^/(a|b)/`) is never guessed at: it is DROPPED with a
+`routes.json: ... REJECTED` line on the proxy console, and that line is the only notice
+you get. `POST /-/route` itself validates nothing, so a bad pattern is accepted there and
+surfaces only as that log at load. Failure never widens a route. An empty list, an
+all-rejected list and an omitted `public` all mean the same thing: nothing on that route
+is reachable through the tunnel.
+
+Three more things the front door does, none of them configurable. A tunneled path
+carrying an ENCODED separator (`%2f`/`%5c`) is refused outright, because our view of the
+path and the upstream's would otherwise disagree — `/assets/..%2fsecret` matches an
+`/assets/` prefix here and lands on `/secret` on a dev server that decodes before
+resolving `..`. `proxy.target` on the project config API must be a loopback address
+(`localhost`, `127.0.0.0/8`, `::1`, or an unspecified `0.0.0.0`/`::`), since the proxy is
+publicly reachable and anything else is an open relay onto a host that never agreed to be
+published. And the board payload at `/api/p/:capId` is itself public, so it reports
+`prefix`, `public`, `enabled` and `proxyPublished` but replaces the upstream with
+`targetRedacted: true` — the internal host:port is only on the local-only
+`/api/projects/:ref/context`.
 
 ### Exposing a Vite dev server (HMR works through the tunnel)
 The proxy bridges WebSocket upgrades, so Vite's HMR socket survives the tunnel —
@@ -60,7 +102,7 @@ socket closed rather than growing the proxy's memory. Two Vite-side requirements
 
 ```
 curl -X POST localhost:4800/-/route -H "Authorization: Bearer $PROXY_ADMIN_TOKEN" \
-  -d '{"prefix":"fe","target":"http://127.0.0.1:5173/fe","public":["^/"]}'
+  -d '{"prefix":"fe","target":"http://127.0.0.1:5173/fe","public":["/"]}'
 ```
 **`Origin` is forwarded, deliberately.** An upstream that runs a cross-site-WebSocket-hijacking
 check has to see the viewer's real origin. Rewrite it and every tunneled upgrade looks
