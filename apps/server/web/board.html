@@ -957,9 +957,11 @@ function sharedSec(p){
   const stray = !on && holds === true; // says off, was never withdrawn
   const alarm = on || stray || orphans.length > 0;
   // the target is the internal host:port and the board payload drops it: say that, because "—" in
-  // this row reads as "nothing configured" in the one section that must not mislead
+  // this row reads as "nothing configured" in the one section that must not mislead. The route named
+  // here is the ONLY one that still carries the target: /context and /projects redact it too, since
+  // Gabbar hands those to a Slack-facing model.
   const targetCell = target ? `<span class="id" style="overflow:hidden;text-overflow:ellipsis" title="${esc(target)}">${esc(target)}</span>`
-    : x.targetRedacted === true ? '<span class="redact">withheld from the board link · readable in the project context, locally</span>'
+    : x.targetRedacted === true ? `<span class="redact">withheld from the board link · readable locally at GET /api/projects/${esc(p.prefix)}/proxy</span>`
     : '<span class="id">—</span>';
   // every string here describes what this project has CONFIGURED. The board never reads the proxy
   // route table and reconcileProxy is best-effort by its own admission, so nothing may claim what
