@@ -3,8 +3,8 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
-import { config } from '@darbar/core';
-import type { FeedbackDoc, Pipeline, ProjectAgent, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
+import { config, pathPatternError, PATH_PATTERN_FORM } from '@darbar/core';
+import type { FeedbackDoc, Pipeline, ProjectAgent, ProjectProxy, PublishedRoute, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
 
 export const api = new Hono();
 
@@ -113,6 +113,320 @@ function readAgents(v: unknown): { agents: ProjectAgent[] } | { error: string } 
     agents.push({ name: name as string, kind: kind as ProjectAgent['kind'], brief: brief as string, ...(typeof trigger === 'string' ? { trigger } : {}) });
   });
   return errs.length ? { error: errs.join(' | ') } : { agents };
+}
+
+// proxy config from user JSON: rebuilt field-by-field like readPipeline/readAgents.
+// Every field here is load-bearing for who can reach a dev server, so nothing is coerced:
+// prefix is the URL segment and the routing key, and each public pattern IS the security
+// boundary — an uncompilable regex errors rather than being dropped (FB-48/FB-56).
+// public defaults to [] (route claimed, nothing reachable through the tunnel) and enabled
+// defaults to false: sharing is always an explicit act.
+const PROXY_RESERVED = ['p', 'api', 'files', '-']; // server's own paths; a prefix here shadows the board itself
+
+// target must be a dev server on THIS machine, and the validator has to say so rather than the tool
+// description: the proxy is what the permanent public domain fronts, so an arbitrary host with
+// public:['/'] turns it into an open relay (FB-89). Loopback only. A private/LAN address is refused
+// with its own reason — it is another box, and republishing it is exactly the open-relay case, just
+// aimed inward. Link-local is named separately because 169.254.169.254 is the cloud metadata
+// endpoint. A DNS name is refused because it can resolve anywhere; `localhost` is the only NAME with
+// a fixed meaning. (FB-89 accepted "loopback, or at least private ranges" — this takes the tighter of
+// the two; every route in use today is 127.0.0.1, so it costs nothing.)
+//
+// FB-108 closed the gap between that decision and the accept set:
+//  · `*.localhost` is GONE. It was a DNS name this validator never resolves, exempted by a function
+//    whose catch-all rejects DNS names precisely because they "can resolve anywhere" — which is
+//    DNS-rebinding-shaped by construction. `http://evil.com.localhost:5173` was accepted, and only
+//    landed on loopback here because mDNSResponder special-cases the reserved TLD; on glibc the name
+//    NXDOMAINs and is retried against the DHCP search domain. That is a property of the resolver,
+//    not of the validator.
+//  · 0.0.0.0 / :: / ::ffff:127.x are ACCEPTED. They are the unspecified addresses, and connect() to
+//    them goes to loopback — 0.0.0.0 in particular is the string Vite/uvicorn print under --host, so
+//    rejecting it as "a public address" was both wrong and the likeliest real friction of the feature.
+//  · a single trailing dot (the DNS root label) is normalised before any check, so `localhost.` and
+//    `127.0.0.1.` no longer disagree.
+//  · userinfo is REJECTED: Bun's fetch does not put those credentials on the wire, so an operator who
+//    configures auth this way silently gets none, and the string is persisted into the doc and into
+//    routes.json.
+// Returns the PARSED href, not the raw string: ' http://localhost:5173' validated and then broke
+// every HMR upgrade (proxy.ts does target.replace(/^http/,'ws')), and a trailing space 502'd forever.
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const LOOPBACK = 'localhost, 127.0.0.0/8, ::1, or an unspecified address (0.0.0.0, ::)';
+const RELAY_WHY = 'the proxy is publicly reachable through the tunnel, so anything else is an open relay onto a host that never agreed to be published';
+function readTarget(s: string): { target: string } | { error: string } {
+  const err = (error: string) => ({ error });
+  let u: URL;
+  try { u = new URL(s.trim()); } catch { return err('must be an http(s) URL string, e.g. http://localhost:5173'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return err(`must be http(s), not ${u.protocol}`);
+  if (u.username || u.password) {
+    return err('must not carry userinfo (user:pass@) — fetch does not send those credentials upstream, so the target would be reached with NO auth while the password sits in the project doc and in routes.json');
+  }
+  // the proxy forwards `${target}${path}${search}`, so a target search/hash lands mid-URL
+  if (u.search) return err(`must not carry a query string (the proxy appends the request path and query, so "${s}" becomes a garbage upstream URL)`);
+  if (u.hash) return err(`must not carry a fragment (the proxy appends the request path, so "${s}" becomes a garbage upstream URL)`);
+  // strip the brackets of an IPv6 literal and one trailing root dot; both are notation, not identity
+  const h = u.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '');
+  // origin+pathname, never u.href: href normalises a bare origin to a TRAILING SLASH, and the proxy
+  // forwards `${target}${path}` with path already starting with '/', so that would double-slash every
+  // upstream URL. Stripping the trailing slash also keeps the DAR-153 base-path form intact
+  // (http://127.0.0.1:5173/fe stays exactly that, which is what stops Vite's 302 loop).
+  const ok = () => ({ target: (u.origin + u.pathname).replace(/\/+$/, '') });
+  if (h === 'localhost') return ok();
+  const v4 = (a: string): string | null => {
+    const m = IPV4.exec(a);
+    if (!m) return `host "${u.hostname}" is not a valid address`;
+    const o = m.slice(1).map(Number) as [number, number, number, number];
+    if (o.some((n) => n > 255)) return `host "${u.hostname}" is not a valid address`;
+    if (o[0] === 127) return null;
+    if (o[0] === 0 && o[1] === 0 && o[2] === 0 && o[3] === 0) return null; // unspecified: connects to loopback
+    if (o[0] === 169 && o[1] === 254) {
+      return `host "${u.hostname}" is link-local (169.254/16 carries the cloud metadata endpoint) — proxy.target must be a dev server on this machine (${LOOPBACK})`;
+    }
+    const priv = o[0] === 10 || (o[0] === 172 && o[1] >= 16 && o[1] <= 31) || (o[0] === 192 && o[1] === 168);
+    if (priv) return `host "${u.hostname}" is a private/LAN address, i.e. another machine — proxy.target must be a dev server on this machine (${LOOPBACK}); ${RELAY_WHY}`;
+    return `host "${u.hostname}" is a public address — proxy.target must be a dev server on this machine (${LOOPBACK}); ${RELAY_WHY}`;
+  };
+  if (IPV4.test(h)) { const bad = v4(h); return bad ? err(bad) : ok(); }
+  // a colon means an IPv6 LITERAL, never a name — say so rather than falling through to "DNS name"
+  if (h.includes(':')) {
+    if (h === '::1' || h === '::') return ok(); // loopback and unspecified
+    // IPv4-mapped: judge it by the IPv4 rules. WHATWG canonicalises ::ffff:127.0.0.1 to the HEX form
+    // ::ffff:7f00:1 by the time it reaches u.hostname, so both spellings have to be understood.
+    const mapped = /^::ffff:(.+)$/.exec(h);
+    if (mapped) {
+      const rest = mapped[1]!;
+      const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+      const dotted = hex
+        ? [parseInt(hex[1]!, 16) >> 8, parseInt(hex[1]!, 16) & 0xff, parseInt(hex[2]!, 16) >> 8, parseInt(hex[2]!, 16) & 0xff].join('.')
+        : rest;
+      const bad = v4(dotted);
+      return bad ? err(bad) : ok();
+    }
+    if (/^f[cde][0-9a-f]{0,2}:/.test(h)) return err(`host "${u.hostname}" is a private/link-local IPv6 address, i.e. another machine — proxy.target must be a dev server on this machine (${LOOPBACK}); ${RELAY_WHY}`);
+    return err(`host "${u.hostname}" is an IPv6 address outside loopback — proxy.target must be a dev server on this machine (${LOOPBACK}); ${RELAY_WHY}`);
+  }
+  return err(`host "${u.hostname}" is a DNS name, which can resolve anywhere and is resolved at REQUEST time, not here — proxy.target must be a dev server on this machine, addressed literally (${LOOPBACK})`);
+}
+
+// `public` is NOT a regex list any more (FB-107). Two rounds of trying to make user regex safe at
+// validation time failed for a structural reason: cost at a FIXED short path is unbounded in PATTERN
+// length (`^/`+`.*`xK+`x$` on a 64-char path: 0.1ms at K=3, 11958ms at K=8, and the 200-char cap
+// allowed K≈95), so no probe alphabet, no probe length and no length cap bounds the right variable —
+// and moving the check to request time does not help either, because terminate() cannot preempt a
+// thread already inside the backtracking loop. So the boundary is now a small pattern LANGUAGE that
+// is matched with string operations (pathPatternError / matchPathPattern in @darbar/core). The
+// safety argument is structural — there is no engine that can backtrack — rather than a measurement.
+// Every allowlist in use across the whole system was already a literal prefix, so nothing expressive
+// is lost. Anything that still looks like a regex is refused here with the form spelled out.
+
+function readProxy(v: unknown): { proxy: ProjectProxy } | { error: string } {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    return { error: 'proxy must be an object {prefix, target, public?, enabled?} — or null to clear' };
+  }
+  const o = v as Record<string, unknown>;
+  const errs: string[] = [];
+  if (typeof o.prefix !== 'string' || !/^[A-Za-z0-9_-]+$/.test(o.prefix)) {
+    errs.push('proxy.prefix must be a non-empty string of [A-Za-z0-9_-] (it is the URL segment and the routing key)');
+  } else if (PROXY_RESERVED.includes(o.prefix)) {
+    errs.push(`proxy.prefix "${o.prefix}" is reserved (${PROXY_RESERVED.join(', ')} are the server's own paths)`);
+  }
+  let target = '';
+  if (typeof o.target !== 'string' || !o.target) {
+    errs.push('proxy.target must be an http(s) URL string, e.g. http://localhost:5173');
+  } else {
+    const t = readTarget(o.target);
+    if ('error' in t) errs.push(`proxy.target ${t.error}`);
+    else target = t.target; // normalised href, so a stray space cannot 502 forever or break ws://
+  }
+  if (o.enabled !== undefined && typeof o.enabled !== 'boolean') errs.push('proxy.enabled must be a boolean when present');
+  const pub: string[] = [];
+  if (o.public !== undefined) {
+    if (!Array.isArray(o.public)) errs.push(`proxy.public must be an array of path patterns, e.g. ["/$","/assets/"] — each is ${PATH_PATTERN_FORM}`);
+    else o.public.forEach((r, i) => {
+      const bad = pathPatternError(r);
+      if (bad) { errs.push(`proxy.public[${i}] (${JSON.stringify(r)}): rejected — it ${bad}`); return; }
+      pub.push(r as string);
+    });
+  }
+  if (errs.length) return { error: errs.join(' | ') };
+  return { proxy: { prefix: o.prefix as string, target, public: pub, enabled: o.enabled === true } };
+}
+
+// ---------- proxy route reconciliation ----------
+// The server owns the proxy route table, but "owns" is not "cannot fail": a push can fail with the
+// doc already written, so the doc states INTENT (project.proxy) and a second field states FACT
+// (project.proxyPublished — what we actually put in the table and have not withdrawn). Every push is
+// best-effort like slackThreadReply, and the boot pass is a real SYNC that converges the two in both
+// directions (FB-87). Prefixes we did not publish are never touched: the namespace is shared with
+// hand-added routes and taking one over is an exposure change (FB-96).
+
+type LiveRoute = { target: string; public: string[] };
+type LiveRoutes = { default: LiveRoute; prefixes: Record<string, LiveRoute> };
+
+async function proxyAdmin(path: string, method: string, body?: unknown): Promise<unknown> {
+  if (!config.proxyAdminToken) throw new Error('PROXY_ADMIN_TOKEN not configured');
+  const r = await fetch(`http://127.0.0.1:${config.proxyPort}${path}`, {
+    method,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.proxyAdminToken}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${method} ${path} → http ${r.status}`);
+  return r.json().catch(() => null);
+}
+
+async function fetchRoutes(): Promise<LiveRoutes> {
+  const j = (await proxyAdmin('/-/routes', 'GET')) as LiveRoutes | null;
+  if (!j || typeof j !== 'object' || !j.prefixes) throw new Error('GET /-/routes returned no route table');
+  return j;
+}
+
+const publishRoute = (x: PublishedRoute) =>
+  proxyAdmin('/-/route', 'POST', { prefix: x.prefix, target: x.target, public: x.public });
+
+// ownership token: a live prefix is ours only while it still carries exactly what we published.
+// Once a hand edit or another writer changes it, it is theirs and we neither re-claim nor delete it.
+const sameRoute = (a: LiveRoute | PublishedRoute | null | undefined, b: LiveRoute | PublishedRoute | null | undefined): boolean =>
+  !!a && !!b && a.target === b.target && a.public.length === b.public.length && a.public.every((x, i) => x === b.public[i]);
+
+const wantOf = (x: ProjectProxy | null | undefined): PublishedRoute | null =>
+  x?.enabled ? { prefix: x.prefix, target: x.target, public: x.public } : null;
+
+// Would applying `after` make MORE reachable than `before` already does? Only such a change can put
+// a route over one this project does not own, which is the only thing the hijack guard protects
+// (FB-105). Disabled publishes nothing. Otherwise it is a de-escalation when the route identity is
+// unchanged (same prefix, same target, already enabled) and the new allowlist is a subset of the old.
+function escalates(before: ProjectProxy | null | undefined, after: ProjectProxy): boolean {
+  if (!wantOf(after)) return false;
+  if (!before?.enabled || before.prefix !== after.prefix || before.target !== after.target) return true;
+  const was = new Set(before.public);
+  return !after.public.every((s) => was.has(s));
+}
+
+// Two renderings on purpose. Project events are shipped by GET /p/:capId, which IS on the proxy's
+// public allowlist, so anything written into an event is readable by a board-link holder — the
+// target must not appear there any more than it appears in the board payload itself (FB-89). The
+// allowlist is what an event needs to state anyway: it is the boundary. The full detail goes to the
+// server console and to the 409/context responses, all of which are local-only.
+const routePub = (r: LiveRoute | PublishedRoute) => `public: ${r.public.join(', ') || 'nothing'}`;
+const routeDesc = (r: LiveRoute | PublishedRoute) => `${r.target} (${routePub(r)})`;
+
+// the route work and the doc write are both already done by the time this runs: a logging hiccup must
+// not be reported as a sync failure, and must not escape as a 500 on a committed write (FB-90)
+async function safeLog(projectId: ObjectId, text: string) {
+  try { await logEvent(projectId, text); } catch (e) { console.error(`project event log FAILED (${text}): ${String(e)}`); }
+}
+
+async function saveHeld(projectId: ObjectId, held: PublishedRoute[]) {
+  try { await Projects.updateOne({ _id: projectId }, { $set: { proxyPublished: held } }); }
+  catch (e) { console.error(`proxyPublished write FAILED for ${projectId.toString()}: ${String(e)}`); }
+}
+
+// Withdraw one route we hold. Returns whether we still hold it afterwards.
+async function withdrawHeld(h: PublishedRoute, live: LiveRoutes, notes: string[]): Promise<boolean> {
+  const cur = live.prefixes[h.prefix];
+  if (!cur) { notes.push(`proxy route /${h.prefix}/ was already absent`); return false; }
+  if (!sameRoute(cur, h)) {
+    console.error(`proxy route /${h.prefix}/ not removed: now serves ${routeDesc(cur)}, this project published ${routeDesc(h)}`);
+    notes.push(`proxy route /${h.prefix}/ NOT removed: it no longer serves what this project published (now ${routePub(cur)}) — it belongs to someone else and was left alone`);
+    return false;
+  }
+  try { await proxyAdmin(`/-/route/${h.prefix}`, 'DELETE'); delete live.prefixes[h.prefix]; notes.push(`proxy route removed: /${h.prefix}/`); return false; }
+  catch (e) { notes.push(`proxy route /${h.prefix}/ NOT removed (${String(e)}) — it is STILL LIVE; the next change or a server restart will withdraw it`); return true; }
+}
+
+// Publish the route this project wants. Returns whether we hold it afterwards.
+async function publishWanted(want: PublishedRoute, held: PublishedRoute[], live: LiveRoutes, notes: string[]): Promise<boolean> {
+  const cur = live.prefixes[want.prefix];
+  const ours = held.find((h) => h.prefix === want.prefix) ?? null;
+  if (cur && !sameRoute(cur, want) && !sameRoute(cur, ours)) {
+    console.error(`proxy route /${want.prefix}/ not published: prefix already serves ${routeDesc(cur)}, wanted ${routeDesc(want)}`);
+    notes.push(`proxy route /${want.prefix}/ NOT published: the prefix is already held by a route this project did not publish (${routePub(cur)}) — publishing would repoint someone else's URL and replace their allowlist`);
+    return false;
+  }
+  if (sameRoute(cur, want)) { notes.push(`proxy route /${want.prefix}/ already correct`); return true; }
+  try {
+    await publishRoute(want);
+    live.prefixes[want.prefix] = { target: want.target, public: want.public };
+    console.log(`proxy route published: /${want.prefix}/ → ${routeDesc(want)}`);
+    notes.push(`proxy route published: /${want.prefix}/ (${routePub(want)})`);
+    return true;
+  }
+  catch (e) { notes.push(`proxy route /${want.prefix}/ NOT published (${String(e)}) — the share is configured but the link does not resolve; the next change or a server restart will publish it`); return false; }
+}
+
+// ONE convergence pass, used by both callers (a PATCH and the boot sync). It was copy-pasted before,
+// which is exactly how the fail-open below came to exist in two places that then had to be fixed twice.
+// `held` is project.proxyPublished going in — what is live because of us, not what the doc wants.
+// Withdrawal is driven off it rather than off the previous config, so a clear ($unset) is still
+// convergeable (FB-87 trace 3), and a failed delete keeps its orphan recorded instead of losing it.
+// The publish is attempted even when the withdrawal failed, so a rename never loses BOTH ends (trace 2).
+// Returns what this project holds after the pass.
+async function convergeRoutes(held: PublishedRoute[], want: PublishedRoute | null, live: LiveRoutes, notes: string[]): Promise<PublishedRoute[]> {
+  const next: PublishedRoute[] = [];
+  // FB-103. The held entry for the WANTED prefix is the ownership token that proves the live route is
+  // ours, and it must survive until the publish is CONFIRMED. Dropping it up front (the withdraw loop
+  // used to `continue` past it, and only a truthy publish put it back) meant a same-prefix edit with a
+  // failing POST left the old route live with proxyPublished:[] — after which the boot sync REFUSED to
+  // repair its own route ("held by a route this project did not publish", the token being gone) and a
+  // later clear made zero proxy calls while logging a false "no route published" all-clear. That is
+  // permanently unconvergeable plus a confident wrong answer, over a dev server still on public ["/"].
+  const prior = want ? held.find((h) => h.prefix === want.prefix) ?? null : null;
+  for (const h of held) {
+    if (want && h.prefix === want.prefix) continue; // the publish below decides this prefix's fate
+    if (await withdrawHeld(h, live, notes)) next.push(h);
+  }
+  if (want) {
+    if (await publishWanted(want, held, live, notes)) next.push(want);
+    // publish failed: whatever we had on that prefix is STILL LIVE and still ours. Keep the token so
+    // the next pass can recognise and repair it. (If someone else has since taken the prefix over,
+    // withdrawHeld will see that and drop it then — the safe direction is to keep the record.)
+    else if (prior) next.push(prior);
+  }
+  return next;
+}
+
+async function reconcileProxy(projectId: ObjectId, held: PublishedRoute[], after: ProjectProxy | null) {
+  const want = wantOf(after);
+  const notes: string[] = [];
+  // nothing live because of us and nothing to publish: the table is not involved, so do not touch it
+  // (and do not raise a scary "unreachable" note about a save that never needed it — FB-90)
+  if (!held.length && !want) { await safeLog(projectId, 'proxy config saved (disabled — no route published)'); return; }
+  let live: LiveRoutes | null = null;
+  try { live = await fetchRoutes(); } catch (e) { notes.push(`proxy route table unreachable (${String(e)}) — nothing was published or withdrawn; the boot sync will converge it`); }
+
+  const next = live ? await convergeRoutes(held, want, live, notes) : held;
+  if (!notes.length) notes.push('proxy config saved (disabled — no route published)');
+
+  const changed = next.length !== held.length || next.some((h, i) => h.prefix !== held[i]?.prefix || !sameRoute(h, held[i]));
+  if (changed) await saveHeld(projectId, next);
+  await safeLog(projectId, notes.join(' · '));
+}
+
+// Boot SYNC (not a re-publish pass): reads the live table once and converges it against every
+// project doc in BOTH directions — publish what is missing, withdraw what we published and no longer
+// want. Prefixes nobody's doc claims are left strictly alone, so a hand-added route survives.
+// routes.json persists across a proxy restart, so this is not about a restart losing entries — it is
+// the only thing that ever repairs a push that failed while the proxy was down.
+// The proxy may not be up at all: log and continue, never block the server from starting.
+export async function reconcileAllProxies() {
+  let live: LiveRoutes;
+  try { live = await fetchRoutes(); }
+  catch (e) { console.error(`proxy route sync SKIPPED: cannot read the route table (${String(e)}) — routes may differ from the project docs until the next change`); return; }
+
+  const rows = await Projects.find({ $or: [{ proxy: { $exists: true } }, { proxyPublished: { $exists: true, $ne: [] } }] }).toArray();
+  for (const p of rows) {
+    const held = p.proxyPublished ?? [];
+    const want = wantOf(p.proxy);
+    if (!held.length && !want) continue;
+    const notes: string[] = [];
+    const next = await convergeRoutes(held, want, live, notes); // same implementation as the PATCH path
+    if (!notes.length) continue;
+    console.log(`proxy sync (${p.prefix}): ${notes.join(' · ')}`);
+    const changed = next.length !== held.length || next.some((h, i) => h.prefix !== held[i]?.prefix || !sameRoute(h, held[i]));
+    if (changed) await saveHeld(p._id!, next);
+    // a sync that changed or refused something changed the EXPOSURE state, which is the one thing
+    // this feature owes the board; only the pure no-op ("already correct") is left as console noise
+    if (!notes.every((n) => n.includes('already correct'))) await safeLog(p._id!, `proxy route sync at boot: ${notes.join(' · ')}`);
+  }
 }
 
 // ---------- review pipeline engine ----------
@@ -281,11 +595,57 @@ api.patch('/projects/:ref', async (c) => {
     agents = parsed.agents;
     set.agents = agents;
   }
-  if (Object.keys(set).length === 0) return c.json({ error: 'nothing to update (charter, slackChannel, pipeline, agents)' }, 400);
-  await Projects.updateOne({ _id: p._id }, { $set: set });
+  // proxy: absent = untouched, null = cleared (route withdrawn), object = replaced wholesale
+  let proxyChange: { after: ProjectProxy | null } | undefined;
+  const unset: Record<string, ''> = {};
+  if (b.proxy !== undefined) {
+    if (b.proxy === null) {
+      unset.proxy = '';
+      proxyChange = { after: null };
+    } else {
+      const parsed = readProxy(b.proxy);
+      if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+      // the prefix is the routing key: a collision silently hijacks another project's URL
+      const owner = await Projects.findOne({ _id: { $ne: p._id }, 'proxy.prefix': parsed.proxy.prefix });
+      if (owner) return c.json({ error: `proxy prefix "${parsed.proxy.prefix}" is already claimed by project ${owner.prefix} (${owner.name})` }, 409);
+      // ...but that namespace is SHARED with hand-added routes, so checking projects is not enough:
+      // publishing over one repoints its target AND replaces its allowlist (an exposure change), and
+      // the later withdrawal destroys it (FB-96). A proxy we cannot reach is not a veto — nothing is
+      // published in that case anyway, and the boot sync applies the same check before it publishes.
+      //
+      // FB-105: this guard only belongs on a change that would PUBLISH over someone else's route.
+      // Applying it to every PATCH meant a squatted prefix froze proxy.enabled at true — disable,
+      // narrow, retarget all 409'd — so the board advertised a share the project could not switch
+      // off, and the only escape was PATCH {proxy:null}, which skips this check and throws the config
+      // away. A guard against exposure must never be the thing that guarantees it. So: a config that
+      // publishes nothing is always allowed, and so is a pure de-escalation of one already in place.
+      // (publishWanted applies the same ownership test before it writes, so the route table is
+      // protected either way; this 409 exists to say so at the API edge rather than in an event log.)
+      if (escalates(p.proxy, parsed.proxy)) {
+        const liveHit = await fetchRoutes().then((r) => r.prefixes[parsed.proxy.prefix] ?? null).catch(() => null);
+        const ourHit = (p.proxyPublished ?? []).find((h) => h.prefix === parsed.proxy.prefix) ?? null;
+        if (liveHit && !sameRoute(liveHit, ourHit) && !sameRoute(liveHit, parsed.proxy)) {
+          return c.json({ error: `proxy prefix "${parsed.proxy.prefix}" is already live on the proxy (${routeDesc(liveHit)}) and was not published by this project — pick another prefix, or withdraw that route by hand first. Disabling, narrowing proxy.public or clearing the config is always allowed` }, 409);
+        }
+      }
+      set.proxy = parsed.proxy;
+      proxyChange = { after: parsed.proxy };
+    }
+  }
+  if (Object.keys(set).length === 0 && Object.keys(unset).length === 0) {
+    return c.json({ error: 'nothing to update (charter, slackChannel, pipeline, agents, proxy)' }, 400);
+  }
+  await Projects.updateOne({ _id: p._id }, {
+    ...(Object.keys(set).length ? { $set: set } : {}),
+    ...(Object.keys(unset).length ? { $unset: unset } : {}),
+  });
   const laneNote = pipeline ? `: lanes [${pipeline.reviews.map((r) => r.lane).join(', ')}], autoAdvance ${pipeline.autoAdvance}` : '';
   const agentNote = agents ? `: agents [${agents.map((a) => a.name).join(', ')}]` : '';
-  await logEvent(p._id!, `project updated (${Object.keys(set).join(', ')})${laneNote}${agentNote}`);
+  await logEvent(p._id!, `project updated (${[...Object.keys(set), ...Object.keys(unset)].join(', ')})${laneNote}${agentNote}`);
+  // the server owns the route table, so the proxy is updated from the doc that was just written.
+  // What gets WITHDRAWN comes from proxyPublished (what is actually live) rather than from the old
+  // config, so clearing the config never destroys the record of the prefix still to withdraw.
+  if (proxyChange) await reconcileProxy(p._id!, p.proxyPublished ?? [], proxyChange.after);
   // soft consistency: pipeline managers should exist in the registry (when one exists) — warn, never fail.
   // The write is already committed, so a logging failure must not turn a successful PATCH into a 500.
   if (pipeline || agents) {
@@ -308,7 +668,7 @@ api.patch('/projects/:ref', async (c) => {
 api.get('/projects/:ref/context', async (c) => {
   const p = await resolveProject(c.req.param('ref'));
   if (!p) return c.json({ error: 'project not found' }, 404);
-  return c.json({ name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders, agents: p.agents ?? [] });
+  return c.json({ name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders, agents: p.agents ?? [], proxy: p.proxy ?? null });
 });
 
 api.get('/projects/:ref/events', async (c) => {
@@ -328,8 +688,24 @@ api.get('/p/:capId', async (c) => {
     Feedback.find({ projectId: p._id }).sort({ createdAt: -1 }).toArray(),
     Events.find({ projectId: p._id }).sort({ at: -1 }).limit(config.eventsBoardLimit).toArray(),
   ]);
+  // This endpoint IS on the proxy's public allowlist, so everything here is readable by anyone
+  // holding a board link. proxy.target is the internal host:port being exposed — the one field a
+  // link-holder must not learn — so it is dropped and flagged (FB-89). prefix/public/enabled stay:
+  // disclosing WHAT is exposed is the whole point of the panel. The full config, target included,
+  // is on /projects/:ref/context, which is local-only.
+  const proxy = p.proxy ? { prefix: p.proxy.prefix, public: p.proxy.public, enabled: p.proxy.enabled, targetRedacted: true } : null;
+  // proxyPublished is what the server reports it actually PUT in the route table and has not
+  // withdrawn — the only fact on this payload that can contradict the config, and therefore the only
+  // thing that lets the panel say "configured off, route still live" instead of a confident wrong
+  // "nothing shared" (FB-95/FB-102). It was being read by the board and never sent, which made every
+  // fail-open state on that surface unreachable. Same redaction as above: prefix and allowlist are
+  // the boundary and belong on the board; the internal host:port never leaves the machine.
+  const published = (p.proxyPublished ?? [])
+    .filter((r) => r && typeof r.prefix === 'string')
+    .map((r) => ({ prefix: r.prefix, public: Array.isArray(r.public) ? r.public : [], targetRedacted: true }));
   // charter sliced to 401: board shows a ~400-char preview and needs the +1 to know it truncated
-  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders, pipeline: p.pipeline ?? null, agents: p.agents ?? [], charter: (p.charter ?? '').slice(0, 401) }, tasks, feedback, events });
+  // baseUrl rides along so the board can state the shared link exactly as a stakeholder receives it
+  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders, pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy, proxyPublished: published, baseUrl: config.baseUrl, charter: (p.charter ?? '').slice(0, 401) }, tasks, feedback, events });
 });
 
 api.get('/p/:capId/stream', async (c) => {

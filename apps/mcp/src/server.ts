@@ -87,6 +87,16 @@ server.tool('set_agents', 'Register the project agent registry: lane managers, h
   },
   ({ project, agents }) => call(`/projects/${encodeURIComponent(project)}`, 'PATCH', { agents }));
 
+server.tool('set_proxy', 'Share a LOCAL dev server for this project through the public proxy, at BASE_URL/<prefix>/. SECURITY: while enabled, anyone who has the link can reach that target — there is no login in front of it. The public patterns ARE the boundary: only paths matching one of them are served to tunneled requests (local access is never filtered), so ["/"] means the whole app is exposed and omitting them means nothing is. Default is enabled:false — configure first, share deliberately. Replaces the whole proxy config; the server pushes it into the proxy route table and reconciles the two at every change and at boot, so a failed push is repaired rather than left as silent drift. The target is never shown on the public board (a link-holder must not learn the internal host:port); it is on get_project_context, which is local-only.',
+  {
+    project: z.string(),
+    prefix: z.string().describe('URL segment this project is served at, [A-Za-z0-9_-]; it is the routing key, so a prefix already claimed by another project OR already live on the proxy as a hand-added route is rejected 409'),
+    target: z.string().describe('http(s) URL of a dev server on THIS machine — loopback only (localhost, 127.0.0.0/8, ::1, or an unspecified address like 0.0.0.0 / ::, which connect to loopback); a public host, a LAN/private address, ANY DNS name (including *.localhost, which is resolved at request time and can point anywhere), or a link-local/metadata address is rejected 400, because the proxy is publicly reachable through the tunnel and would relay to it. No query, fragment or user:pass@ (credentials are never sent upstream, so they would only end up stored). INCLUDE THE PATH when the dev server has a base: a Vite app served at base /fe needs http://127.0.0.1:5173/fe, not http://127.0.0.1:5173 — without it Vite receives / and 302s to /fe/ forever through the prefix strip'),
+    public: z.array(z.string()).optional().describe('allowlist of paths reachable from outside. These are NOT regular expressions — each entry is a literal path starting with "/", matching as a PREFIX by default ("/assets/"), with a trailing "$" for an exact path ("/$" = the root and nothing else) and at most one "*" matching within a single path segment ("/assets/*.js$"). Anything else — "^", "(", "[", "+", "\\", ".*" — is rejected 400 with the form spelled out, because the proxy matches these with string operations only: a regex allowlist on a shared front door was a denial-of-service hole no validation could close. Omit = nothing is reachable through the tunnel; ["/"] exposes every path'),
+    enabled: z.boolean().optional().describe('default false. true publishes the route immediately; false withdraws it while keeping the config'),
+  },
+  ({ project, ...rest }) => call(`/projects/${encodeURIComponent(project)}`, 'PATCH', { proxy: rest }));
+
 server.tool('file_feedback', 'File a finding as feedback (lanes use this). Lands in the same pending queue as human feedback.',
   {
     taskRef: z.string().optional(), project: z.string().optional(),

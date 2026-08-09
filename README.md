@@ -43,6 +43,47 @@ Set BASE_URL to the tunnel domain so board links in Gabbar replies work for
 stakeholders. Free-plan ngrok shows visitors a one-click interstitial.
 Mongo: reuses the saturn-v2 docker container (db `mission_control`, override via DB_NAME).
 
+### Exposing a Vite dev server (HMR works through the tunnel)
+The proxy bridges WebSocket upgrades, so Vite's HMR socket survives the tunnel —
+the same route + `public` policy applies to the upgrade as to plain HTTP, on the
+prefix-stripped path. The upstream socket is connected before the client handshake is
+answered, so a 101 means the tunnel really works (a dead or wedged dev server gets a 502
+instead), and buffering is capped in both directions: an end that stops reading has its
+socket closed rather than growing the proxy's memory. Two Vite-side requirements:
+
+1. **`base` must match the prefix** (`base: '/fe/'` for prefix `fe`) — otherwise the
+   HTML points at `/assets/...` and `/@vite/client` at the tunnel root, which lands
+   on the default route instead of your app. The HMR socket URL follows `base` too.
+2. **Put the same path on the route target** (`http://127.0.0.1:5173/fe`). The proxy
+   strips the prefix, so without it Vite receives `/` and 302-redirects to `base` —
+   an infinite redirect loop in the viewer's browser.
+
+```
+curl -X POST localhost:4800/-/route -H "Authorization: Bearer $PROXY_ADMIN_TOKEN" \
+  -d '{"prefix":"fe","target":"http://127.0.0.1:5173/fe","public":["^/"]}'
+```
+**`Origin` is forwarded, deliberately.** An upstream that runs a cross-site-WebSocket-hijacking
+check has to see the viewer's real origin. Rewrite it and every tunneled upgrade looks
+same-origin to that check, which is strictly worse; Vite's own proxy docs say rewriting origin
+for proxied websockets "can expose the proxy to CSRF attacks". Vite validates `Origin` on the
+HMR socket from 6.0.9 / 5.4.12 / 4.5.6 (the CVE-2025-24010 fix). The proxy forwards `Origin`
+and passes the query string through unchanged, which is what lets Vite's own client, whose HMR
+URL carries a `?token=`, complete the handshake.
+
+**Do not read that as protection.** The token is embedded in the page the tunnel serves
+publicly, so on a route that exposes the whole app, any visitor who can load the page can read
+the token and drive the HMR socket, which per that advisory means reading and writing arbitrary
+HMR messages. That is inherent to sharing a dev server and is a fine deliberate trade. It is
+not a defence, and Vite's `Origin` check is not standing between a link-holder and your HMR
+socket.
+
+**`Host` is dropped on purpose, and that disables `allowedHosts`.** Not because it is
+hop-by-hop (it isn't, per RFC 7230) but because we choose to: the upstream sees
+`127.0.0.1:<port>`, so its `allowedHosts` check passes with no config. That is the right call
+for a front door that is the intended entry point, but name it for what it is. `allowedHosts`
+is disabled for anything behind this proxy, not satisfied. Don't trust it as a defence, and
+don't "fix" the hop-by-hop list to restore it.
+
 ## MCP registration (orchestrator sessions)
 ```json
 { "mcpServers": { "darbar": { "command": "bun", "args": ["--env-file=/Users/rajvarsani/fafo/darbar/.env", "/Users/rajvarsani/fafo/darbar/apps/mcp/src/server.ts"] } } }

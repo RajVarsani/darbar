@@ -16,6 +16,15 @@ export async function initDb() {
   await client.connect();
   await Projects.createIndex({ capId: 1 }, { unique: true });
   await Projects.createIndex({ prefix: 1 }, { unique: true });
+  // proxy.prefix is the routing key. The API's read-then-write collision check is advisory (two
+  // concurrent PATCHes both pass it), so uniqueness is backed here. Partial so the vast majority of
+  // projects — which have no proxy at all — are not all colliding on a missing field.
+  // A pre-existing duplicate must not brick boot: log it, the advisory check still applies.
+  try {
+    await Projects.createIndex({ 'proxy.prefix': 1 }, { unique: true, partialFilterExpression: { 'proxy.prefix': { $type: 'string' } } });
+  } catch (e) {
+    console.error(`unique index on proxy.prefix NOT created (${String(e)}) — prefix uniqueness is advisory only until this is resolved`);
+  }
   await Tasks.createIndex({ projectId: 1 });
   await Tasks.createIndex({ shortId: 1 }, { unique: true });
   await Feedback.createIndex({ projectId: 1, status: 1 });

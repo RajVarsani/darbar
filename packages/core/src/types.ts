@@ -10,6 +10,137 @@ export type Pipeline = { autoAdvance: boolean; reviews: ReviewLane[] };
 // agent registry: brief = standing charter the orchestrator dispatches with; trigger = when-to-dispatch hint
 export type ProjectAgent = { name: string; kind: 'lane-manager' | 'helper' | 'orchestrator'; brief: string; trigger?: string };
 
+// ---------- public path patterns ----------
+// `public` entries are NOT regular expressions. A regex allowlist on the front door was a ReDoS
+// hole that could not be closed from the execution side: holding the path fixed at 64 chars and
+// growing only the PATTERN, `^/`+`.*`xK+`x$` costs 0.1ms at K=3 and 11958ms at K=8 (a 20-char
+// pattern), so cost at a fixed short path is unbounded in pattern length and a path-length cap
+// bounds the wrong variable; `^/(((z+))+)+$` reaches 1429ms at a 16-char path; and a worker cannot
+// rescue it because terminate() cannot preempt a thread already inside the backtracking loop.
+// So the language below is matched with STRING OPERATIONS ONLY — ===, startsWith, indexOf. There is
+// no engine that can backtrack, which makes the whole class unreachable rather than measured-cheap.
+// Deliberately NOT lowered to a constructed RegExp for that same reason: a lowered glob benchmarks
+// fine, but its safety would then rest on a measurement instead of on the absence of an engine.
+//
+//   /assets/       PREFIX — every request path that starts with it (patterns anchor at the start)
+//   /$             EXACT  — a trailing $ means the path must equal the literal
+//   /assets/*.js$  GLOB   — at most ONE *, matching any run of characters except '/'
+//
+// An empty list means nothing is reachable, and that is also what an unparseable entry degrades to:
+// every failure here drops the entry, never widens it.
+export const PATH_PATTERN_FORM =
+  'a literal path starting with "/" — prefix by default, a trailing "$" for exact, and at most one "*" matching within a single path segment';
+export const PATH_PATTERN_MAX_LEN = 200;
+// what a URL path legitimately carries. Every regex metacharacter that is not on this list
+// (^ ( ) [ ] { } | + ? \ and a bare $ mid-pattern) is refused by name, so an old regex fails loudly
+// instead of being silently reinterpreted as literal text. '.' and '-' are literals here.
+// This is the ONLY RegExp in the file and it is not on the matching path: it is a fixed character
+// class run once per pattern at CONFIG time, over an input already capped at PATH_PATTERN_MAX_LEN,
+// and it is not attacker-authored. matchPathPattern below — the thing every tunneled request runs —
+// contains no regex at all.
+const PATH_PATTERN_LITERAL = /^[A-Za-z0-9._~%!'@:,;=&/-]*$/;
+
+// head/tail are the literal chunks either side of the single '*'; tail is null when there is no '*'.
+export type PathPattern = { src: string; head: string; tail: string | null; exact: boolean };
+
+export function pathPatternError(src: unknown): string | null {
+  if (typeof src !== 'string' || !src) return 'must be a non-empty string';
+  if (src.length > PATH_PATTERN_MAX_LEN) return `is longer than ${PATH_PATTERN_MAX_LEN} chars`;
+  const body = src.endsWith('$') ? src.slice(0, -1) : src;
+  if (!body.startsWith('/')) {
+    return src.startsWith('^')
+      ? `starts with "^" — public patterns are no longer regular expressions. Write ${PATH_PATTERN_FORM}: "^/assets/" becomes "/assets/", "^/$" becomes "/$", "^/" becomes "/"`
+      : `must start with "/" — ${PATH_PATTERN_FORM}`;
+  }
+  if (body.split('*').length - 1 > 1) return 'contains more than one "*" — at most one is allowed, and it never matches across "/"';
+  if (body.includes('.*')) return 'contains ".*", which is regex — here "." is a literal dot and "*" is a glob; write "/" alone for a prefix that matches every path';
+  const lit = body.split('*').join('');
+  if (!PATH_PATTERN_LITERAL.test(lit)) {
+    const bad = [...lit].find((ch) => !PATH_PATTERN_LITERAL.test(ch));
+    return `contains ${JSON.stringify(bad)}, which is not a literal path character — ${PATH_PATTERN_FORM}`;
+  }
+  return null;
+}
+
+export function parsePathPattern(src: string): PathPattern | null {
+  if (pathPatternError(src)) return null;
+  const exact = src.endsWith('$');
+  const body = exact ? src.slice(0, -1) : src;
+  const i = body.indexOf('*');
+  return i < 0
+    ? { src, head: body, tail: null, exact }
+    : { src, head: body.slice(0, i), tail: body.slice(i + 1), exact };
+}
+
+// String ops only. Worst case O(path length) per pattern, no backtracking, always terminates.
+// With exactly one '*' the leftmost tail match is also exactly correct: a '/' before the leftmost
+// occurrence is a '/' before every later one, so there is nothing a second attempt could recover.
+export function matchPathPattern(p: PathPattern, path: string): boolean {
+  if (p.tail === null) return p.exact ? path === p.head : path.startsWith(p.head);
+  if (!path.startsWith(p.head)) return false;
+  const rest = path.slice(p.head.length); // the '*' plus the tail must cover exactly this
+  if (p.exact) {
+    if (rest.length < p.tail.length || !rest.endsWith(p.tail)) return false;
+    return !rest.slice(0, rest.length - p.tail.length).includes('/');
+  }
+  const at = rest.indexOf(p.tail);
+  return at >= 0 && !rest.slice(0, at).includes('/');
+}
+
+// READ-TIME MIGRATION for strings written before this language existed (routes.json on disk, and
+// project docs not re-saved since). A legacy entry converts only when it is a PURE LITERAL path once
+// the anchors come off; anything else is HARD-REJECTED loudly, because silently reading a regex as
+// literal text mis-matches — usually narrower, sometimes wider, never what was written.
+const LEGACY_META = '.*+?()[]{}|\\^$';
+export function migratePathPattern(src: unknown): { pattern: string } | { error: string } {
+  if (typeof src !== 'string' || !src) return { error: 'is not a non-empty string' };
+  if (!src.startsWith('^')) {
+    const e = pathPatternError(src);
+    return e ? { error: e } : { pattern: src };
+  }
+  let body = src.slice(1);
+  let exact = false;
+  if (body.endsWith('$')) { body = body.slice(0, -1); exact = true; }
+  const meta = [...body].find((ch) => LEGACY_META.includes(ch));
+  if (meta) {
+    return { error: `is a legacy regex containing ${JSON.stringify(meta)}, which this language cannot express — rewrite it as ${PATH_PATTERN_FORM}` };
+  }
+  const out = body + (exact ? '$' : '');
+  const e = pathPatternError(out);
+  return e ? { error: `is a legacy regex that converts to ${JSON.stringify(out)}, which ${e}` } : { pattern: out };
+}
+
+// Compile a stored `public` list into matchers. FAILS CLOSED: a bad entry is dropped (never widened,
+// never reinterpreted) and reported through onReject, so an all-bad list ends up as [] — nothing
+// reachable. An absent or non-array list is likewise [], never match-everything.
+export function compilePublic(list: unknown, onReject: (src: string, why: string) => void): PathPattern[] {
+  if (!Array.isArray(list)) {
+    if (list !== undefined && list !== null) onReject(String(list), 'is not an array of patterns');
+    return [];
+  }
+  const out: PathPattern[] = [];
+  for (const raw of list) {
+    const m = migratePathPattern(raw);
+    if ('error' in m) { onReject(typeof raw === 'string' ? raw : String(raw), m.error); continue; }
+    const p = parsePathPattern(m.pattern);
+    if (!p) { onReject(String(raw), 'could not be parsed'); continue; }
+    out.push(p);
+  }
+  return out;
+}
+
+// dev server shared through the proxy. prefix is the URL segment AND the routing key (unique
+// across projects); public[] is the path-pattern allowlist (above) the proxy enforces on tunneled
+// requests. target must be a LOCAL address — the proxy is what the tunnel fronts.
+export type ProjectProxy = { prefix: string; target: string; public: string[]; enabled: boolean };
+
+// what the server has actually put in the proxy route table for this project and not yet
+// successfully withdrawn. `proxy` is intent, this is fact, and they differ whenever a push failed.
+// Normally 0 or 1 entries; more only when a withdrawal failed and left an orphan behind. Kept even
+// after `proxy` is cleared, so a failed withdrawal is still convergeable by the boot sync, and used
+// as the ownership token so we never delete a prefix somebody else now holds.
+export type PublishedRoute = { prefix: string; target: string; public: string[] };
+
 export type Project = {
   _id?: ObjectId;
   name: string;
@@ -21,6 +152,8 @@ export type Project = {
   slackChannel: string | null;
   pipeline?: Pipeline;
   agents?: ProjectAgent[];
+  proxy?: ProjectProxy;
+  proxyPublished?: PublishedRoute[];
   counters: { task: number; feedback: number };
   createdAt: Date;
 };

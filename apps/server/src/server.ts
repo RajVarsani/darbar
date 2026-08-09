@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { api } from './api';
+import { api, reconcileAllProxies } from './api';
 import { initDb, config } from '@darbar/core';
 
 const app = new Hono();
@@ -34,6 +34,11 @@ const homePath = new URL('../web/home.html', import.meta.url).pathname;
 app.get('/', async (c) => c.html(await Bun.file(homePath).text()));
 
 await initDb();
+// converge the proxy route table against every project doc, in both directions. routes.json survives
+// a proxy restart, so this is not about a restart losing entries — it is the only thing that repairs a
+// push that failed (typically because the proxy was down when a share was changed or withdrawn).
+// Fire-and-forget — the proxy may be down, and that must never keep this server from listening.
+reconcileAllProxies().catch((e) => console.error(`proxy reconcile pass failed: ${String(e)}`));
 console.log(`darbar listening on ${config.bindHost}:${config.port}`);
 
 export default {

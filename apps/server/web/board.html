@@ -73,6 +73,14 @@
   .crumb{font-family:var(--mono);font-weight:700;font-size:14px;white-space:nowrap;display:flex;align-items:center;gap:10px}
   .chip{font-family:var(--mono);font-size:11px;font-weight:700;background:var(--beige);border:2px solid var(--ink);
     padding:1px 7px;letter-spacing:.04em}
+  /* an exposed dev server is the one project fact with a consequence outside the tracker, so it
+     is stated on the board surface next to the prefix — not only inside a panel you must open */
+  .expomark{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;font-weight:800;
+    letter-spacing:.08em;text-transform:uppercase;background:var(--red);color:#fff;border:2px solid var(--ink);
+    padding:2px 8px;white-space:nowrap;transition:.08s}
+  .expomark::before{content:"";width:7px;height:7px;background:#fff;border:1.5px solid var(--ink);
+    flex:none;animation:pulse 2.2s infinite}
+  .expomark:hover{box-shadow:2px 2px 0 var(--ink);transform:translate(-1px,-1px)}
   .searchwrap{flex:1;display:flex;justify-content:center}
   .search{display:flex;align-items:center;gap:8px;width:min(420px,100%);background:var(--beige);
     border:2px solid var(--ink);padding:6px 12px;color:var(--ink-soft);transition:box-shadow .1s,transform .1s}
@@ -341,6 +349,43 @@
   .quote.mono{font-family:var(--mono);font-size:11.5px;line-height:1.55}
   .repolist{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 
+  /* ---------- SHARED ----------
+     the only section here with a consequence outside the tracker, so it may not borrow the panel's
+     row vocabulary: .badge is the SUCCESS token (SLACK ✓) and .badge.off is the DEFICIENCY token
+     (NO MANAGER). Reusing them made exposed read healthy and safe read broken. On gets the red
+     tokens and its own geometry — an inverted header over a warm card; off is a plain section. */
+  .dsec.expo>h3{background:var(--red);color:#fff;border:2px solid var(--ink);border-bottom:none;
+    padding:6px 10px;margin-bottom:0;letter-spacing:.12em}
+  .dsec.expo .expobody{border:2px solid var(--ink);background:var(--red-pale);padding:12px 12px 14px}
+  .dsec.expo .expobody .mini,.dsec.expo .expobody .quote{background:#fff}
+  .expolead{font-family:var(--mono);font-size:11px;font-weight:800;text-transform:uppercase;
+    letter-spacing:.07em;color:var(--red);margin-bottom:9px}
+  .badge.warn{border:1.5px solid var(--ink);background:var(--red);color:#fff;letter-spacing:.1em}
+  /* off is a settled fact, not a missing thing: it must not wear the NO MANAGER treatment */
+  .badge.calm{border-color:rgba(28,28,28,.3);color:var(--ink-soft);background:var(--beige-2)}
+  /* a withheld value is prose, not a value: it must never wear .id and read as the target itself */
+  .redact{font-size:11.5px;font-style:italic;color:var(--ink-soft);min-width:0}
+  /* public patterns are RULES with consequences, never names — they must not wear .chip, which the
+     repo list one section down uses for 'darbar' */
+  .pchip{font-family:var(--mono);font-size:11px;font-weight:600;background:var(--beige-2);
+    border:1.5px dashed rgba(28,28,28,.42);color:var(--ink-soft);padding:1px 7px;letter-spacing:.02em}
+  .pchip.catchall{background:var(--red);color:#fff;border:2px solid var(--ink);border-style:solid;
+    font-weight:800;font-size:12px;padding:2px 9px;letter-spacing:.06em}
+  .pchip.catchall::before{content:"⚠ "}
+  /* the sentence that decides whether this stays on: not a footnote, and hoisted ABOVE the row so it
+     carries the offending chip with it instead of pointing at a wrapped list from underneath */
+  .pathwarn{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:2px solid var(--ink);
+    border-left:6px solid var(--red);background:var(--red-pale);padding:9px 12px;margin:12px 0 10px}
+  .pathwarn .pwtxt{flex:1;min-width:200px;font-size:12.5px;font-weight:600;color:var(--ink)}
+  /* off is calm: the chip keeps the alarm, the block around it stops shouting, so the two states
+     never converge on the same picture */
+  .dsec:not(.expo) .pathwarn{background:var(--beige-2)}
+  /* off: the URL is a preview, not a deliverable — it stops being the loudest element in the section */
+  .quote.mono.prev{background:none;border:1.5px dashed var(--ink-faint);color:var(--ink-soft);
+    font-weight:400;padding:9px 12px}
+  .pbtn[disabled]{opacity:.5;cursor:not-allowed;border-style:dashed;background:none}
+  .pbtn[disabled]:hover{border-color:rgba(28,28,28,.28);background:none}
+
   .empty{padding:52px 24px;text-align:center;color:var(--ink-soft);font-family:var(--mono);font-size:12.5px}
   .empty b{color:var(--ink)}
 
@@ -395,7 +440,9 @@
   <div class="toprow">
     <!-- D tile is the home/brand mark; the wordmark is gone so the top bar names the project once -->
     <div class="brand"><span class="dot" title="Darbar">D</span></div>
-    <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span></div>
+    <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span>
+      <button class="expomark" id="expomark" type="button" data-open-config hidden
+        title="this project is configured to expose a dev server to anyone with the link · open project config">shared</button></div>
     <div class="searchwrap">
       <button class="search" id="qbtn" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <span class="ph">search tasks, feedback, ids…</span>
@@ -490,6 +537,39 @@ function toast(msg){
   clearTimeout(toastT); toastT=setTimeout(()=>el.classList.remove('show'), 3200);
 }
 
+// fallback for every branch that cannot reach a clipboard: select the URL box above the button so
+// the link is one keystroke away instead of gone
+function selectCopySource(btn){
+  const box = btn.previousElementSibling;
+  if (!box || !box.classList.contains('quote')) return false;
+  try {
+    const r = document.createRange(); r.selectNodeContents(box);
+    const s = window.getSelection(); if (!s) return false;
+    s.removeAllRanges(); s.addRange(r); return true;
+  } catch { return false; }
+}
+let copyT;
+// two things this must not do: leave the button stuck on an error string (the affordance is then
+// gone until the next re-render), and short-circuit on `navigator.clipboard?.` — optional chaining
+// swallows the whole .then().catch() chain, so on a non-secure origin the button did nothing at all
+// and said nothing about it. The label always comes back; the no-clipboard case is stated out loud.
+function copyLink(btn){
+  const url = btn.dataset.copy || '';
+  const label = btn.dataset.label ?? (btn.dataset.label = btn.textContent);
+  const settle = msg => { btn.textContent = msg;
+    clearTimeout(copyT); copyT = setTimeout(()=>{ btn.textContent = btn.dataset.label ?? label; }, 1800); };
+  const failed = why => { const sel = selectCopySource(btn);
+    settle(sel ? 'not copied — link selected' : 'not copied');
+    toast(sel ? `${why} · the link is selected above, press ⌘C` : `${why} · select the link above to copy it`); };
+  if (!navigator.clipboard?.writeText) return failed('this browser will not give a page the clipboard outside https or localhost');
+  // writeText can also hang without ever settling (observed on an ungestured write), which is the
+  // same silent nothing from the user's side — so the wait is bounded
+  let done = false;
+  const finish = fn => { if (done) return; done = true; clearTimeout(waitT); fn(); };
+  const waitT = setTimeout(()=>finish(()=>failed('the clipboard write never came back')), 1500);
+  navigator.clipboard.writeText(url).then(()=>finish(()=>settle('copied')), ()=>finish(()=>failed('the browser refused the clipboard write')));
+}
+
 // ---------- data helpers ----------
 const tasks = () => state.data?.tasks ?? [];
 const fbs = () => state.data?.feedback ?? [];
@@ -557,6 +637,170 @@ const badLaneRow = b => `<div class="crow bad"><span class="lname">unroutable en
     <span class="rawv" title="${esc(badLaneValue(b.v))}">${esc(badLaneValue(b.v))}</span>
     <span class="badge off" title="this board cannot route it, but it is still in the project config">MALFORMED</span>
     <span class="why">${esc(b.why)}</span></div>`;
+// SHARED: what this project exposes to anyone with the link. The enabled state and the public
+// patterns ARE the boundary, so both are stated verbatim — a share must never be a mystery.
+// Everything here comes from unvalidated project config, so it is read defensively like the lanes.
+const proxyCfg = p => { const x = p?.proxy; return (x && typeof x === 'object' && !Array.isArray(x)) ? x : null; };
+const proxyOn = p => proxyCfg(p)?.enabled === true;
+// project.proxy is INTENT; project.proxyPublished is what the server says it actually put in the
+// route table and has not withdrawn. null when the payload does not carry it at all — then there is
+// nothing truthful to say beyond intent, and every string here stays in the intent register.
+function proxyHeld(p){
+  const h = p?.proxyPublished;
+  return Array.isArray(h) ? h.filter(r=>r&&typeof r==='object'&&typeof r.prefix==='string').map(r=>r.prefix) : null;
+}
+// configured off with the route still live is the direction FB-95 named as the dangerous one, and it
+// belongs on the board surface for the same reason enabled does
+function proxyStrayed(p){
+  const x = proxyCfg(p); if (!x || x.enabled === true || typeof x.prefix !== 'string') return false;
+  const held = proxyHeld(p); return !!held && held.includes(x.prefix);
+}
+// FB-102. proxyPublished exists to record ORPHANS — a rename whose old delete failed, a config
+// cleared while the withdrawal never landed. Keying the alarm off `held.includes(currentPrefix)`
+// asked only about this config's own prefix and therefore dropped exactly the entries the array was
+// added for; the worst state (proxy:null over a still-published route) reached the "nothing shared"
+// empty state, the strongest safe claim on this surface, printed over a route the server itself is
+// still reporting. Every published prefix the current config does not account for is a live route
+// nobody asked for and gets the same treatment as the stray.
+function proxyOrphans(p){
+  const held = proxyHeld(p); if (!held) return [];
+  const x = proxyCfg(p);
+  const cur = x && typeof x.prefix === 'string' ? x.prefix : null;
+  return held.filter(h => h !== cur);
+}
+const boardExposed = p => proxyOn(p) || proxyStrayed(p) || proxyOrphans(p).length > 0;
+// the forms a human actually writes when they mean "everything" — one of these in public[] makes
+// every other pattern in the list decorative. "/" and "/*" are the current forms, and BOTH were
+// confirmed against the proxy to serve every path including deep ones ("/*" has nothing after the
+// star to match, so the star swallows the whole remainder); the "^…" spellings are the old regex
+// ones, still readable out of a doc saved before the change. "/*$" is deliberately NOT here: it is
+// exact, so the star cannot cross a "/" and it serves top-level paths only (verified: /a/b 403s).
+const CATCH_ALL = new Set(['^/','^','/','/*','.*','^.*','^/.*','.*$','^.*$','^/.*$']);
+const isCatchAll = s => CATCH_ALL.has(String(s).trim());
+// public patterns are literal paths matched with string operations, not regexes — the panel is where
+// a human reads the boundary, so it states the form rather than leaving "regex" on screen
+const PAT_FORM = 'literal paths · prefix by default · trailing $ = exact · one * matches within a segment · not regular expressions';
+const patTitle = s => isCatchAll(s)
+  ? 'matches every path: the whole app, not a subset'
+  : String(s).trim().endsWith('$') ? 'exact: the request path must equal this'
+  : String(s).includes('*') ? 'literal path with one * matching any run of characters except "/"'
+  : 'prefix: every request path that starts with this';
+// one orphan block, used both alongside a config and on its own when there is no config at all
+function orphanBlock(p, orphans){
+  const base = String(p.baseUrl||'').replace(/\/+$/,'');
+  // .crow is `auto minmax(0,1fr) auto`, so a long label starves the value column and clips the
+  // prefix behind the badge — the one string in this block that must be readable. Keep it short;
+  // the note underneath carries the full sentence.
+  return `<div class="mini">${orphans.map(pf=>`<div class="crow">
+      <span class="lname">published · not in this config</span>
+      <span class="id">${esc('/'+pf+'/')}</span>
+      <span class="badge warn" title="the server reports it published this route and has not withdrawn it, and nothing in the current config asks for it">STILL LIVE</span>
+    </div>`).join('')}</div>
+    ${orphans.map(pf=>`<div class="note">${esc('/'+pf+'/')} · the server still reports this route as published · nobody is asking for it, so treat it as live until a sync withdraws it</div>
+      <div class="quote mono">${esc(base+'/'+pf+'/')}</div>
+      <button class="pbtn" type="button" data-copy="${esc(base+'/'+pf+'/')}" style="margin-top:8px"
+        title="this is a live route, not a preview · copy it to check whether it still resolves">copy · to check whether this still resolves</button>`).join('')}`;
+}
+function sharedSec(p){
+  const x = proxyCfg(p);
+  const orphans = proxyOrphans(p);
+  // FB-102 case (2): no config at all, and the server still reports a published route. This is the
+  // LOUDEST version of the fail-open, not the quietest — the empty state must not short-circuit
+  // ahead of it. "nothing shared" is reserved for no config AND nothing published.
+  if (!x) return orphans.length
+    ? `<div class="dsec expo"><h3>Shared · no config · route still live</h3>
+        <div class="expobody">
+          <div class="expolead">exposed with nothing configured · anyone with the link</div>
+          <div class="note">this project has no proxy config — it was cleared, or never saved — and the server still reports ${orphans.length===1?'a route':'routes'} it published and has not withdrawn</div>
+          ${orphanBlock(p, orphans)}
+        </div></div>`
+    : `<div class="dsec"><h3>Shared</h3>
+        <div class="note">nothing shared · no dev server is exposed for this project</div></div>`;
+  const on = x.enabled === true;
+  const prefix = typeof x.prefix === 'string' ? x.prefix : '';
+  const target = typeof x.target === 'string' ? x.target : '';
+  const pats = Array.isArray(x.public) ? x.public.filter(s=>typeof s==='string') : [];
+  const url = prefix ? `${String(p.baseUrl||'').replace(/\/+$/,'')}/${prefix}/` : '';
+  const wild = pats.filter(isCatchAll);
+  const held = proxyHeld(p);
+  const holds = held === null ? null : held.includes(prefix); // null = the board cannot know
+  const stray = !on && holds === true; // says off, was never withdrawn
+  const alarm = on || stray || orphans.length > 0;
+  // the target is the internal host:port and the board payload drops it: say that, because "—" in
+  // this row reads as "nothing configured" in the one section that must not mislead
+  const targetCell = target ? `<span class="id" style="overflow:hidden;text-overflow:ellipsis" title="${esc(target)}">${esc(target)}</span>`
+    : x.targetRedacted === true ? '<span class="redact">withheld from the board link · readable in the project context, locally</span>'
+    : '<span class="id">—</span>';
+  // every string here describes what this project has CONFIGURED. The board never reads the proxy
+  // route table and reconcileProxy is best-effort by its own admission, so nothing may claim what
+  // the proxy is doing right now — least of all in the off direction, where the confident wrong
+  // answer ("the link does not resolve") sits over a route that was never actually withdrawn.
+  const badge = on
+    ? `<span class="badge warn" title="project config: proxy.enabled is true · this is what the board asked the proxy to serve, not a reading of the route table">ENABLED</span>`
+    : `<span class="badge calm" title="project config: proxy.enabled is false · the board asked for no route; it cannot confirm the proxy dropped one it published earlier">DISABLED</span>`;
+  const rows = `<div class="mini">
+      <div class="crow"><span class="lname">${on?'configured to serve this app to anyone with the link'
+        :stray?'configured off · the route this project published was never withdrawn':'configured off · nothing is meant to be handed out'}</span>
+        <span class="id"></span>${badge}</div>
+      <div class="crow"><span class="lname">prefix</span><span class="id">${esc(prefix||'—')}</span></div>
+      <div class="crow"><span class="lname">target</span>${targetCell}</div>
+    </div>`;
+  // Three states, three pictures (FB-104). Live and yours to share: full weight, "copy link".
+  // Live and NOT yours to share (stray): still full weight, because that link is the live thing being
+  // served right now — the demotion below would render the alarm as hypothetical directly under a red
+  // header that says it is not. The copy stays armed under an honest label: the obvious next move is
+  // to paste it and find out whether it still resolves, and the judgement about not handing it out
+  // already reads better in the note above than a dead button states it.
+  // Not live at all: demoted box, genuinely disabled control — that link 404s and copying it costs.
+  const link = !url ? '' : on
+    ? `<div class="note">stakeholder link · this is the thing you hand over</div>
+      <div class="quote mono">${esc(url)}</div>
+      <button class="pbtn" type="button" data-copy="${esc(url)}" style="margin-top:8px">copy link</button>`
+    : stray
+    ? `<div class="note">this link may still resolve · the published route has not been withdrawn, but sharing is configured off, so it is not yours to hand out</div>
+      <div class="quote mono">${esc(url)}</div>
+      <button class="pbtn" type="button" data-copy="${esc(url)}" style="margin-top:8px"
+        title="this is a live route, not a preview · copy it to check whether it still resolves">copy · to check whether this still resolves</button>`
+    : `<div class="note">preview of the link this config would publish · nothing to hand over while sharing is off</div>
+      <div class="quote mono prev">${esc(url)}</div>
+      <button class="pbtn" type="button" disabled style="margin-top:8px"
+        title="sharing is configured off · turn it on before handing this link to anyone">copy · sharing is off</button>`;
+  const paths = !pats.length
+    ? `<div class="note">public paths · none listed · nothing would be reachable through the tunnel${on?', even though this is enabled':''}</div>`
+    : `${wild.length?`<div class="pathwarn">${wild.map(s=>`<span class="pchip catchall">${esc(s)}</span>`).join('')}
+        <span class="pwtxt">matches every path · the whole app is served${alarm?'':' the moment this is enabled'}, not only the paths listed below</span></div>`:''}
+      <div class="note">public paths · ${on?'only requests matching these are served through the tunnel; local access is never filtered'
+        :stray?'the route that is still published serves requests matching these; local access is never filtered'
+        :'these are the paths this config would serve once it is enabled'}</div>
+      <div class="repolist">${pats.map(s=>`<span class="pchip${isCatchAll(s)?' catchall':''}" title="${esc(patTitle(s))}">${esc(s)}</span>`).join('')}</div>
+      <div class="note">${PAT_FORM}</div>`;
+  // the rows above state INTENT. This is the only line allowed to speak about the route table, and
+  // only from what the server reports it published — never inferred from proxy.enabled.
+  const caveat = `<div class="note">${
+    holds === null ? (on
+      ? 'this is the project config, not a reading of the proxy · if the last route sync failed, what is being served may differ'
+      : 'this is the project config, not a reading of the proxy · a withdrawal that failed to sync can leave an earlier route live')
+    : holds === true ? (on
+      ? 'the server reports it published this route and has not withdrawn it'
+      : 'the server still reports this route as published · the withdrawal has not landed, so treat the link as live until it does')
+    : (on
+      ? 'the server does not report a published route for this prefix · the publish may not have landed yet'
+      : 'the server reports no published route for this prefix')}</div>`;
+  // an orphan is a live route this config does not describe at all, so it gets its own block rather
+  // than being folded into rows that are about the current prefix (FB-102 case 3: already-red still
+  // has to say that a SECOND route is open)
+  const strayBlock = !orphans.length ? '' :
+    `<div class="expolead" style="margin-top:14px">also still live · not described by this config</div>${orphanBlock(p, orphans)}`;
+  const head = on ? 'configured on' : stray ? 'configured off · route still live'
+    : orphans.length ? 'configured off · another route still live' : 'configured off';
+  const lead = on ? 'exposed by configuration · anyone with the link' : 'exposed despite being off · anyone with the link';
+  if (alarm) return `<div class="dsec expo"><h3>Shared · ${head}</h3>
+    <div class="expobody">
+      <div class="expolead">${lead}</div>
+      ${rows}${link}${paths}${caveat}${strayBlock}
+    </div></div>`;
+  return `<div class="dsec"><h3>Shared · configured off</h3>${rows}${link}${paths}${caveat}</div>`;
+}
 function plannedLanesSec(t){
   const reviews = pipeLanes();
   // a closed task has no future to describe: every branch states what did or did not happen, never
@@ -622,6 +866,15 @@ function render(){
   $('pprefix').textContent = d.project.prefix;
   $('ptitle').textContent = d.project.name;
   $('psub').textContent = (d.project.repos||[]).join(' · ');
+  // exposure is stated on the board surface, not only inside a panel you have to already suspect
+  // "still live" covers both fail-open shapes: this config's own route never withdrawn, and any
+  // published route the config does not account for at all (a rename orphan, or a cleared config)
+  const em = $('expomark'), strayed = proxyStrayed(d.project) || proxyOrphans(d.project).length > 0;
+  em.hidden = !boardExposed(d.project);
+  em.textContent = strayed ? 'still live' : 'shared';
+  em.title = strayed
+    ? 'the server reports a published route this project is not asking for · open project config'
+    : 'this project is configured to expose a dev server to anyone with the link · open project config';
   document.body.dataset.view = state.view;
   renderTopNav(); renderPeople(); renderStats(); renderContent(); renderDrawer(); renderPal();
 }
@@ -929,12 +1182,16 @@ function renderDrawer(){
     const reg = agents.filter(a=>a.registered), unreg = agents.filter(a=>!a.registered);
     const charter = p.charter || '';
     const cp = textPreview(charter);
+    // an exposed app outranks a roster: SHARED leads the panel while it is on, and sits back in its
+    // normal slot when there is no share to lead with
+    const expo = boardExposed(p);
     dr.innerHTML = `
       <div class="dhead">${backBtn}<span class="id">PROJECT CONFIG</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
         <div class="dbadges"><span class="chip">${esc(p.prefix)}</span></div>
         <div class="dtitle">${esc(p.name)}</div>
         <div class="note">read-only · humans and agents never share a list</div>
+        ${expo ? sharedSec(p) : ''}
         <div class="dsec"><h3>Stakeholders · ${stake.length} human${stake.length===1?'':'s'}</h3>
           <div class="mini">${stake.map(s=>`<div class="crow">
             <span class="who human"><span class="a">${esc(initials(s.name))}</span>${esc(s.name)}</span>
@@ -950,6 +1207,7 @@ function renderDrawer(){
           ${badLanes.length?'<div class="note">malformed entries route nowhere on this board · every count and lane spawn comes from the readable lanes · the server still reads pipeline.reviews as written</div>':''}
           <div class="note">${pipeline()?.autoAdvance!==false?'auto-advance on: tasks leave in review when the last lane closes':'auto-advance off: closed lanes wait for an explicit push'}</div>`
           :'<div class="note">no pipeline configured</div>'}</div>
+        ${expo ? '' : sharedSec(p)}
         <div class="dsec"><h3>Repos</h3>
           <div class="repolist">${(p.repos||[]).map(r=>`<span class="chip">${esc(r)}</span>`).join('') || '<span class="note">none</span>'}</div></div>
         <div class="dsec"><h3>Charter</h3>
@@ -1212,6 +1470,9 @@ document.addEventListener('click', e=>{
   if (tf){ state.taskFilter = tf.dataset.tf; renderContent(); return; }
   const dt = e.target.closest('[data-done-toggle]');
   if (dt){ state.doneExpanded = !state.doneExpanded; renderContent(); return; }
+  // the shared link is meant to be handed to someone: confirm in place, and re-render safely
+  const cp = e.target.closest('[data-copy]');
+  if (cp){ copyLink(cp); return; }
   if (e.target.closest('#dback')) return goBack();
   if (e.target.closest('#dclose')) return clearSel();
   if (e.target.id==='scrim') return clearSel();
