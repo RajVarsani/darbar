@@ -2,8 +2,10 @@
 // Socket Mode: outbound websocket only, no public endpoint. The transport owns
 // identity, file downloads, and thread context; the agent owns all judgment.
 import { App } from '@slack/bolt';
+import path from 'node:path';
 import { config } from '@darbar/core';
 import { runAgent, type AgentContext } from './agent';
+import { NO_ATTACHMENTS, prepareAttachments, safeName, type Attachments, type Upload } from './media';
 
 if (!config.slackBotToken || !config.slackAppToken) {
   console.error('gabbar: SLACK_BOT_TOKEN / SLACK_APP_TOKEN missing in .env, not starting');
@@ -24,21 +26,43 @@ const app = new App({
 // own user token carry a bot_id but user = the real human
 let SELF_USER = '';
 
-async function pullFiles(files: any[]): Promise<string[]> {
-  const out: string[] = [];
+// Download every upload (no type filter — the human trail keeps whatever was sent), then make
+// it legible: images become image blocks, recordings become extracted frames. See media.ts.
+async function pullFiles(files: any[]): Promise<Attachments> {
+  const downloaded: Upload[] = [];
   for (const f of files ?? []) {
     if (!f.url_private_download) continue;
     try {
-      const name = `${f.id}-${(f.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      // the slack file id keeps this unique: two uploads sharing a display name must not
+      // overwrite each other, or a parked report's frame urls would serve someone else's pixels
+      const stored = `${f.id}-${(f.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const r = await fetch(f.url_private_download, {
         headers: { authorization: `Bearer ${config.slackBotToken}` },
       });
       if (!r.ok) continue;
-      await Bun.write(`${config.filesDir}${name}`, await r.arrayBuffer());
-      out.push(`${config.baseUrl}/files/${name}`);
+      const dest = path.join(config.filesDir, stored);
+      await Bun.write(dest, await r.arrayBuffer());
+      downloaded.push({ url: `${config.baseUrl}/files/${stored}`, path: dest, name: f.name || stored, storedName: stored, mimetype: f.mimetype });
     } catch { /* skip this file, keep the message */ }
   }
-  return out;
+  if (!downloaded.length) return NO_ATTACHMENTS;
+  try {
+    return await prepareAttachments(downloaded, config.filesDir, config.baseUrl);
+  } catch (e) {
+    // reading them is a bonus; losing the uploads is not acceptable, and neither is claiming
+    // they were read
+    console.error('gabbar: preparing attachments failed:', e);
+    return {
+      items: downloaded.map((d) => ({
+        url: d.url, path: d.path, name: d.name, kind: 'other' as const,
+        frames: [], readable: false, note: 'reading attachments failed on this host',
+      })),
+      blocks: [],
+      inventory: downloaded
+        .map((d) => `file "${safeName(d.name)}" (${d.url}) — NOT READABLE: reading attachments failed on this host`)
+        .join('\n  '),
+    };
+  }
 }
 
 async function senderName(client: any, userId: string): Promise<string> {
@@ -192,13 +216,13 @@ async function handle({ message, event, client, say }: any) {
   void thinkingOn(client, m.channel, threadTs ?? m.ts, isIm)
     .then((shown) => { if (!shown && !isIm) hourglassOn(client, m.channel, m.ts); });
 
-  const [name, attachments, history, fb] = await Promise.all([
+  const [name, attach, history, fb] = await Promise.all([
     senderName(client, m.user),
     pullFiles(m.files),
     buildHistory(client, m.channel, threadTs, m.ts),
     existingFeedback(m.channel, threadTs),
   ]);
-  if (!text && attachments.length === 0) {
+  if (!text && attach.items.length === 0) {
     // files-only message whose downloads all failed: resolve the ack, don't vanish
     await say({ thread_ts: threadTs ?? m.ts, text: "couldn't read those files, try re-uploading or add a line of text" }).catch(() => {});
     eyesOff(client, m.channel, m.ts, 'x');
@@ -214,7 +238,9 @@ async function handle({ message, event, client, say }: any) {
     channelType: m.channel_type ?? 'channel',
     messageTs: m.ts,
     threadTs,
-    attachments,
+    attachments: attach.items.map((x) => x.url), // what a feedback row links to, unchanged
+    attach, // the encoded blocks the model sees, plus the inventory generated from them
+    messageText: text, // the sender's own words, kept verbatim for a parked report
     existingFeedback: fb,
   };
 
