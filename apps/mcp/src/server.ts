@@ -53,7 +53,7 @@ server.tool('update_task', 'Update a task row: status, blocker, notes, or append
 
 server.tool('my_tasks', 'Open tasks for an assignee (lane managers and builders start here). Optionally scope by project or lane.',
   {
-    assignee: z.string().describe('exact assignee name, e.g. qa-manager'),
+    assignee: z.string().describe('exact assignee name, e.g. qa-lead'),
     project: z.string().optional(), lane: z.string().optional(),
   },
   ({ assignee, project, lane }) => {
@@ -70,7 +70,7 @@ server.tool('set_pipeline', 'Configure the review pipeline for a project: lanes 
     reviews: z.array(z.object({
       lane: z.string().describe('key, e.g. qa or code-review'),
       label: z.string().optional(),
-      manager: z.string().describe('agent the spawned task is assigned to, e.g. qa-manager'),
+      manager: z.string().describe('agent the spawned task is assigned to, e.g. qa-lead'),
     })),
   },
   ({ project, ...rest }) => call(`/projects/${encodeURIComponent(project)}`, 'PATCH', { pipeline: rest }));
@@ -79,7 +79,7 @@ server.tool('set_agents', 'Register the project agent registry: lane managers, h
   {
     project: z.string(),
     agents: z.array(z.object({
-      name: z.string().describe('agent name, e.g. qa-manager — task assignees reference this'),
+      name: z.string().describe('agent name, e.g. qa-lead — task assignees reference this'),
       kind: z.enum(['lane-manager', 'helper', 'orchestrator']),
       brief: z.string().describe('the agent standing charter — the orchestrator uses it as the dispatch prompt (what it does, how, what never to touch)'),
       trigger: z.string().optional().describe('when-to-dispatch hint for the orchestrator'),

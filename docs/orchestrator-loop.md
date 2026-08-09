@@ -117,9 +117,9 @@ Never hand-create review tasks. Lane managers drain their queue, review, file
 findings as feedback on the parent, and close their lane:
 
 ```bash
-curl -s 'localhost:4899/api/tasks?assignee=code-review-manager&open=true'
+curl -s 'localhost:4899/api/tasks?assignee=staff-engineer&open=true'
 curl -s -X POST localhost:4899/api/feedback -H 'content-type: application/json' \
-  -d '{"taskRef":"DAR-12","author":"code-review-manager","authorType":"agent","type":"bug","body":"finding: ..."}'
+  -d '{"taskRef":"DAR-12","author":"staff-engineer","authorType":"agent","type":"bug","body":"finding: ..."}'
 curl -s -X PATCH localhost:4899/api/tasks/DAR-13 -H 'content-type: application/json' \
   -d '{"status":"done","notes":"lane passed"}'
 ```
