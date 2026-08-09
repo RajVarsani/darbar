@@ -25,6 +25,11 @@
     --red-pale:#f5e6e3;
     --sans:'IBM Plex Sans',-apple-system,sans-serif;
     --mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+
+    /* ONE species encoding, used by every surface: ink round = human, green square = agent.
+       Top bar (.ava) and panel (.who .a) both read from these — never restyle a species locally. */
+    --human-bg:#1c1c1c; --human-fg:#d8ff7c; --human-line:#1c1c1c;
+    --agent-bg:#2d8654; --agent-fg:#ffffff; --agent-line:#133f26;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   [hidden]{display:none!important}
@@ -77,9 +82,25 @@
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .search kbd{font-family:var(--mono);font-size:10px;font-weight:700;background:var(--lime);border:1.5px solid var(--ink);
     padding:1px 6px;color:var(--ink)}
-  .people{display:flex;align-items:center;gap:4px}
-  .ava{width:26px;height:26px;border:2px solid var(--ink);display:grid;place-items:center;
-    font-family:var(--mono);font-size:10px;font-weight:800;color:var(--ink);background:var(--beige)}
+  /* one overlapping face-pile, humans then agents. species stays encoded on colour AND
+     shape (round human / square agent) — colour alone read as two states of one thing */
+  .people{display:flex;align-items:center;gap:0}
+  /* --z is emitted per chip, descending: first chip on top, each later one tucks under it.
+     DOM paint order alone does the reverse and clips the leading avatar (FB-66). It rides a
+     custom property, not an inline z-index, so :hover below can still out-cascade it. */
+  .ava{width:26px;height:26px;border:2px solid;display:grid;place-items:center;position:relative;z-index:var(--z,1);
+    font-family:var(--mono);font-size:10px;font-weight:800;margin-left:-7px;transition:transform .08s}
+  .ava:first-child{margin-left:0}
+  .ava.human{background:var(--human-bg);color:var(--human-fg);border-color:var(--human-line);border-radius:50%}
+  .ava.agent{background:var(--agent-bg);color:var(--agent-fg);border-color:var(--agent-line)}
+  .ava:hover{transform:translateY(-2px);z-index:99} /* clears both neighbours, not just the one under it */
+  .pmore{font-family:var(--mono);font-size:10px;font-weight:800;color:var(--ink-soft);letter-spacing:.02em;
+    position:relative;z-index:var(--z,1);margin-left:2px;padding-right:1px}
+  .pmore + .ava{margin-left:3px} /* the run restarts after an overflow marker; never tuck under the count */
+  /* the config entry reads as a button at rest (hairline), not as a plain label */
+  .pbtn{border:2px solid rgba(28,28,28,.28);padding:3px 9px;transition:.08s}
+  .pbtn:hover{border-color:var(--ink);background:rgba(28,28,28,.06)}
+  .pbtn[aria-pressed="true"]{border-color:var(--ink);background:var(--beige);box-shadow:inset 2px 2px 0 var(--ink)}
 
   /* ---------- page ---------- */
   .page{width:100%;padding:24px 28px 64px}
@@ -194,9 +215,10 @@
   .who{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;font-weight:700;
     border:2px solid var(--ink);padding:1px 8px 1px 2px;background:var(--beige-2)}
   .who .a{width:16px;height:16px;display:grid;place-items:center;font-size:8.5px;font-weight:800}
-  .who.human .a{background:var(--ink);color:var(--lime)}
-  .who.agent .a{background:var(--green);color:#fff}
-  .who.agent{border-color:var(--green-deep);color:var(--green-deep)}
+  /* same tokens + same shapes as the top-bar .ava chips: ink round = human, green square = agent */
+  .who.human .a{background:var(--human-bg);color:var(--human-fg);border-radius:50%}
+  .who.agent .a{background:var(--agent-bg);color:var(--agent-fg)}
+  .who.agent{border-color:var(--agent-line);color:var(--green-deep)}
   .typ{font-family:var(--mono);font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:2px 6px;border:2px solid}
   .typ-bug{color:var(--red);border-color:var(--red);background:var(--red-pale)}
   .typ-design{color:var(--green-deep);border-color:var(--green-deep);background:var(--green-pale)}
@@ -267,6 +289,17 @@
     font-size:12.5px;color:var(--ink-soft)}
   .devents .t{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--ink-faint);text-transform:uppercase}
 
+  /* ---------- project config panel rows ---------- */
+  .crow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;
+    padding:8px 12px;border-bottom:1.5px solid var(--hair)}
+  .crow:last-child{border-bottom:none}
+  .crow .crole{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .slk{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;padding:1px 5px;white-space:nowrap;
+    border:1.5px solid var(--green-deep);color:var(--green-deep);background:var(--green-pale)}
+  .slk.off{border-color:var(--ink-faint);color:var(--ink-faint);background:var(--beige-2)}
+  .quote.mono{font-family:var(--mono);font-size:11.5px;line-height:1.55}
+  .repolist{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+
   .empty{padding:52px 24px;text-align:center;color:var(--ink-soft);font-family:var(--mono);font-size:12.5px}
   .empty b{color:var(--ink)}
 
@@ -300,7 +333,13 @@
 
   @media (max-width:1080px){
     .toprow{padding:0 14px;gap:10px}
-    .crumb,.people,.search kbd{display:none}
+    .search kbd{display:none}
+    /* the people stack is the ONLY config entry, so it must survive here (FB-59/FB-64) — compact, never hidden */
+    .people{padding:2px 6px}
+    .people .ava{width:22px;height:22px;font-size:9px;margin-left:-6px}
+    /* crumb is plain identity now: the prefix chip carries it once the name won't fit */
+    .crumb #pname{display:none}
+    .crumb{gap:7px}
     .drawer{inset:auto 0 0 0;top:auto;width:auto;max-height:76vh;z-index:40;border-left:none;border-top:2px solid var(--ink);
       box-shadow:0 -4px 0 var(--ink);transform:translateY(105%);transition:transform .22s ease}
     .drawer.open{transform:none}
@@ -313,7 +352,8 @@
 <body data-view="board">
 <header class="top">
   <div class="toprow">
-    <div class="brand"><span class="dot">D</span>DARBAR</div>
+    <!-- D tile is the home/brand mark; the wordmark is gone so the top bar names the project once -->
+    <div class="brand"><span class="dot" title="Darbar">D</span></div>
     <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span></div>
     <div class="searchwrap">
       <button class="search" id="qbtn" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -321,7 +361,7 @@
         <kbd>⌘K</kbd>
       </button>
     </div>
-    <div class="people" id="people"></div>
+    <button class="people pbtn" id="people" data-open-config type="button" aria-pressed="false" aria-label="Open project config · humans and agents on this project" title="Project config"></button>
     <span class="live" id="livedot">live</span>
     <button class="iconbtn" id="refresh" title="Refresh" type="button"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg></button>
   </div>
@@ -353,7 +393,7 @@
   <div class="palscrim" data-pal-close></div>
   <div class="palbox">
     <label class="palinput"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input id="palq" placeholder="jump to task or feedback…" autocomplete="off">
+      <input id="palq" placeholder="jump to task, feedback, project config…" autocomplete="off">
       <kbd style="font-family:var(--mono);font-size:10px;font-weight:700;background:var(--lime);border:1.5px solid var(--ink);padding:1px 6px;color:var(--ink)">ESC</kbd>
     </label>
     <div class="palresults" id="palresults"></div>
@@ -427,6 +467,23 @@ const laneChips = t => !Array.isArray(t.lanes) ? '' : (t.lanes.length
   ? t.lanes.map(k=>`<span class="typ typ-lane" title="review lane on in_review">${esc(laneLabel(k))}</span>`).join('')
   : '<span class="typ typ-lane" title="explicitly no review lanes">no reviews</span>');
 
+// charter preview: first paragraph, cut on a word boundary. The ellipsis is derived from what
+// was actually dropped, so a charter that fits exactly never loses a character to the marker.
+const CHARTER_CAP = 400;
+function charterPreview(charter){
+  const full = String(charter||'').trim();
+  const para = full.split(/\n\s*\n/)[0].trim();
+  let text = para, clipped = para.length < full.length;
+  if (para.length > CHARTER_CAP){
+    const cut = para.slice(0, CHARTER_CAP);
+    const sp = cut.lastIndexOf(' ');
+    text = (sp > 0 ? cut.slice(0, sp) : cut).replace(/[\s,;:.–—-]+$/,'');
+    clipped = true;
+  }
+  // marker sits off a finished sentence, tight against a cut word
+  return {text, clipped, marker: clipped ? (/[.!?)]$/.test(text) ? ' …' : '…') : ''};
+}
+
 // ---------- rendering ----------
 function render(){
   const d = state.data; if(!d) return;
@@ -465,12 +522,39 @@ function renderTopNav(){
   }).join('');
 }
 
+// agents never mix with stakeholders: lane managers + orchestrator + agents seen on tasks
+function agentRoster(){
+  const out = [], seen = new Set();
+  const add = (name, role) => { if (name && !seen.has(name)){ seen.add(name); out.push({name, role}); } };
+  for (const l of pipeline()?.reviews ?? []) add(l.manager, `runs ${l.label} lane`);
+  add('orchestrator', 'project orchestrator');
+  for (const t of tasks()) if (t.assigneeType==='agent' && t.assignee) add(t.assignee, 'seen on tasks');
+  return out;
+}
+
+const PPL_CAP = 4; // a growing registry must never push into the search bar
+// one overlapping stack, capped per species; the shape (round vs square) makes the
+// human/agent split pre-attentive without spending a label or a divider on it
+function pplChips(cls, list, note){
+  if (!list.length) return [];
+  const shown = list.slice(0, PPL_CAP), rest = list.slice(PPL_CAP);
+  const out = shown.map(x=>({cls:`ava ${cls}`, text:initials(x.name), title:`${x.name} · ${x.role||note}`}));
+  if (rest.length) out.push({cls:'pmore', text:`+${rest.length}`, title:rest.map(x=>x.name).join(', ')});
+  return out;
+}
 function renderPeople(){
   const ppl = state.data.project.stakeholders||[];
-  const agents = [...new Set(tasks().filter(t=>t.assigneeType==='agent'&&t.assignee).map(t=>t.assignee))];
-  $('people').innerHTML = ppl.map(p=>
-    `<span class="ava" title="${esc(p.name)} · ${esc(p.role||'stakeholder')}">${esc(initials(p.name))}</span>`).join('')
-    + agents.map(a=>`<span class="ava" title="${esc(a)} · agent" style="background:var(--ink);color:var(--lime)">${esc(initials(a))}</span>`).join('');
+  const bots = agentRoster();
+  const el = $('people');
+  // one z-order across the whole pile, humans and agents together, so the seam between the
+  // two species tucks the same way as everything else
+  const chips = [...pplChips('human',ppl,'stakeholder'), ...pplChips('agent',bots,'agent')];
+  el.innerHTML = chips.map((c,i)=>
+    `<span class="${c.cls}" style="--z:${chips.length-i}" title="${esc(c.title)}">${esc(c.text)}</span>`).join('');
+  // labels are gone from the pixels, so the roster lives on the button's own tooltip
+  const say = (label, list) => list.length ? `${label}: ${list.slice(0,PPL_CAP).map(x=>x.name).join(', ')}`
+    + (list.length>PPL_CAP?` +${list.length-PPL_CAP}`:'') : '';
+  el.title = ['Project config', say('humans',ppl), say('agents',bots)].filter(Boolean).join(' · ');
 }
 
 function renderStats(){
@@ -642,6 +726,9 @@ function renderContent(){
 // ---------- drawer ----------
 function renderDrawer(){
   const dr = $('drawer');
+  // the open panel needs a visible source: its one trigger wears the pressed state
+  const cfgOpen = state.sel?.kind === 'config';
+  document.querySelectorAll('[data-open-config]').forEach(b=>b.setAttribute('aria-pressed', cfgOpen?'true':'false'));
   const backBtn = `<button class="iconbtn" id="dback" ${state.stack.length<2?'disabled':''} title="Back">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M19 12H5m6-7-7 7 7 7"/></svg></button>`;
   const closeBtn = `<button class="iconbtn" id="dclose" title="Close">
@@ -656,6 +743,47 @@ function renderDrawer(){
     return;
   }
   dr.classList.add('open'); $('scrim').classList.add('on');
+
+  if (state.sel.kind==='config'){
+    const p = state.data?.project; if(!p){ state.sel=null; return renderDrawer(); }
+    const stake = p.stakeholders || [];
+    const lanes = pipeline()?.reviews ?? [];
+    const agents = agentRoster();
+    const charter = p.charter || '';
+    const cp = charterPreview(charter);
+    dr.innerHTML = `
+      <div class="dhead">${backBtn}<span class="chip">${esc(p.prefix)}</span><span class="id">PROJECT CONFIG</span><span class="grow"></span>${closeBtn}</div>
+      <div class="dbody">
+        <div class="dtitle">${esc(p.name)}</div>
+        <div class="note">read-only · humans and agents never share a list</div>
+        <div class="dsec"><h3>Stakeholders · ${stake.length} human${stake.length===1?'':'s'}</h3>
+          <div class="mini">${stake.map(s=>`<div class="crow">
+            <span class="who human"><span class="a">${esc(initials(s.name))}</span>${esc(s.name)}</span>
+            <span class="crole">${esc(s.role||'stakeholder')}</span>
+            ${s.slackUserId?'<span class="slk" title="linked to Slack: gets thread replies">SLACK ✓</span>':'<span class="slk off" title="no Slack link">NO SLACK</span>'}
+          </div>`).join('') || '<div class="kempty">none configured</div>'}</div></div>
+        <div class="dsec"><h3>Agents · ${agents.length}</h3>
+          <div class="mini">${agents.map(a=>`<div class="crow">
+            <span class="who agent"><span class="a">${esc(initials(a.name))}</span>${esc(a.name)}</span>
+            <span class="crole">${esc(a.role)}</span>
+          </div>`).join('') || '<div class="kempty">none yet</div>'}</div></div>
+        <div class="dsec"><h3>Pipeline · ${lanes.length} lane${lanes.length===1?'':'s'}</h3>
+          ${lanes.length?`<div class="mini">${lanes.map(l=>`<div class="crow">
+            <span style="font-weight:600">${esc(l.label)}</span>
+            <span class="id">${esc(l.lane)}</span>
+            <span class="who agent"><span class="a">${esc(initials(l.manager))}</span>${esc(l.manager)}</span>
+          </div>`).join('')}</div>
+          <div class="note">${pipeline()?.autoAdvance!==false?'auto-advance on: tasks leave in review when the last lane closes':'auto-advance off: closed lanes wait for an explicit push'}</div>`
+          :'<div class="note">no pipeline configured</div>'}</div>
+        <div class="dsec"><h3>Repos</h3>
+          <div class="repolist">${(p.repos||[]).map(r=>`<span class="chip">${esc(r)}</span>`).join('') || '<span class="note">none</span>'}</div></div>
+        <div class="dsec"><h3>Charter</h3>
+          ${charter?`<div class="quote mono">${esc(cp.text)}${cp.marker}</div>
+          ${cp.clipped?'<div class="note">opening paragraph · full charter lives in the project record</div>':''}`
+          :'<div class="note">no charter</div>'}</div>
+      </div>`;
+    return;
+  }
 
   if (state.sel.kind==='task'){
     const t = byShort(state.sel.id); if(!t){ state.sel=null; return renderDrawer(); }
@@ -731,9 +859,13 @@ function renderDrawer(){
 }
 
 // ---------- command palette (⌘K) ----------
+// keyboard route to the config panel — secondary path; the people stack is the pointer one
+const PAL_CONFIG = {kind:'config', id:'CONFIG', text:'Project config · stakeholders, agents, pipeline, repos, charter',
+  keys:'project config settings stakeholders humans agents pipeline lanes repos charter'};
 function palResults(){
   const q = state.pal.q;
   const hit = s => String(s??'').toLowerCase().includes(q);
+  const cfg = (!q || hit(PAL_CONFIG.keys)) ? [PAL_CONFIG] : [];
   let ts = tasks(), fs = fbs();
   if (q){
     ts = ts.filter(t=>hit(t.shortId)||hit(t.title)||hit(t.description)||hit(t.assignee)||hit(t.lane));
@@ -743,6 +875,7 @@ function palResults(){
     fs = [...fs].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   }
   return [
+    ...cfg,
     ...ts.slice(0,8).map(t=>({kind:'task', id:t.shortId, text:t.title, status:t.status})),
     ...fs.slice(0,8).map(f=>({kind:'fb', id:f.shortId, text:f.body||'screenshot only', status:f.status})),
   ];
@@ -753,15 +886,17 @@ function renderPal(){
   if (!state.pal.open) return;
   const rows = palResults();
   if (state.pal.sel >= rows.length) state.pal.sel = Math.max(0, rows.length-1);
+  const pill = r => r.kind==='config' ? '<span class="pill">PANEL</span>'
+    : `<span class="pill st-${esc(r.status)}">${esc(r.kind==='fb'?fbLabel(r.status):nice(r.status))}</span>`;
   const rowHtml = (r,i) => `<div class="palrow ${i===state.pal.sel?'selp':''}" data-pal-row="${i}">
     <span class="id">${esc(r.id)}</span><span class="snippet">${esc(r.text)}</span>
-    <span class="pill st-${esc(r.status)}">${esc(r.kind==='fb'?fbLabel(r.status):nice(r.status))}</span></div>`;
+    ${pill(r)}</div>`;
   const group = (label, kind) => {
     const parts = rows.map((r,i)=>r.kind===kind?rowHtml(r,i):'').filter(Boolean);
     return parts.length ? `<div class="palgroup">${label}</div>`+parts.join('') : '';
   };
   $('palresults').innerHTML = rows.length
-    ? group('Tasks','task') + group('Feedback','fb')
+    ? group('Project','config') + group('Tasks','task') + group('Feedback','fb')
     : `<div class="palempty">no matches for “${esc(state.pal.q)}”</div>`;
   document.querySelector('.palrow.selp')?.scrollIntoView({block:'nearest'});
 }
@@ -773,6 +908,7 @@ function openPal(){
 function closePal(){ state.pal.open = false; renderPal(); }
 function palGo(r){
   closePal();
+  if (r.kind==='config'){ select('config'); return; } // config overlays whatever view is under it
   if (r.kind==='fb'){ if (state.view!=='feedback') setView('feedback'); }
   else if (state.view==='feedback'||state.view==='activity') setView('board'); // drawer overlays everywhere else
   select(r.kind, r.id);
@@ -783,7 +919,7 @@ function select(kind, id, push=true){
   if (state.sel && state.sel.kind===kind && state.sel.id===id) { renderDrawer(); return; }
   state.sel = {kind, id};
   if (push) state.stack.push(state.sel);
-  const hash = `#/${kind==='task'?'t':'f'}/${id}`;
+  const hash = kind==='config' ? '#/config' : `#/${kind==='task'?'t':'f'}/${id}`;
   if (location.hash !== hash) history.pushState(null,'',hash); // real entries so browser back/forward walk drawers
   renderContent(); renderDrawer();
 }
@@ -797,6 +933,7 @@ function goBack(){
   history.back(); // one history model: hashchange pops the stack and renders
 }
 const parseHash = () => {
+  if (location.hash === '#/config') return {kind:'config'};
   const m = location.hash.match(/^#\/(t|f)\/([A-Za-z0-9-]+)$/);
   return m ? {kind: m[1]==='t'?'task':'fb', id: m[2].toUpperCase()} : null;
 };
@@ -813,9 +950,9 @@ window.addEventListener('hashchange', ()=>{
     if (prev && prev.kind===target.kind && prev.id===target.id) state.stack.pop(); // back
     else if (!same) state.stack.push(target);                                     // forward / new hop
     state.sel = target;
-    // restore the view under the drawer (mirror palGo)
+    // restore the view under the drawer (mirror palGo); config overlays any view as-is
     if (target.kind==='fb'){ if (state.view!=='feedback') return setView('feedback'); }
-    else if (state.view==='feedback'||state.view==='activity') return setView('board');
+    else if (target.kind==='task' && (state.view==='feedback'||state.view==='activity')) return setView('board');
   } else { state.sel = null; state.stack = []; }
   renderContent(); renderDrawer();
 });
@@ -869,6 +1006,7 @@ document.addEventListener('drop', async e=>{
 // ---------- events ----------
 document.addEventListener('click', e=>{
   if (e.target.closest('#qbtn')){ openPal(); return; }
+  if (e.target.closest('[data-open-config]')){ select('config'); return; }
   const pr = e.target.closest('[data-pal-row]');
   if (pr){ const r = palResults()[+pr.dataset.palRow]; if (r) palGo(r); return; }
   if (e.target.closest('[data-pal-close]')){ closePal(); return; }
