@@ -279,6 +279,54 @@
   .typ-regression{color:var(--red);border-color:var(--red);background:var(--red-pale)}
   .typ-lane{color:var(--ink-soft);border-color:var(--ink-soft);background:var(--beige-2)} /* per-task lane selection chip */
 
+  /* ---------- held reports: on the feedback surface, deliberately NOT in the feedback list ----------
+     Every filed thing on this board is drawn in solid 2px ink. Held reports are dashed and hatched
+     throughout, so the surface says "not a row, nothing is tracking this" before a single word is
+     read — and so no held card can be mistaken for a feedback row at a glance or in a screenshot. */
+  .held{border-bottom:2px solid var(--ink);
+    background:repeating-linear-gradient(135deg,transparent 0 9px,rgba(28,28,28,.05) 9px 18px)}
+  .heldbar{display:flex;align-items:baseline;gap:10px;padding:10px 16px;border-bottom:1.5px dashed var(--ink);flex-wrap:wrap}
+  .heldbar .h{font-family:var(--mono);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}
+  .heldbar .why{font-size:12px;color:var(--ink-soft);min-width:0}
+  .heldbar .why b{color:var(--ink)}
+  .hrow{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:10px;align-items:start;
+    padding:11px 16px 11px 10px;border-bottom:1.5px dashed var(--hair);cursor:pointer;transition:background .08s}
+  .hrow:hover,.hrow.open{background:rgba(28,28,28,.05)}
+  .held .hrow:last-child{border-bottom:none}
+  /* the same caret the task rows use, so "this opens" needs no second vocabulary */
+  .hrow .caret{color:var(--ink-faint);margin-top:-2px}
+  .hrow:hover .caret{color:var(--ink)}
+  .hquote{font-weight:500;font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hsub{display:flex;gap:8px;align-items:center;margin-top:5px;font-size:12px;color:var(--ink-soft);flex-wrap:wrap}
+  .hid{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);word-break:break-all}
+  .hright{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+  /* the one stamp that must never be confused with a .pill: dashed border, no fill, no status colour */
+  .hstamp{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:800;text-transform:uppercase;
+    letter-spacing:.06em;border:2px dashed var(--ink);padding:1.5px 8px;white-space:nowrap}
+  .hcause{font-family:var(--mono);font-size:9.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
+    padding:2px 6px;border:1.5px dashed rgba(28,28,28,.42);color:var(--ink-soft)}
+  .hdet{padding:2px 16px 14px 42px;border-bottom:1.5px dashed var(--hair);background:rgba(28,28,28,.05);
+    box-shadow:inset 3px 0 0 rgba(28,28,28,.3)} /* tied to the row above it, not floating under the band */
+  .held .hdet:last-child{border-bottom:none}
+  .hdet .quote{border-style:dashed;white-space:pre-wrap}
+  .hkv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 14px;font-size:12.5px;margin:10px 0}
+  .hkv .k{font-family:var(--mono);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+    color:var(--ink-faint);white-space:nowrap;padding-top:2px}
+  .hkv .v{min-width:0;word-break:break-word;color:var(--ink-soft)}
+  .hkv .v b{color:var(--ink);font-weight:600}
+  /* the remedy is the only solid-bordered thing in a held card: it is the one real, doable action */
+  .hfix{border:2px solid var(--ink);background:var(--beige-2);padding:11px 12px}
+  .hfix .t{font-family:var(--mono);font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .hfix p{font-size:12.5px;color:var(--ink-soft);margin-bottom:9px}
+  .hfix .quote.mono{font-size:11px;padding:9px 11px}
+  /* the armed half of that action: it names the grant, in full, before anything fires */
+  .hgrant{font-size:12.5px;border:2px dashed var(--ink);padding:9px 11px;margin-bottom:2px;word-break:break-word}
+  .heldmore{padding:10px 16px;font-size:12px;color:var(--ink-soft);border-top:1.5px dashed var(--ink)}
+  .heldmore code{font-family:var(--mono);font-size:11px;color:var(--ink)}
+  /* the tab marker: a count of held reports, never merged into the open-feedback number beside it */
+  .heldchip{font-family:var(--mono);font-size:9.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
+    border:1.5px dashed currentColor;padding:0 5px;opacity:.75}
+
   /* ---------- activity ---------- */
   .evgroup{padding:16px 18px 6px;font-family:var(--mono);color:var(--ink-soft);font-size:10.5px;font-weight:700;
     letter-spacing:.1em;text-transform:uppercase;border-bottom:1.5px solid var(--hair)}
@@ -586,6 +634,14 @@ const state = {
   folded: new Set(['backlog','done']), // columns folded to a 44px rail; independent per column
   canWrite: null,          // null = unknown; probed once. Tunnel viewers get 403 on writes.
   pal: {open:false, q:'', sel:0},  // ⌘K palette; survives SSE re-renders
+  // reports Gabbar's stakeholder gate refused: held on its disk, never filed, never in Mongo.
+  // null means the held lane is UNAVAILABLE rather than empty — /api/parked is not on the proxy's
+  // public allowlist, so a share-link viewer gets a 403 here and sees no lane at all, exactly as
+  // they do today. Only the local operator, who is the one who can act on a held report, sees it.
+  parked: null,
+  parkedRaw: '',           // last payload, verbatim: a poll that changed nothing must not re-render
+  parkOpen: new Set(),     // parkIds expanded in place; a held card never opens the drawer
+  parkArm: null,           // the one parkId whose remedy button is armed; transient, never persisted
 };
 
 // tolerates a missing/non-string name: roster entries come from unvalidated project config
@@ -810,6 +866,17 @@ const childrenOf = t => tasks().filter(x=>x.parentTaskId===t._id);
 const reviewKidsOf = t => childrenOf(t).filter(k=>k.type==='review');
 const fbForTask = t => fbs().filter(f=>f.taskId===t._id);
 const openFb = f => !['resolved','rejected'].includes(f.status);
+// held reports are NOT feedback and never join fbs(): no id to quote, no status to triage, no row.
+// They are counted and rendered on their own, and every count on this board that says "feedback"
+// keeps meaning filed feedback.
+const parked = () => state.parked?.items ?? [];
+const heldN = () => state.parked?.held ?? 0;
+// The held count is a FLOOR, not a total, whenever the directory read was capped, and every place
+// that prints it has to say so. A truncated number that reads as exact is the one failure a surface
+// whose entire job is honesty cannot afford — and the band's own caveat does not travel to the tab.
+const heldPartial = () => !!state.parked?.truncated;
+const heldCount = () => `${heldN()}${heldPartial()?'+':''}`;
+const heldUnread = () => Math.max(0, (state.parked?.files ?? 0) - (state.parked?.scanned ?? 0));
 const isClosed = t => ['done','cancelled'].includes(t.status);
 const eventsForTask = t => { const re = new RegExp('\\b'+t.shortId+'\\b'); return (state.data?.events??[]).filter(e=>e.taskId===t._id || re.test(e.text||'')); };
 const pipCls = s => s==='in_progress'||s==='in_review'||s==='qa' ? 'p-run' : s==='done' ? 'p-done' : s==='blocked' ? 'p-blocked' : s==='cancelled' ? 'p-cancelled' : '';
@@ -1130,11 +1197,15 @@ function renderTopNav(){
     {id:'board', label:'Board', n: openTasks, icon:'board',
      title:`${openTasks} open committed task${openTasks===1?'':'s'}${backlogN?` · ${backlogN} in backlog, not counted`:''}`},
     {id:'list', label:'List', n: tasks().length, icon:'list', title:`every row, including backlog, reviews and closed work`},
-    {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback', title:`${openFbN} open feedback`},
+    // held reports get their own marker beside the count, never added into it: this tab's number is
+    // open FILED feedback and stays that, or a held report would be actionable-looking triage the
+    // moment somebody read the tab instead of the lane.
+    {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback', held: heldN() ? heldCount() : 0,
+     title:`${openFbN} open feedback${heldN()?` · ${heldCount()} report${heldN()===1&&!heldPartial()?'':'s'} held by the gate, NOT filed and not counted here${heldPartial()?` — and that is a floor: ${heldUnread()} more file${heldUnread()===1?'':'s'} in the parking lot were never opened`:''}`:''}`},
     {id:'activity', label:'Activity', n: null, icon:'activity', title:'project event log'},
   ];
   $('views').innerHTML = views.map(v =>
-    `<button class="vtab ${state.view===v.id?'on':''}" data-view-btn="${v.id}" title="${esc(v.title)}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
+    `<button class="vtab ${state.view===v.id?'on':''}" data-view-btn="${v.id}" title="${esc(v.title)}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}${v.held?`<span class="heldchip">${v.held} held</span>`:''}</button>`).join('');
   const lanes = pipeLanes();
   $('lanes').innerHTML = lanes.map(l => {
     const open = tasks().filter(t=>t.type==='review'&&t.lane===l.lane&&!isClosed(t)).length;
@@ -1429,6 +1500,174 @@ function taskRowHtml(t, isSub){
     </span></div>`;
 }
 
+// ---------- held reports (Gabbar's parking lot) ----------
+// A held report is somebody's words that the stakeholder gate refused to file, kept on Gabbar's
+// disk instead of being dropped. It is pending work nobody can see, which is what a board is for,
+// and it is NOT feedback, which is what this band has to keep saying at every glance. So it gets a
+// band ABOVE the feedback list rather than rows inside it: a human looking for intake finds it in
+// the one place they already look, and nothing in it can be mistaken for a filed row — dashed
+// borders throughout, a PARK-* id, no status pill, no drawer, no triage affordance of any kind.
+// It is not a fourth top-level tab for the same reason it is not blended in: a surface of its own
+// is a surface people forget to open, and this is the one queue that already suffers from that.
+// NULL-PROTOTYPE, because `cause` is an untrusted string from the parked file used as the lookup
+// key: on an ordinary object literal a cause of "constructor" resolves up the prototype chain and
+// renders the chip as "function Object() { [native code] }". Same family as every other "hostile
+// text reaches a lookup" bug on this surface — the answer is a map with nothing behind it.
+const CAUSE_LABEL = Object.assign(Object.create(null),
+  {stakeholder_gap:'not a stakeholder', outage:'darbar was down', bad_reference:'no project resolved'});
+const CAUSE_WHY = Object.assign(Object.create(null), {
+  stakeholder_gap:'Gabbar could not confirm this person is a stakeholder on this project, so it refused to file in their name and kept their words instead.',
+  outage:'darbar could not be reached when this arrived, so the gate never ran and nobody was told at the time.',
+  bad_reference:'nothing in the message resolved to a project, so there was no board to file it against.',
+});
+const causeLabel = c => CAUSE_LABEL[c] || nice(c);
+// Same call the owner digest makes at 30 lines: past a point the headline of a backlog is the
+// NUMBER, not the enumeration. 500 held rows would also bury the filed feedback list underneath
+// them, which is the one state where you most want both. The oldest are listed, the rest are
+// counted, and the count is the honest total either way.
+const HELD_ROW_CAP = 25;
+const oneLine = s => String(s ?? '').replace(/\s+/g,' ').trim();
+// attachments render as LINKS, never as <img>: the bytes are ours but the list is unvetted data
+// from a refused report, and the markdown renderer already refuses to make these fields fetch
+// author-chosen URLs. The same rule holds here.
+const heldShots = i => (i.attachments||[]).filter(safeUrl).map((a,n)=>
+  `<a href="${esc(a)}" target="_blank" rel="noopener noreferrer">${esc(String(a).split('/').pop() || `file ${n+1}`)}</a>`).join(' ');
+
+// The one action on a held card, and it is deliberately NOT a promote button.
+// Promoting from here would file a row for a report the gate refused, which is the gate bypass this
+// whole mechanism exists to prevent — and it would leave the CAUSE in place, so the same person's
+// next message parks all over again. The remedy named here fixes the cause instead: register them,
+// and Gabbar files it itself, on its next sweep, through the same gate, in their name.
+//
+// THIS USED TO HAND OVER A curl TO PASTE, AND A CLIPBOARD SHELL COMMAND IS THE WRONG AFFORDANCE FOR
+// THIS INPUT. Every field on a held card is attacker-controlled by construction: the display name is
+// the slack profile of somebody who, by definition, just failed the stakeholder check. Built into a
+// single-quoted shell word, a name of  ';touch /tmp/PWNED;'  closed the quote and ran the rest the
+// moment the payload was pasted (reproduced end to end), and an ordinary reporter called O'Brien got
+// a command that died on an unterminated quote. Quoting it correctly is possible, but correct
+// quoting is not what would make this safe: the operator cannot read a quoted string and tell, the
+// rules differ by shell (sh vs fish vs PowerShell, and we never learn which one the paste lands in),
+// and a terminal without bracketed paste executes a pasted newline before anybody has read a
+// character. The class stays alive as long as hostile bytes are asked to become shell words.
+// So there is no command. The board makes the call itself, against the API it is already talking to,
+// where a name is a JSON string and never a word of anything.
+//
+// The deliberateness that copy-not-fire was protecting is kept, in the place it belongs: the button
+// ARMS first and spells out the grant before it will fire. Granting filing rights on the strength of
+// a report that just failed the trust check is a decision somebody makes on purpose, and two clicks
+// with the consequence named between them is more purposeful than a copy-paste ever was.
+// What is NOT weakened: this still files nothing. It clears the cause and leaves the report held.
+
+// The gate matches this exact string, and the server enforces the same shape (SLACK_USER_ID in
+// api.ts) — so this is not a defence, the server is. It is honesty: an id of the wrong shape can
+// never clear the gate, so offering a button that can only 400 would be naming a remedy that is not
+// one. It also means the only id this surface ever sends is a bounded token.
+const SLACK_ID_RE = /^[UW][A-Z0-9]{6,20}$/;
+function heldFix(i){
+  const t = 'what clears it';
+  if (i.cause==='outage') return {t,
+    p:'Nothing to do here. The gate never got an answer, not a refusal. Gabbar re-checks held reports as messages come in and this one files itself once darbar answers.', act:null};
+  if (i.cause==='bad_reference') return {t,
+    p:'Only the reporter can say which project they meant. Ask them in the thread, then tell Gabbar to promote it once you know.', act:null};
+  if (!SLACK_ID_RE.test(i.authorSlackId||'')) return {t,
+    p: i.authorSlackId
+      ? `Gabbar recorded "${i.authorSlackId}" as ${i.author}'s slack id, and that is not the shape of one, so the gate can never match it. Find them in Slack and add them as a stakeholder with the real id.`
+      : `Gabbar recorded no slack id for ${i.author}, and the gate matches on the id, not the name. Find them in Slack and add them as a stakeholder with that id.`, act:null};
+  const p = state.data?.project;
+  // the project comes from the board payload, never from the parked file: a ref the reporter typed
+  // is untrusted text, and it has no business addressing a write route
+  if (!p?.prefix) return {t,
+    p:`Register ${i.author} as a stakeholder on this project. The gate matches slack id ${i.authorSlackId}.`, act:null};
+  const known = (p.stakeholders||[]).find(s => s.slackUserId === i.authorSlackId);
+  if (known) return {t,
+    p:`That slack id is already registered, as ${known.name}. The gate will pass for them now — this report was held before that, and Gabbar files it on its next sweep.`, act:null};
+  return {t,
+    p:`Register ${i.author} as a stakeholder. This does not file the report: it clears the gate, and Gabbar files it on its next sweep, through the same check, in their name.`,
+    act:{parkId:i.parkId, name:i.author, slackUserId:i.authorSlackId, prefix:p.prefix}};
+}
+
+// The buttons carry ONLY the parkId, which isParkId has already constrained to [A-Za-z0-9_] on the
+// read side. The name and the slack id are looked up from state at click time and travel as JSON in
+// a fetch body, so no untrusted byte is ever part of a command, a path, or an attribute that means
+// anything. The labels are fixed strings; the untrusted name appears once, in the armed sentence,
+// as escaped text, because that sentence is the point of the confirm step.
+function heldActHtml(a){
+  if (state.parkArm !== a.parkId) {
+    return `<button class="pbtn" type="button" data-arm="${esc(a.parkId)}" style="margin-top:8px">register them</button>`;
+  }
+  return `<div class="hgrant">This grants <b>${esc(a.name)}</b> (${esc(a.slackUserId)}) the standing right to file feedback on ${esc(a.prefix)} from Slack. It does not file this report.</div>
+    <button class="pbtn" type="button" data-register="${esc(a.parkId)}" style="margin-top:8px">yes, register them</button>
+    <button class="pbtn" type="button" data-arm-cancel="1" style="margin-top:8px;margin-left:6px">cancel</button>`;
+}
+
+function heldRowHtml(i){
+  const open = state.parkOpen.has(i.parkId);
+  const words = oneLine(i.theirWords) || oneLine(i.body);
+  const where = i.onTask ? `on ${esc(i.onTask)}` : i.project ? esc(i.project) : 'no project resolved';
+  const shots = (i.attachments||[]).length;
+  const row = `<div class="hrow ${open?'open':''}" data-park="${esc(i.parkId)}" title="${open?'collapse':'expand'} this held report">
+    <span class="caret ${open?'openc':''}">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m9 5 7 7-7 7"/></svg></span>
+    <span class="col">
+      <div class="hquote">${words ? `“${esc(words)}”` : '<span style="color:var(--ink-faint)">no words captured, attachment only</span>'}</div>
+      <div class="hsub">
+        <span class="who human"><span class="a">${esc(initials(i.author))}</span>${esc(i.author)}</span>
+        <span class="hcause" title="${esc(CAUSE_WHY[i.cause] || i.reasonParked || '')}">${esc(causeLabel(i.cause))}</span>
+        <span class="id">${where}</span>
+        ${shots?`<span class="id">[${shots} file${shots>1?'s':''}]</span>`:''}
+        <span class="hid">${esc(i.parkId)}</span>
+      </div></span>
+    <span class="hright">
+      <span class="hstamp" title="nothing was filed for this: it has no feedback id, it is in no triage queue, and no task is tracking it">held · not filed</span>
+      <span class="time" title="${esc(new Date(i.heldSince).toLocaleString('en-GB'))}">held ${esc(ageShort(i.heldSince))}</span>
+    </span></div>`;
+  if (!open) return row;
+  const fix = heldFix(i);
+  const kv = [
+    ['gabbar read it as', `${esc(i.type)}${i.body?` · ${esc(i.body)}`:''}`],
+    ['reported by', `<b>${esc(i.author)}</b>${i.authorSlackId?` · ${esc(i.authorSlackId)}`:' · no slack id recorded'}`],
+    ['target', `${i.project?`<b>${esc(i.project)}</b>`:'<b>no project resolved</b>'}${i.onTask?` · on ${esc(i.onTask)}`:''}`],
+    ['held since', `${esc(new Date(i.heldSince).toLocaleString('en-GB'))} · ${esc(relTime(i.heldSince))}`],
+    ['why it is held', esc(i.reasonParked || CAUSE_WHY[i.cause] || causeLabel(i.cause))],
+    ['owner told', i.escalatedAt ? `${esc(relTime(i.escalatedAt))}` : 'not yet'],
+    ...(shots ? [['attachments', heldShots(i)]] : []),
+    ['on disk', `<span class="hid">${esc(`${state.parked?.dir || ''}/${i.parkId}.json`)}</span>`],
+  ];
+  // their own words lead the expansion, whole and unstyled: that text is the entire reason this
+  // report was kept, and everything else on the card is context for it
+  return `${row}<div class="hdet">
+    <div class="quote mono">${esc(i.theirWords || '(nothing captured)')}${i.theirWordsTruncated?'\n… truncated here, the file on disk has the rest':''}</div>
+    <div class="hkv">${kv.map(([k,v])=>`<span class="k">${esc(k)}</span><span class="v">${v}</span>`).join('')}</div>
+    <div class="hfix"><div class="t">${esc(fix.t)}</div><p>${esc(fix.p)}</p>
+      ${fix.act?heldActHtml(fix.act):''}</div>
+  </div>`;
+}
+
+function heldBandHtml(){
+  const d = state.parked;
+  if (!d) return ''; // unavailable (a share-link viewer): no lane, exactly as before this existed
+  const all = parked();
+  const list = all.filter(i => matches([i.parkId,i.theirWords,i.body,i.author,i.project,i.onTask].join(' ')));
+  const notes = [];
+  if (d.error) notes.push(d.error);
+  if (d.unreadable) notes.push(`${d.unreadable} file${d.unreadable>1?'s':''} in that directory could not be read`);
+  if (d.truncated) notes.push(`only ${d.scanned} of ${d.files} files in that directory were read, so this lane is not the whole parking lot`);
+  if (!list.length && !notes.length) return '';
+  const n = list.length;
+  const hidden = all.length - n;
+  const shown = list.slice(0, HELD_ROW_CAP);
+  const overflow = n - shown.length;
+  return `<div class="held">
+    <div class="heldbar">
+      <span class="h">Held · not filed</span>
+      <span class="why">${n?`<b>${n}</b> report${n>1?'s':''} Gabbar's gate refused. Not feedback: no id to quote, no triage queue, nothing tracking ${n>1?'them':'it'}. ${n>1?'They stay':'It stays'} here until the gate clears.`
+        :state.q?'nothing held matches this search':'nothing held could be listed'}${hidden?` · ${hidden} hidden by search`:''}</span>
+      ${notes.length?`<span class="why" style="flex-basis:100%"><b>${esc(notes.join(' · '))}</b></span>`:''}
+    </div>
+    ${shown.map(heldRowHtml).join('')}
+    ${overflow?`<div class="heldmore">and ${overflow} more held, not listed here. the oldest are shown first · the whole set is <code>GET /api/parked?project=${esc(state.data?.project?.prefix ?? '')}</code></div>`:''}</div>`;
+}
+
 function renderContent(){
   const board = state.view==='board';
   $('kanban').hidden = !board;
@@ -1465,9 +1704,15 @@ function renderContent(){
     if (state.fbFilter==='open') list = list.filter(openFb);
     if (state.fbFilter==='closed') list = list.filter(f=>!openFb(f));
     list = list.filter(f=>matches([f.body,f.shortId,f.author,f.taskShortId].join(' ')));
+    // the held count is stated apart from the feedback count, in different words, for the same
+    // reason the tab keeps them apart: one of these numbers is rows, the other is not
     vb.innerHTML = `<span class="vtitle">Feedback</span><span class="vn">${list.length}</span>
+      ${heldN()?`<span class="vn" title="held by Gabbar's gate, not filed and not part of the count beside it">· ${heldCount()} held, not filed</span>`:''}
       <div class="filters">${['open','all','closed'].map(f=>`<button class="seg ${state.fbFilter===f?'on':''}" data-fbf="${f}">${f}</button>`).join('')}</div>`;
-    el.innerHTML = list.map(f=>{
+    // the held band sits ABOVE the list and outside the open/all/closed filter: those words are
+    // feedback lifecycle, and a held report has no lifecycle to filter on
+    const heldHtml = heldBandHtml();
+    el.innerHTML = heldHtml + (list.map(f=>{
       const sel = state.sel?.kind==='fb' && state.sel.id===f.shortId;
       return `<div class="frow ${sel?'sel':''}" data-fb="${esc(f.shortId)}">
         <span class="id">${esc(f.shortId)}</span>
@@ -1479,7 +1724,7 @@ function renderContent(){
         <span style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
           <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span></span>
-      </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}</div>`;
+      </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}${heldN()&&!state.q?`<br>${heldCount()} held report${heldN()>1||heldPartial()?'s':''} above, none of them filed`:''}</div>`);
   }
   else {
     vb.innerHTML = `<span class="vtitle">Activity</span>`;
@@ -1815,6 +2060,20 @@ document.addEventListener('click', e=>{
   if (tr){ select('task', tr.dataset.task); return; }
   const fr = e.target.closest('[data-fb]');
   if (fr){ select('fb', fr.dataset.fb); return; }
+  // held reports expand IN PLACE and never enter state.sel: the drawer is where rows live, and a
+  // held report is not a row. This also keeps a PARK id out of the back stack and the hash.
+  const hr = e.target.closest('[data-park]');
+  if (hr){ const id = hr.dataset.park;
+    state.parkOpen.has(id) ? state.parkOpen.delete(id) : state.parkOpen.add(id);
+    state.parkArm = null; // arming is transient: touching anything else on the band disarms it
+    renderContent(); return; }
+  // the remedy, in two deliberate halves. Both buttons carry a parkId and nothing else; the values
+  // that actually go over the wire are read from state at click time, as data.
+  const arm = e.target.closest('[data-arm]');
+  if (arm){ state.parkArm = arm.dataset.arm; renderContent(); return; }
+  if (e.target.closest('[data-arm-cancel]')){ state.parkArm = null; renderContent(); return; }
+  const reg = e.target.closest('[data-register]');
+  if (reg){ registerReporter(reg.dataset.register); return; }
   const fbf = e.target.closest('[data-fbf]');
   if (fbf){ state.fbFilter = fbf.dataset.fbf; renderContent(); return; }
   const tf = e.target.closest('[data-tf]');
@@ -1857,6 +2116,55 @@ async function load(){
   if (!r.ok){ $('list').innerHTML = '<div class="empty">board not found. check the link</div>'; return; }
   state.data = await r.json();
   render();
+  loadParked(); // second request on purpose; see state.parked
+}
+
+// Held reports come from a SECOND endpoint, not from the board payload, and that is the whole
+// exposure argument: /api/p/:capId is on the proxy's public allowlist and /api/parked is not, so a
+// refused report — unvetted words plus a slack id, from somebody this project has not vouched for —
+// cannot leave the machine through a share link. A 403 or a network failure here leaves state.parked
+// null, which renders no lane at all rather than an empty one, because "nothing held" and "not
+// allowed to look" are different facts and only one of them is safe to imply.
+// Nothing in Mongo changes when a report is parked, so no SSE tick announces one: this polls.
+async function loadParked(){
+  const prefix = state.data?.project?.prefix;
+  if (!prefix) return;
+  let next = null;
+  try {
+    const r = await fetch(`/api/parked?project=${encodeURIComponent(prefix)}`);
+    if (r.ok) next = await r.json();
+  } catch {}
+  const raw = JSON.stringify(next);
+  if (raw === state.parkedRaw) return; // a poll that changed nothing must not stomp scroll or search
+  state.parkedRaw = raw;
+  state.parked = next;
+  renderTopNav();
+  if (state.view==='feedback') renderContent();
+}
+setInterval(loadParked, 60000);
+
+// The remedy on a held card, fired by the board instead of pasted into a shell (see heldFix).
+// It adds a stakeholder and NOTHING ELSE: the report stays on disk, unfiled, until Gabbar's next
+// sweep runs it through the same gate in the reporter's own name. The values are read from state
+// here rather than carried on the button, and they leave as a JSON body — a name is a string at
+// every layer it touches, never a word of a command.
+async function registerReporter(parkId){
+  const i = parked().find(x => x.parkId === parkId);
+  const p = state.data?.project;
+  state.parkArm = null; renderContent();
+  if (!i || !p?.prefix || !SLACK_ID_RE.test(i.authorSlackId||'')) return toast('that held report is no longer on this board — refresh');
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(p.prefix)}/stakeholders`, {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({name:i.author, slackUserId:i.authorSlackId, role:'reporter'}),
+    });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok) return toast(j.error || (r.status===403 ? 'this board is read-only through the share link' : `could not register them (http ${r.status})`));
+    // the second half of that sentence is the one that must not be dropped: the gate is clear, the
+    // report is still held, and nothing was filed by this click
+    toast(`${i.author} is a stakeholder now · this report is still held, and Gabbar files it on its next sweep${j.warnings?.length?` · ${j.warnings[0]}`:''}`);
+    load();
+  } catch { toast('could not register them: network'); }
 }
 $('refresh').addEventListener('click', ()=>load());
 let reloadT, esDropped = false;

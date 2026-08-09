@@ -14,6 +14,9 @@ export const config = {
   dbName: env.DB_NAME || 'mission_control',
   filesDir: env.FILES_DIR || new URL('../../../data/files/', import.meta.url).pathname,
   memoryDir: env.MEMORY_DIR || new URL('../../../data/memory', import.meta.url).pathname,
+  // reports Gabbar's stakeholder gate refused, one JSON per slack message. Gabbar writes it and
+  // resolves the same env var itself (apps/gabbar/src/parked.ts); the server only ever reads it.
+  parkedDir: env.PARKED_DIR || new URL('../../../data/parked/', import.meta.url).pathname,
   slackBotToken: env.SLACK_BOT_TOKEN || '',
   slackAppToken: env.SLACK_APP_TOKEN || '',
   slackApiBase: env.SLACK_API_BASE || 'https://slack.com/api',

@@ -1,10 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
-import { config, pathPatternError, PATH_PATTERN_FORM } from '@darbar/core';
-import type { FeedbackDoc, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
+import { config, pathPatternError, PATH_PATTERN_FORM, isParkId } from '@darbar/core';
+import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
 
 export const api = new Hono();
 
@@ -274,7 +276,9 @@ const PROXY_RESERVED = ['p', 'api', 'files', '-']; // server's own paths; a pref
 const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 const LOOPBACK = 'localhost, 127.0.0.0/8, ::1, or an unspecified address (0.0.0.0, ::)';
 const RELAY_WHY = 'the proxy is publicly reachable through the tunnel, so anything else is an open relay onto a host that never agreed to be published';
-function readTarget(s: string): { target: string } | { error: string } {
+// exported for proxy-target.test.ts: this function IS the boundary between "a dev server on this
+// machine" and an open relay, and a boundary with no test is a boundary until somebody edits it.
+export function readTarget(s: string): { target: string } | { error: string } {
   const err = (error: string) => ({ error });
   let u: URL;
   try { u = new URL(s.trim()); } catch { return err('must be an http(s) URL string, e.g. http://localhost:5173'); }
@@ -287,11 +291,33 @@ function readTarget(s: string): { target: string } | { error: string } {
   if (u.hash) return err(`must not carry a fragment (the proxy appends the request path, so "${s}" becomes a garbage upstream URL)`);
   // strip the brackets of an IPv6 literal and one trailing root dot; both are notation, not identity
   const h = u.hostname.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '');
+  // LOOPBACK INCLUDES US, and that is the hole every branch below shared (DAR-214). Loopback-only is
+  // the right rule and it stays; what it never said is that two of the things on loopback are darbar
+  // itself and the front door. A project proxy of {target:"http://127.0.0.1:<our port>", public:["/"]}
+  // is a legal route by every check above and tunnels the ENTIRE api through a share link: every
+  // task, every feedback body, every charter, the local-only routes, and every write endpoint —
+  // reached with no capability id, because the prefix is stripped and the rest of the path is
+  // forwarded verbatim. Pointing one at the PROXY's own port is the same shape aimed at the front
+  // door, and loops it onto itself besides. Neither is a dev server, which is the only thing this
+  // field is for, so both are refused here rather than being left to whoever writes `public` next.
+  // The check sits on the single accept path so every spelling of loopback is covered at once
+  // (localhost, 127.x, 0.0.0.0, ::1, ::, ::ffff:127.x) — a port is a port however the host is written.
+  // The DEFAULT route in routes.json legitimately targets this server; it is written by the proxy
+  // itself and never comes through here.
+  const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+  const OURS: [number, string][] = [
+    [config.port, `darbar itself — a route pointed here publishes the WHOLE api through the share link (every task, every feedback body, every charter, and the write routes), not a dev server`],
+    [config.proxyPort, `the proxy itself — that is the front door, so a route pointed here republishes the tunnel through itself rather than reaching a dev server`],
+  ];
   // origin+pathname, never u.href: href normalises a bare origin to a TRAILING SLASH, and the proxy
   // forwards `${target}${path}` with path already starting with '/', so that would double-slash every
   // upstream URL. Stripping the trailing slash also keeps the DAR-153 base-path form intact
   // (http://127.0.0.1:5173/fe stays exactly that, which is what stops Vite's 302 loop).
-  const ok = () => ({ target: (u.origin + u.pathname).replace(/\/+$/, '') });
+  const ok = (): { target: string } | { error: string } => {
+    const mine = OURS.find(([n]) => n === port);
+    if (mine) return err(`port ${port} on "${u.hostname}" is ${mine[1]}. proxy.target must be a dev server on this machine (${LOOPBACK}), on some other port`);
+    return { target: (u.origin + u.pathname).replace(/\/+$/, '') };
+  };
   if (h === 'localhost') return ok();
   const v4 = (a: string): string | null => {
     const m = IPV4.exec(a);
@@ -1788,6 +1814,181 @@ api.patch('/feedback/:shortId', async (c) => {
   // a parent held in_review only by this feedback closes itself once the last blocking row resolves
   if ((next === 'resolved' || next === 'rejected') && fb.taskId) await maybeAdvanceParent(fb.taskId);
   return c.json(await Feedback.findOne({ _id: fb._id }));
+});
+
+// ---------- parked reports: held by Gabbar's gate, and NOT feedback ----------
+//
+// WHERE THE DATA COMES FROM, and what it costs.
+// A parked report is a JSON file under config.parkedDir, written by apps/gabbar/src/parked.ts when
+// the stakeholder gate refuses a report. It is not in Mongo, and its absence from Mongo is
+// load-bearing: "never touches the feedback collection" is the reason a refused report cannot pass
+// for a filed one. So the server READS THE DIRECTORY and never writes a byte of it. Gabbar remains
+// the only writer, which also means there is no lock to get wrong.
+//
+// The honest cost is a second process bound to an on-disk format nothing enforces. The parser below
+// therefore assumes almost nothing: a file only has to be JSON under a PARK-* name, every field
+// degrades to a stated default, and a file that cannot be read is COUNTED rather than skipped in
+// silence — a held report we cannot show is worse than one we know we cannot show. The fields it
+// depends on are the ones parking itself shipped with (status, createdAt, author, target,
+// feedbackType, body, rawMessage, attachments, mediaNotes, gate.detail, promotion.feedbackShortId).
+// cause / escalatedAt / lastAttemptAt come from escalation work still in review, so they are read
+// when present and absent otherwise; nothing here breaks if that lands, changes, or never does.
+//
+// Two alternatives, rejected:
+//  · Gabbar POSTs held reports to the server, which stores them. That gives a refused report a home
+//    in the database, which is the one thing that must not exist, and needs a Gabbar change besides.
+//  · a separate Mongo collection rather than `feedback`. Same objection one indirection later: the
+//    invariant a human actually checks is "there is no row for a refused report", and a row is a row.
+const PARKED_DIR = path.resolve(config.parkedDir);
+// A directory grown past this IS the headline, so the count says so instead of the response quietly
+// getting bigger every sweep. Same reasoning as the digest cap in Gabbar's escalation.
+const PARKED_READ_CAP = 500;
+// per item, for transport only: the file on disk stays the full record, and theirWordsTruncated says
+// when a reader is not looking at all of it
+const PARKED_WORDS_CAP = 2000;
+const PARKED_BODY_CAP = 1000;
+
+const objOf = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+const trimOrNull = (v: unknown): string | null => { const s = str(v)?.trim(); return s ? s : null; };
+
+function parkedSummary(parkId: string, raw: Record<string, unknown>, mtime: Date): ParkedSummary {
+  const author = objOf(raw.author), target = objOf(raw.target), gate = objOf(raw.gate), promotion = objOf(raw.promotion);
+  const words = str(raw.rawMessage) ?? '';
+  return {
+    parkId,
+    filed: false, // literally false on every row, like Gabbar's own summarize()
+    parked: true,
+    status: trimOrNull(raw.status) ?? 'parked',
+    author: trimOrNull(author.name) ?? 'unknown',
+    authorSlackId: trimOrNull(author.slackUserId) ?? '',
+    project: trimOrNull(target.projectName) ?? trimOrNull(target.projectRef),
+    projectRef: trimOrNull(target.projectRef),
+    onTask: trimOrNull(target.taskRef),
+    type: trimOrNull(raw.feedbackType) ?? 'bug',
+    body: (str(raw.body) ?? '').slice(0, PARKED_BODY_CAP),
+    theirWords: words.slice(0, PARKED_WORDS_CAP),
+    theirWordsTruncated: words.length > PARKED_WORDS_CAP,
+    attachments: strArr(raw.attachments),
+    mediaNotes: strArr(raw.mediaNotes),
+    // a file with no readable timestamp still has an age; mtime beats claiming it arrived just now
+    heldSince: trimOrNull(raw.createdAt) ?? mtime.toISOString(),
+    // Gabbar reads a missing cause as stakeholder_gap, its conservative default. The same word is
+    // used here on purpose, so the board and the owner's digest cannot describe one item two ways.
+    cause: trimOrNull(raw.cause) ?? 'stakeholder_gap',
+    reasonParked: trimOrNull(gate.detail) ?? trimOrNull(gate.kind) ?? '',
+    escalatedAt: trimOrNull(raw.escalatedAt),
+    lastAttemptAt: trimOrNull(raw.lastAttemptAt),
+    promotedTo: trimOrNull(promotion.feedbackShortId),
+  };
+}
+
+type ParkedDirRead = { items: ParkedSummary[]; dirPresent: boolean; error: string | null; unreadable: number; ignored: number; files: number; scanned: number };
+function readParkedDir(): ParkedDirRead {
+  let names: string[];
+  let ignored = 0;
+  try {
+    // The PARK-* filter happens HERE, on the listing, not inside the loop, and that is the whole
+    // point: a name that is not a park id is not a held report we failed to read, it is somebody
+    // else's file. Counting a stray notes.json as unreadable made the band announce a lost report
+    // and there was none. They are counted apart, and nothing that fails isParkId is ever joined
+    // onto a path — the id guard is still the path guard, one step earlier.
+    const all = fs.readdirSync(PARKED_DIR).filter((n) => n.endsWith('.json'));
+    names = all.filter((n) => isParkId(n.slice(0, -'.json'.length))).sort();
+    ignored = all.length - names.length;
+  } catch (e) {
+    // ENOENT is the ordinary state of a machine where nothing has ever been refused: no directory,
+    // nothing held, no alarm. Anything else means held reports we cannot see, which must not render
+    // as "none held" — it is reported verbatim instead.
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { items: [], dirPresent: false, error: null, unreadable: 0, ignored: 0, files: 0, scanned: 0 };
+    console.error(`parked: cannot read ${PARKED_DIR}: ${String(e)}`);
+    return { items: [], dirPresent: true, error: `the held-report directory could not be read (${String(e)})`, unreadable: 0, ignored: 0, files: 0, scanned: 0 };
+  }
+  const items: ParkedSummary[] = [];
+  let unreadable = 0;
+  // The cap bounds the WORK, so it applies to filenames before anything is opened, which makes the
+  // selection filename order rather than age. A parkId is channel + slack ts, so within a channel
+  // that order IS chronological and the cap drops the NEWEST — the safer direction for a surface
+  // whose job is that nothing gets forgotten. Across channels it is neither, so the response states
+  // how many files it did not open rather than implying anything about which.
+  const scan = names.slice(0, PARKED_READ_CAP);
+  for (const name of scan) {
+    const parkId = name.slice(0, -'.json'.length); // already through isParkId above: no '/', '.' or '..'
+    try {
+      const file = path.join(PARKED_DIR, name);
+      const mtime = fs.statSync(file).mtime;
+      const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as unknown;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { unreadable++; continue; }
+      items.push(parkedSummary(parkId, raw as Record<string, unknown>, mtime));
+    } catch { unreadable++; }
+  }
+  items.sort((a, b) => a.heldSince.localeCompare(b.heldSince)); // oldest first, like the owner digest
+  return { items, dirPresent: true, error: null, unreadable, ignored, files: names.length, scanned: scan.length };
+}
+
+const parkedKeyMatches = (v: string | null, p: Project): boolean => {
+  const k = (v ?? '').trim().toLowerCase();
+  return !!k && (k === p.prefix.trim().toLowerCase() || k === p.name.trim().toLowerCase());
+};
+// An item with no project reference at all is the one that would otherwise never be found again, so
+// it shows on every project's read, flagged by project:null, rather than being filed into a place
+// nobody looks. Everything else is matched on what the reporter wrote or what Gabbar resolved.
+const parkedFor = (i: ParkedSummary, p: Project): boolean =>
+  (!i.projectRef && !i.project) || parkedKeyMatches(i.projectRef, p) || parkedKeyMatches(i.project, p);
+
+// LOCAL ONLY, and it now says so IN CODE rather than leaning on a config file staying narrow.
+// Why the route must be local: a parked report is by definition from somebody this project has NOT
+// vouched for, held verbatim with their slack id, and /api/p/:capId is readable by anyone holding a
+// share link. Putting held reports on that payload would widen the tunnel surface to solve a
+// visibility problem the ORCHESTRATOR has, and the orchestrator is local.
+//
+// It used to be local for one reason only: '/api/parked' is not under the '/api/p/' prefix that
+// data/routes.json currently publishes. True today, and one character from false — '/api/p' without
+// the trailing slash publishes this route, and so do '/api/' and '/api/*'. That is a property of a
+// file somebody edits, not of this code, and an exposure boundary that a typo elsewhere can move is
+// not a boundary. So the check below is the boundary, and routes.json is the second layer.
+// x-forwarded-host is what ngrok sets on every tunneled request and exactly what the proxy's own
+// isPublic() switches on, so this is the same fact asserted at both ends rather than a new one.
+// Residual, stated plainly: a LOCAL caller can set that header by hand and lose access to a local
+// route, which fails closed and costs somebody with shell access nothing; and a front door that does
+// not set the header fools this check and the proxy's identically, which is the pre-existing trust
+// boundary and not something this adds. Whatever else changes here, this route must never move under
+// '/api/p/' and this check must not come out.
+api.get('/parked', async (c) => {
+  if (c.req.header('x-forwarded-host')) {
+    return c.json({ error: 'held reports are local-only: they are unfiled words from somebody this project has not vouched for, and they do not travel through a share link' }, 403);
+  }
+  const ref = c.req.query('project');
+  let p: Project | null = null;
+  if (ref) {
+    p = await resolveProject(ref);
+    if (!p) return c.json({ error: 'project not found' }, 404);
+  }
+  // 'parked' is the default because held-and-waiting is the pending work; promoted and superseded
+  // rows are history and stay one query away rather than padding the lane.
+  const status = (c.req.query('status') ?? 'parked').trim().toLowerCase();
+  const read = readParkedDir();
+  const scoped = p ? read.items.filter((i) => parkedFor(i, p!)) : read.items;
+  const items = status === 'all' ? scoped : scoped.filter((i) => i.status === status);
+  const truncated = read.scanned < read.files;
+  const body: ParkedRead = {
+    dir: PARKED_DIR,
+    dirPresent: read.dirPresent,
+    error: read.error,
+    files: read.files,
+    scanned: read.scanned,
+    truncated,
+    ...(truncated
+      ? { note: `PARTIAL ANSWER: ${read.scanned} of ${read.files} files in ${PARKED_DIR} were read, in filename order. The rest are still held on disk and are NOT represented in any count below.` }
+      : {}),
+    unreadable: read.unreadable,
+    ignored: read.ignored,
+    inScope: scoped.length,
+    held: scoped.filter((i) => i.status === 'parked').length,
+    returned: items.length,
+    items,
+  };
+  return c.json(body);
 });
 
 // ---------- events ----------

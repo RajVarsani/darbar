@@ -162,6 +162,9 @@ export type Project = {
 export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'qa' | 'blocked' | 'done' | 'cancelled';
 // review tasks are pipeline-spawned children: they render as pips on the parent card, never as kanban cards
 export type TaskType = 'feature' | 'bug' | 'chore' | 'review' | 'regression';
+// CLOSED, and it stays closed. A report Gabbar's stakeholder gate refused is NOT a state of this
+// union — see the parked section at the bottom of this file for why adding one would undo the thing
+// parking exists to guarantee.
 export type FeedbackStatus =
   | 'pending' | 'triaged' | 'needs_clarification' | 'accepted' | 'in_progress' | 'resolved' | 'rejected';
 
@@ -220,4 +223,89 @@ export type EventDoc = {
   taskId: ObjectId | null;
   text: string;
   at: Date;
+};
+
+// ---------- parked reports: held by Gabbar's gate, and NOT feedback ----------
+// When the stakeholder gate refuses a report, Gabbar keeps the person's words on disk instead of
+// dropping them: one JSON file per slack message under data/parked/, written by apps/gabbar/src/
+// parked.ts and by nothing else. That directory is the whole store. There is no collection.
+//
+// Which is why FeedbackStatus above is not the place for this, however convenient it looks. A
+// status is a FIELD OF A FEEDBACK ROW, so a 'parked' member means a document in the feedback
+// collection with a <PREFIX>-FB-<n> id, and from that moment a refused report is quotable as
+// feedback, countable in a triage queue, and one status PATCH away from being real. Three of the
+// four defences parking relies on (its own id namespace, never touching Mongo, filed:false on
+// every read) die in that one edit. So the type below is a PARALLEL shape with a PARK-* id: no
+// reader of feedback can ever be handed one, because it is not that type.
+//
+// This mirrors summarize() in apps/gabbar/src/parked.ts, which is the shape the bot already hands
+// its model. Two processes agree on one directory format; only Gabbar writes it, the server reads.
+export const PARK_ID_PREFIX = 'PARK-';
+// one bounded character class, no nesting, no alternation: linear on a match and on a failure
+// alike. It is also the filename guard on the read side, so '/', '.' and '..' cannot appear in a
+// value that gets joined onto a directory path.
+export const PARK_ID_RE = /^PARK-[A-Za-z0-9_]+$/;
+export function isParkId(s: unknown): boolean {
+  return typeof s === 'string' && PARK_ID_RE.test(s.trim());
+}
+
+// status and cause are STRINGS, not unions, and that is deliberate. Gabbar owns those vocabularies
+// (ParkedStatus / ParkCause) and its escalation work is still in review, so a union here would make
+// this file the second place a new cause has to be added and would turn an unrecognised one into
+// either a dropped field or a 400 on a read path. A reader that renders whatever it is handed
+// cannot hide a held report because it did not recognise a word.
+export type ParkedSummary = {
+  parkId: string;
+  /** literal false on every row, in every direction, exactly as Gabbar's own summarize() does */
+  filed: false;
+  parked: true;
+  status: string; // parked | promoted | superseded
+  author: string;
+  authorSlackId: string;
+  /** display name for the target: what Gabbar resolved, else what the reporter typed */
+  project: string | null;
+  /** the raw project reference, kept apart from the display name so a filter can match on it */
+  projectRef: string | null;
+  onTask: string | null;
+  type: string;
+  body: string;
+  theirWords: string;
+  /** their words are capped for transport; the file on disk is always the full record */
+  theirWordsTruncated: boolean;
+  attachments: string[];
+  mediaNotes: string[];
+  heldSince: string;
+  cause: string;
+  reasonParked: string;
+  escalatedAt: string | null;
+  lastAttemptAt: string | null;
+  promotedTo: string | null;
+};
+
+// Shaped like the paged reads on GET /tasks, and for the same reason: `truncated` is the one word
+// a caller checks before treating an answer as the whole set, so it means the same thing here —
+// a boolean, with a note that says what was left out.
+export type ParkedRead = {
+  dir: string;
+  dirPresent: boolean;
+  /** a directory-level failure, verbatim: "none held" and "cannot look" must never read the same */
+  error: string | null;
+  /** PARK-* .json files in the directory: the true size of the parking lot, before any cap */
+  files: number;
+  /** .json files that are NOT PARK-* — somebody else's file, not a held report we lost */
+  ignored: number;
+  /** how many of those files were actually opened this call */
+  scanned: number;
+  /** scanned < files — this is NOT the whole parking lot */
+  truncated: boolean;
+  note?: string;
+  /** scanned files that could not be read or parsed. A held report we cannot show is worse than none */
+  unreadable: number;
+  /** scanned rows belonging to the requested project, any status */
+  inScope: number;
+  /** of those, the ones still held: the number that means pending work */
+  held: number;
+  /** rows returned after the status filter */
+  returned: number;
+  items: ParkedSummary[];
 };
