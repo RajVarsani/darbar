@@ -8,9 +8,10 @@
 // Isolation: parked.ts resolves its directory from PARKED_DIR at import, so the rig sets that
 // before the dynamic import and cleans up afterwards. data/parked/ on this machine is untouched.
 import { afterAll, beforeEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import type { ParkedItem } from './parked';
 
 const RIG = mkdtempSync(path.join(tmpdir(), 'darbar-parked-'));
 process.env.PARKED_DIR = RIG;
@@ -37,6 +38,7 @@ const input = (over: Partial<Parameters<typeof P.parkReport>[0]> = {}) => ({
   mediaNotes: ['video rec.mov -> http://localhost:4899/files/rec.mov frames: .../f01.jpg'],
   gateKind: 'not_stakeholder',
   gateDetail: 'Tanisha (U0TANISHA) is not a stakeholder on MRF v3',
+  cause: 'stakeholder_gap' as const,
   ...over,
 });
 
@@ -144,4 +146,192 @@ test('only the ids the reply missed get appended', () => {
   const out = P.withFilingNotice('filed MRF-FB-7 for you', ['MRF-FB-7', 'MRF-FB-8']);
   expect(out).toContain('is now filed as MRF-FB-8');
   expect(out.match(/MRF-FB-7/g)).toHaveLength(1);
+});
+
+// ---------- the escalation clock ----------
+// Parking fixed "a refusal loses the report" and left a smaller version of it: a held item
+// nobody is told about sits in a directory until a human reads it. These pin the bound.
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const aged = (over: Parameters<typeof P.parkReport>[0], msAgo: number) => {
+  const item = P.parkReport(over);
+  const older = { ...item, createdAt: new Date(Date.now() - msAgo).toISOString() };
+  // sync: the very next line reads it back through listParked, so an unawaited write is a race
+  writeFileSync(path.join(RIG, `${item.parkId}.json`), JSON.stringify(older, null, 2));
+  return older;
+};
+
+test('an outage surfaces within the hour, because nobody was told at all', () => {
+  const now = Date.now();
+  const item = { ...P.parkReport(input({ cause: 'outage' })), createdAt: new Date(now - 61 * 60_000).toISOString() };
+  expect(P.dueForEscalation(now, [item])).toHaveLength(1);
+  const fresh = { ...item, createdAt: new Date(now - 5 * 60_000).toISOString() };
+  expect(P.dueForEscalation(now, [fresh])).toHaveLength(0);
+});
+
+test('a stakeholder gap waits a day, because the owner was already pinged once', () => {
+  const now = Date.now();
+  const gap = { ...P.parkReport(input({ cause: 'stakeholder_gap' })), createdAt: new Date(now - 2 * HOUR).toISOString() };
+  expect(P.dueForEscalation(now, [gap])).toHaveLength(0); // an outage would already be due here
+  expect(P.dueForEscalation(now, [{ ...gap, createdAt: new Date(now - 25 * HOUR).toISOString() }])).toHaveLength(1);
+});
+
+test('escalating once buys a day of quiet, then it comes back', () => {
+  const now = Date.now();
+  const item = aged(input({ cause: 'outage' }), 5 * DAY);
+  expect(P.dueForEscalation(now)).toHaveLength(1);
+
+  P.markEscalated(item.parkId, new Date(now));
+  expect(P.readParked(item.parkId)?.escalations).toBe(1);
+  expect(P.dueForEscalation(now)).toHaveLength(0);
+  // and it does NOT go quiet forever: still held tomorrow means told again tomorrow
+  expect(P.dueForEscalation(now + DAY + 1000)).toHaveLength(1);
+});
+
+test('a held report is never deleted, only escalated', () => {
+  const item = aged(input({ cause: 'bad_reference' }), 30 * DAY);
+  P.markEscalated(item.parkId, new Date());
+  const held = P.readParked(item.parkId);
+  expect(held?.status).toBe('parked'); // a month old and still here, on purpose
+  expect(held?.rawMessage).toBe(input().rawMessage);
+});
+
+test('what is already filed is never escalated', () => {
+  const item = aged(input(), 30 * DAY);
+  P.markPromoted(item.parkId, 'MRF-FB-3', 'Raj');
+  expect(P.dueForEscalation(Date.now())).toHaveLength(0);
+  P.markEscalated(item.parkId);
+  expect(P.readParked(item.parkId)?.escalations).toBe(0);
+});
+
+test('the digest line says held, names the cause, and quotes no feedback id', () => {
+  const line = P.escalationLine(aged(input({ cause: 'outage' }), 3 * HOUR));
+  expect(line).toContain('held 3h');
+  expect(line).toContain('Tanisha');
+  expect(line).toContain('darbar could not be reached');
+  expect(line).not.toMatch(/-FB-\d+/);
+  expect(P.escalationLine(aged(input({ ts: '1754771234.999999' }), 2 * DAY))).toContain('not a stakeholder on MRF v3');
+});
+
+test('a record written before causes existed reads as a gap, not as retryable', async () => {
+  const legacy = { ...P.parkReport(input()), parkId: 'PARK-legacy' } as Record<string, unknown>;
+  delete legacy.cause; delete legacy.escalatedAt; delete legacy.escalations;
+  await Bun.write(path.join(RIG, 'PARK-legacy.json'), JSON.stringify(legacy));
+  const read = P.readParked('PARK-legacy');
+  expect(read?.cause).toBe('stakeholder_gap'); // waits for a human rather than retrying quietly
+  expect(read?.escalations).toBe(0);
+  expect(read?.escalatedAt).toBeNull();
+});
+
+// ---------- the retry budget: fairness, not age ----------
+// The previous fix dropped items with no target, which is only ONE way to be unpromotable. A
+// stakeholder_gap item has a perfectly good target and stays refusable until a human acts, so
+// age ordering pinned the budget to the same items forever. These pin the class instead.
+const BUDGET = 5;
+const parkOn = (project: string | null, over: Partial<Parameters<typeof P.parkReport>[0]> = {}) =>
+  P.parkReport(input({ ts: `1754${Math.random().toString().slice(2, 12)}`, projectRef: project, projectName: project, ...over }));
+
+const attemptedAgo = (item: ParkedItem, msAgo: number | null) => {
+  const next = { ...item, lastAttemptAt: msAgo === null ? null : new Date(Date.now() - msAgo).toISOString() };
+  writeFileSync(path.join(RIG, `${item.parkId}.json`), JSON.stringify(next, null, 2));
+  return next;
+};
+
+test('items sharing a target cost ONE gate check, not one each', () => {
+  const held = Array.from({ length: 20 }, () => parkOn('ALPHA'));
+  const plan = P.planSweep(held, BUDGET);
+  expect(plan).toHaveLength(1); // twenty reports, one darbar round trip
+  expect(plan[0]!.items).toHaveLength(20);
+  expect(plan[0]!.target).toEqual({ project: 'ALPHA' });
+});
+
+test('five blocked items on ONE project cannot crowd out a sixth on another', () => {
+  const blocked = Array.from({ length: 5 }, () => parkOn('ALPHA'));
+  const promotable = parkOn('BETA');
+  const plan = P.planSweep([...blocked, promotable], BUDGET);
+  expect(plan.map((g) => g.target)).toContainEqual({ project: 'BETA' });
+  expect(plan).toHaveLength(2);
+});
+
+test('five blocked items on FIVE DIFFERENT projects still cannot crowd out a sixth', () => {
+  // the case the previous fix missed entirely: every one of these has a resolvable target
+  const blocked = ['A', 'B', 'C', 'D', 'E'].map((p) => attemptedAgo(parkOn(p), 60_000));
+  const fresh = parkOn('NEW'); // never attempted
+  const plan = P.planSweep([...blocked, fresh], BUDGET);
+  expect(plan[0]!.target).toEqual({ project: 'NEW' }); // never-attempted goes first
+  expect(plan.map((g) => g.target)).toContainEqual({ project: 'NEW' });
+});
+
+test('every held item gets a turn rather than the same ones every message', () => {
+  const targets = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+  let held = targets.map((t) => parkOn(t));
+  const seen = new Set<string>();
+  // two sweeps is ceil(7 targets / 5) rounded up, so everything must have been reached by then
+  for (let round = 0; round < 2; round++) {
+    const plan = P.planSweep(held, BUDGET);
+    const now = Date.now() + round * 1000;
+    held = held.map((item) => {
+      const attempted = plan.some((g) => g.items.some((i) => i.parkId === item.parkId));
+      if (attempted) seen.add(item.target.projectRef!);
+      return attempted ? attemptedAgo(item, -(now - Date.now())) : item;
+    });
+  }
+  expect([...seen].sort()).toEqual(targets);
+});
+
+test('an item with no resolvable target never enters the plan', () => {
+  const plan = P.planSweep([parkOn(null), parkOn(null), parkOn('REAL')], BUDGET);
+  expect(plan).toHaveLength(1);
+  expect(plan[0]!.target).toEqual({ project: 'REAL' });
+});
+
+test('a task target and a project target are different targets', () => {
+  const byTask = parkOn(null, { taskRef: 'ALPHA-1' });
+  const plan = P.planSweep([byTask, parkOn('ALPHA')], BUDGET);
+  expect(plan).toHaveLength(2);
+  expect(plan.map((g) => g.target)).toContainEqual({ taskRef: 'ALPHA-1' });
+});
+
+test('recording an attempt is what lets somebody else go next', () => {
+  const item = parkOn('ALPHA');
+  expect(P.readParked(item.parkId)?.lastAttemptAt).toBeNull();
+  P.markAttempted([item.parkId]);
+  expect(P.readParked(item.parkId)?.lastAttemptAt).not.toBeNull();
+  // and it never resurrects something already filed
+  const done = parkOn('BETA');
+  P.markPromoted(done.parkId, 'MRF-FB-1', 'Raj');
+  P.markAttempted([done.parkId]);
+  expect(P.readParked(done.parkId)?.status).toBe('promoted');
+});
+
+// ---------- the digest has to fit in a slack message ----------
+test('a big backlog names the oldest, counts the rest, and stays sendable', () => {
+  const many = Array.from({ length: 200 }, (_, i) => ({
+    ...P.parkReport(input({ ts: `17547${String(i).padStart(5, '0')}` })),
+    createdAt: new Date(Date.now() - (200 - i) * 3_600_000).toISOString(),
+    rawMessage: `report number ${i} `.repeat(20),
+  }));
+  const { text, listed, omitted } = P.buildEscalationDigest(many, Date.now());
+  expect(listed).toBe(P.MAX_DIGEST_LINES);
+  expect(omitted).toBe(200 - P.MAX_DIGEST_LINES);
+  expect(text.length).toBeLessThan(40_000); // slack's hard limit, which 200 lines blew past
+  expect(text).toContain('200 reports are still held and NOT filed');
+  expect(text).toContain(`and ${omitted} more held reports not listed here`);
+  expect(text).toContain('none of this is on a board');
+  expect(text).not.toMatch(/-FB-\d+/);
+  expect(text).toContain('report number 0'); // the oldest is named, not an arbitrary 30
+});
+
+test('a small backlog is listed in full with no count line', () => {
+  const { text, listed, omitted } = P.buildEscalationDigest([P.parkReport(input())], Date.now());
+  expect(listed).toBe(1);
+  expect(omitted).toBe(0);
+  expect(text).toContain('a report is still held and NOT filed');
+  expect(text).not.toContain('not listed here');
+});
+
+test('the digest ages items against the clock it was given', () => {
+  const item = aged(input(), 3 * HOUR);
+  const { text } = P.buildEscalationDigest([item], Date.now() + 25 * HOUR);
+  expect(text).toContain('held 28h'); // not 3h: the injected clock is what counts
 });

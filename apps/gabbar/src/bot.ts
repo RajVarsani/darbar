@@ -4,7 +4,7 @@
 import { App } from '@slack/bolt';
 import path from 'node:path';
 import { config } from '@darbar/core';
-import { runAgent, type AgentContext } from './agent';
+import { escalateStaleParked, runAgent, type AgentContext } from './agent';
 import { NO_ATTACHMENTS, prepareAttachments, safeName, type Attachments, type Upload } from './media';
 
 if (!config.slackBotToken || !config.slackAppToken) {
@@ -280,6 +280,22 @@ app.message(async (args: any) => {
 });
 app.event('app_mention', async (args: any) => { await safeHandle(args); });
 
+// Held reports must surface on a clock rather than on traffic: a report from someone who never
+// messages again, in a quiet workspace, would otherwise sit in data/parked forever. Runs shortly
+// after boot too, so a restart re-checks rather than resetting the wait.
+const ESCALATION_INTERVAL_MS = 60 * 60 * 1000;
+const ESCALATION_BOOT_DELAY_MS = 60 * 1000;
+async function escalationTick() {
+  try {
+    const n = await escalateStaleParked();
+    if (n) console.log(`gabbar: told the owner about ${n} held report(s)`);
+  } catch (e) {
+    console.error('gabbar: escalation tick failed:', e);
+  }
+}
+
 SELF_USER = ((await app.client.auth.test()) as { user_id?: string }).user_id ?? '';
 await app.start();
+setTimeout(escalationTick, ESCALATION_BOOT_DELAY_MS);
+setInterval(escalationTick, ESCALATION_INTERVAL_MS);
 console.log(`gabbar (agent) connected via socket mode as ${SELF_USER}, model ${config.gabbarModel}`);

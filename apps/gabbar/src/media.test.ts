@@ -34,6 +34,7 @@ const SHOT = path.join(RIG, 'shot.png');
 const EMPTY = path.join(RIG, 'empty.png');
 const GARBAGE = path.join(RIG, 'garbage.png');
 const NOT_A_VIDEO = path.join(RIG, 'broken.mov');
+const TINY = path.join(RIG, 'tiny.mp4'); // 1s 320x240, so a 13-video batch stays fast
 const JUMP_AT = 7;
 
 async function sh(cmd: string[]): Promise<void> {
@@ -95,6 +96,9 @@ beforeAll(async () => {
   await Bun.write(EMPTY, '');
   await Bun.write(GARBAGE, 'this is not image data at all, it just ends in .png');
   await Bun.write(NOT_A_VIDEO, 'this is not a video, whatever slack said it was');
+  await sh(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x888888:s=320x240:r=10:d=1',
+    '-vf', "drawbox=x='20+40*floor(mod(t*4\\,4))':y=100:w=40:h=40:color=0x111111:t=fill",
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', TINY]);
 });
 afterAll(() => rmSync(RIG, { recursive: true, force: true }));
 
@@ -272,4 +276,40 @@ console.log(JSON.stringify({ hasFfmpeg, inventory: a.inventory, blocks: a.blocks
   expect(res.items[0]?.readable).toBe(false);
   expect(res.items[0]?.note).toContain('ffmpeg is not installed');
   expect(res.inventory).toContain('NOT READABLE');
+});
+
+// ---------- budgets are caps, not suggestions ----------
+// The per-video floor used to defeat the total: five recordings in one message bought 15 frames
+// and ten bought 30, so the bound on context was decorative. Anything the balance cannot pay for
+// has to be reported as unread, because quietly skipping it is the lie this file exists to stop.
+test('five recordings in one message stay inside the total frame budget', async () => {
+  const many = Array.from({ length: 5 }, (_, i) => upload(TINY, `rec${i}.mp4`, 'video/mp4'));
+  const a = await prepareAttachments(many, OUT, 'http://localhost:4899');
+  const total = a.items.reduce((n, i) => n + i.frames.length, 0);
+  expect(a.items).toHaveLength(5);
+  expect(total).toBeLessThanOrEqual(12);
+  expect(imageBlocks(a)).toHaveLength(total);
+  expect(a.items.every((i) => i.readable)).toBe(true);
+  expectInventoryMatchesBlocks(a);
+});
+
+test('more recordings than the budget can pay for are reported as unread, not skipped', async () => {
+  const many = Array.from({ length: 13 }, (_, i) => upload(TINY, `rec${i}.mp4`, 'video/mp4'));
+  const a = await prepareAttachments(many, OUT, 'http://localhost:4899');
+  const total = a.items.reduce((n, i) => n + i.frames.length, 0);
+  expect(total).toBeLessThanOrEqual(12);
+  const unread = a.items.filter((i) => !i.readable);
+  expect(unread.length).toBeGreaterThan(0);
+  expect(unread[0]!.note).toContain('too many recordings');
+  expect(lines(a).filter((l) => l.includes('NOT READABLE'))).toHaveLength(unread.length);
+  expectInventoryMatchesBlocks(a);
+});
+
+test('images are capped too, and the ones past the cap say so', async () => {
+  const many = Array.from({ length: 9 }, (_, i) => upload(SHOT, `shot${i}.png`, 'image/png'));
+  const a = await prepareAttachments(many, OUT, 'http://localhost:4899');
+  expect(imageBlocks(a)).toHaveLength(8);
+  expect(a.items.filter((i) => i.readable)).toHaveLength(8);
+  expect(a.items[8]!.note).toContain('more than 8 images');
+  expectInventoryMatchesBlocks(a);
 });

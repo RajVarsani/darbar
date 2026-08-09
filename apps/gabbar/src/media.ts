@@ -54,6 +54,7 @@ export const hasFfmpeg = Boolean(FFMPEG && FFPROBE);
 const FRAME_WIDTH = 1280;
 const MAX_FRAMES_PER_VIDEO = 8;
 const MAX_FRAMES_TOTAL = 12;
+const MAX_IMAGES = 8;
 const MIN_FRAME_GAP_S = 0.6;
 const SCAN_FPS = 8;
 // past this length the scan pass is not worth its wall time; fall back to even spacing
@@ -325,7 +326,13 @@ export async function prepareAttachments(uploads: Upload[], outDir: string, base
   } catch { /* the per-file failure paths below report it honestly */ }
   const kinds = uploads.map((u) => classify(u.name, u.mimetype));
   const videos = kinds.filter((k) => k === 'video').length;
-  const budget = videos ? Math.max(3, Math.min(MAX_FRAMES_PER_VIDEO, Math.floor(MAX_FRAMES_TOTAL / videos))) : 0;
+  // MAX_FRAMES_TOTAL has to be a real cap, so it is spent from a running balance rather than
+  // guessed per video. The old max(3, ...) floor defeated it: five recordings in one message
+  // bought 15 frames and ten bought 30. Anything the balance cannot pay for is reported as
+  // unread rather than quietly skipped.
+  const perVideo = videos ? Math.min(MAX_FRAMES_PER_VIDEO, Math.max(1, Math.floor(MAX_FRAMES_TOTAL / videos))) : 0;
+  let framesLeft = MAX_FRAMES_TOTAL;
+  let imagesLeft = MAX_IMAGES;
 
   const items: MediaItem[] = [];
   const blocks: VisionBlock[] = [];
@@ -337,13 +344,22 @@ export async function prepareAttachments(uploads: Upload[], outDir: string, base
     const base = { url: u.url, path: u.path, name: u.name, kind };
 
     if (kind === 'image') {
+      if (imagesLeft <= 0) {
+        const why = `more than ${MAX_IMAGES} images were attached, and this one was not read`;
+        items.push({ ...base, frames: [], readable: false, note: why });
+        lines.push(`image "${shown}" (${u.url}) — NOT READABLE: ${why}`);
+        continue;
+      }
       const fitted = await fitImage(u, outDir);
       const enc = 'error' in fitted ? { error: fitted.error } : await encodeImage(fitted.path);
       if ('error' in enc) {
+        // the slot is spent on what the model can SEE: an unreadable image must not cost a
+        // readable one its place
         items.push({ ...base, frames: [], readable: false, note: enc.error });
         lines.push(`image "${shown}" (${u.url}) — NOT READABLE: ${enc.error}`);
         continue;
       }
+      imagesLeft -= 1;
       items.push({ ...base, frames: [], readable: true, note: null });
       blocks.push({ type: 'text', text: `attached image "${shown}" (${u.url}):` }, enc.block);
       lines.push(`image "${shown}" (${u.url}) — shown to you below, describe what you can see`);
@@ -351,7 +367,15 @@ export async function prepareAttachments(uploads: Upload[], outDir: string, base
     }
 
     if (kind === 'video') {
-      const read = await readVideo({ ...u, storedName: u.storedName }, outDir, baseUrl, budget);
+      const allowance = Math.min(perVideo, framesLeft);
+      if (allowance <= 0) {
+        const why = `too many recordings were attached to read them all, and this one was not read`;
+        items.push({ ...base, frames: [], readable: false, note: why });
+        lines.push(`screen recording "${shown}" (${u.url}) — NOT READABLE: ${why}`);
+        continue;
+      }
+      const read = await readVideo({ ...u, storedName: u.storedName }, outDir, baseUrl, allowance);
+      framesLeft -= read.frames.length;
       if (read.frames.length === 0) {
         const why = read.note ?? 'no frames could be extracted';
         items.push({ ...base, frames: [], readable: false, note: why });

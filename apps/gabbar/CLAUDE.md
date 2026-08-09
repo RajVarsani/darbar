@@ -51,9 +51,58 @@ It becomes real feedback two ways, both through the same gate:
   the same honesty failure as dropping it
 - `promote_parked` (owner-only, with `list_parked`), attributed to the original reporter
 
+### Why it is held decides what happens next
+
+`cause` is recorded on every held item, because a stakeholder gap and a darbar outage look
+identical at the point of refusal and need opposite handling:
+
+| cause | what it means | ping at park | retried | first escalation |
+|---|---|---|---|---|
+| `stakeholder_gap` | project resolved, sender is not on the list | yes, once | on their next message | 24h |
+| `outage` | darbar could not answer, so nothing was ever checked | **no** | on their next message | 1h |
+| `bad_reference` | no project resolves for it | no | never (cannot) | 1h |
+
+Telling those apart needed a transport fix, not a parking fix: `mc()` never checked `r.ok`, so a
+503 from a restarting server came back looking exactly like a legitimate 404. `fetchDarbar`
+now separates "darbar answered" from "darbar could not answer", and the gate reads that
+distinction. **Unreachable still refuses.** Failing closed is unchanged; only the recorded reason
+and what happens afterwards differ.
+
+Consequences worth knowing: an outage no longer DMs the owner once per refused message, and a
+report filed by a genuine stakeholder during an outage is held and then filed on their next
+message.
+
+### The retry budget rotates
+
+The sweep's budget is spent on DISTINCT TARGETS, not items, and the queue is ordered
+never-attempted first then least-recently-attempted. Both halves are load bearing.
+
+The class being avoided is "cannot be promoted right now", which is wider than it first looks: a
+`stakeholder_gap` item has a perfectly resolvable target and will keep being refused until a
+human acts. Filtering only on "has a target" therefore fixed one shape and left the rest, and
+with age ordering the same items hold the budget on every message while everything behind them
+is never reached. Rotation is what makes the guarantee: every held item gets a turn within
+ceil(distinct targets / budget) messages. Raising the budget does not fix it.
+
+Grouping by target is why five reports on one project cost one gate call rather than five, and
+why everything still held is summarised in ONE prompt line instead of one line per item.
+
+### Nothing sits here unseen, and nothing is deleted
+
+Held reports escalate to the owner on a clock: a digest DM, driven by a timer in `bot.ts` rather
+than by traffic, so a report from someone who never messages again still surfaces. Sending is
+what marks an item escalated, so a failed DM leaves it due rather than quiet for a day.
+
+**Held items never expire.** Deleting a report because nobody acted on it trades a visibility
+problem for a data-loss problem, which is the thing this whole mechanism exists to prevent.
+Escalation keeps the item and raises the pressure instead.
+
 **Orchestrator: read `data/parked/` during triage.** Held items are deliberately absent
 from the API and the board, so nothing else will surface them. Surfacing them there is a
-follow-up that needs `apps/server/src/api.ts` + the board.
+follow-up that needs `apps/server/src/api.ts` + the board (DAR-194). `summarize()` in
+`parked.ts` is the intended contract for it: one shaped record per held item carrying `cause`,
+`heldSince`, `escalatedAt` and `filed:false`. Build the board lane on that rather than reading
+the JSON shape directly, and there is no second source of truth to drift.
 
 ## Judgment rules that came from real failures
 - History is context, never a backlog: act only on the current message (the agent once
