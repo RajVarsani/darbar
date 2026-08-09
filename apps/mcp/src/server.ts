@@ -41,12 +41,13 @@ server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only t
   },
   (args) => call('/tasks', 'POST', args));
 
-server.tool('update_task', 'Update a task row: status, blocker, notes, or append a commit hash. Moving a dev task to in_review auto-spawns the project pipeline review lanes; done is rejected (409) while review children are open; closing the last review child auto-advances the parent when the project has autoAdvance on.',
+server.tool('update_task', 'Update a task row: status, blocker, notes, dispatched, or append a commit hash. Moving a dev task to in_review auto-spawns the project pipeline review lanes; done is rejected (409) while review children are open; closing the last review child auto-advances the parent when the project has autoAdvance on.',
   {
     taskRef: z.string().describe('short id like TST-1'),
     status: STATUS.optional(),
     assignee: z.string().optional(), blocker: z.string().nullable().optional(),
     notes: z.string().optional(), addCommit: z.string().optional(), type: TYPE.optional(),
+    dispatched: z.boolean().optional().describe('true the moment you hand this task to an agent. The server stamps the time and the board shows the card as dispatched with its age, so work in flight stops reading as idle. The agent PATCHing its own status clears it. Send false only to write off a dispatch that never started'),
     lanes: z.array(z.string()).optional().describe('re-pick review lanes (code-review for code, qa for behavior, design-qa for UI; [] = none); only before the task enters in_review — frozen after'),
   },
   ({ taskRef, ...rest }) => call(`/tasks/${taskRef}`, 'PATCH', rest));

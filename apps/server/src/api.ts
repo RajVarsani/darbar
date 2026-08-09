@@ -766,6 +766,7 @@ api.post('/tasks', async (c) => {
     commits: [],
     blocker: null,
     notes: str(b.notes) ?? '',
+    dispatchedAt: null, // filing a task is not dispatching it; only the dispatch PATCH stamps this
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -816,6 +817,15 @@ api.patch('/tasks/:ref', async (c) => {
     const v = strOrNull(b[k]); if (v !== undefined) set[k] = v;
   }
   if (b.assigneeType === 'human' || b.assigneeType === 'agent') set.assigneeType = b.assigneeType;
+  // dispatch: a boolean verb, never a caller-supplied time. The server owns the clock so the stamp
+  // and the age the board reads off it cannot disagree, and a garbage value is a 400 rather than an
+  // Invalid Date on the card. false clears (dispatch abandoned, dead builder written off).
+  if (b.dispatched !== undefined) {
+    if (typeof b.dispatched !== 'boolean') {
+      return c.json({ error: 'dispatched must be true (stamp now) or false (clear); the server sets the time' }, 400);
+    }
+    set.dispatchedAt = b.dispatched ? new Date() : null;
+  }
   // lanes freeze once the review flow starts: reviews already spawned (or closed) from the old selection
   if (lanesShapeBad(b.lanes)) return c.json({ error: LANES_SHAPE_ERROR }, 400);
   const lanes = lanesArr(b.lanes);
@@ -832,6 +842,12 @@ api.patch('/tasks/:ref', async (c) => {
       if (laneErr) return c.json({ error: laneErr }, 400);
     }
     set.lanes = lanes;
+  }
+  // any status change is the assignee reporting for itself, which retires the dispatch fact: the row
+  // has moved on, and a stamp left behind would claim a fresh hand-off if the task ever came back to
+  // todo. An explicit `dispatched` in the same body wins — that is a re-dispatch, not a leftover.
+  if (set.status !== undefined && set.status !== t.status && t.dispatchedAt && b.dispatched === undefined) {
+    set.dispatchedAt = null;
   }
   const addCommit = str(b.addCommit);
   if (Object.keys(set).length === 0 && !addCommit) return c.json(t); // nothing to do, no noise event

@@ -182,6 +182,12 @@ export type Task = {
   commits: string[];
   blocker: string | null;
   notes: string;
+  // when the orchestrator handed this task to an agent. Dispatched and started are different facts:
+  // only the agent can report the second, so this one is stamped server-side on the dispatch call and
+  // cleared by any status change, i.e. the agent's own report always supersedes it. The board renders
+  // it WITH ITS AGE, so a dispatch that never turns into in_progress reads as stale rather than as
+  // work in flight — the field can go unset (nobody dispatched) but it cannot quietly go wrong.
+  dispatchedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
