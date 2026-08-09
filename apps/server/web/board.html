@@ -258,6 +258,9 @@
   .dempty{display:grid;place-items:center;text-align:center;padding:64px 24px;color:var(--ink-soft);font-family:var(--mono);font-size:12.5px}
   .dempty .big{width:44px;height:44px;border:2px solid var(--ink);background:var(--lime);display:grid;place-items:center;margin:0 auto 14px}
   .dtitle{font-family:var(--mono);font-size:17px;font-weight:700;margin:10px 0 2px;text-wrap:balance;line-height:1.35}
+  /* identity badges live at the top of the body, not in .dhead — the header carries id/state/controls only */
+  .dbadges{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px}
+  .dbadges+.dtitle{margin-top:2px}
   .dgrid{display:grid;grid-template-columns:100px 1fr;row-gap:9px;column-gap:12px;margin:14px 0;font-size:13px}
   .dgrid .k{font-family:var(--mono);font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
     color:var(--ink-soft);padding-top:2px}
@@ -294,9 +297,19 @@
     padding:8px 12px;border-bottom:1.5px solid var(--hair)}
   .crow:last-child{border-bottom:none}
   .crow .crole{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .slk{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;padding:1px 5px;white-space:nowrap;
-    border:1.5px solid var(--green-deep);color:var(--green-deep);background:var(--green-pale)}
-  .slk.off{border-color:var(--ink-faint);color:var(--ink-faint);background:var(--beige-2)}
+  /* one mini badge for every "state of this row" marker in the panel: slack link, agent kind */
+  .badge{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;padding:1px 5px;white-space:nowrap;
+    flex:none;border:1.5px solid var(--green-deep);color:var(--green-deep);background:var(--green-pale)}
+  .badge.off{border-color:var(--ink-faint);color:var(--ink-faint);background:var(--beige-2)}
+  /* agent rows carry prose (brief, trigger), so they wrap onto their own full-width lines */
+  .arow{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 10px;align-items:center;
+    padding:9px 12px;border-bottom:1.5px solid var(--hair)}
+  .arow:last-child{border-bottom:none}
+  .arow.unreg{opacity:.5} /* present but unclaimed — visible, never mistaken for the registry */
+  .ameta{display:flex;align-items:center;gap:8px;min-width:0;font-size:12px;color:var(--ink-soft)}
+  .ameta .alane{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .abrief{grid-column:1/-1;font-size:12px;line-height:1.45;color:var(--ink-soft)}
+  .atrig{grid-column:1/-1;font-family:var(--mono);font-size:10.5px;line-height:1.4;color:var(--ink-faint)}
   .quote.mono{font-family:var(--mono);font-size:11.5px;line-height:1.55}
   .repolist{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 
@@ -467,15 +480,16 @@ const laneChips = t => !Array.isArray(t.lanes) ? '' : (t.lanes.length
   ? t.lanes.map(k=>`<span class="typ typ-lane" title="review lane on in_review">${esc(laneLabel(k))}</span>`).join('')
   : '<span class="typ typ-lane" title="explicitly no review lanes">no reviews</span>');
 
-// charter preview: first paragraph, cut on a word boundary. The ellipsis is derived from what
-// was actually dropped, so a charter that fits exactly never loses a character to the marker.
-const CHARTER_CAP = 400;
-function charterPreview(charter){
-  const full = String(charter||'').trim();
+// prose preview: first paragraph, cut on a word boundary. The ellipsis is derived from what
+// was actually dropped, so text that fits exactly never loses a character to the marker.
+// Shared by the charter block and the agent briefs — one truncator, two caps.
+const CHARTER_CAP = 400, BRIEF_CAP = 165;
+function textPreview(src, cap = CHARTER_CAP){
+  const full = String(src||'').trim();
   const para = full.split(/\n\s*\n/)[0].trim();
   let text = para, clipped = para.length < full.length;
-  if (para.length > CHARTER_CAP){
-    const cut = para.slice(0, CHARTER_CAP);
+  if (para.length > cap){
+    const cut = para.slice(0, cap);
     const sp = cut.lastIndexOf(' ');
     text = (sp > 0 ? cut.slice(0, sp) : cut).replace(/[\s,;:.–—-]+$/,'');
     clipped = true;
@@ -522,14 +536,51 @@ function renderTopNav(){
   }).join('');
 }
 
-// agents never mix with stakeholders: lane managers + orchestrator + agents seen on tasks
+// agents never mix with stakeholders. project.agents is the registry and the source of truth,
+// so a helper that has never touched a task still shows. Anything working on the board but
+// missing from the registry is kept as registered:false rather than dropped — nothing hides.
+// One roster feeds both the top-bar stack and the panel, so the two can never disagree.
 function agentRoster(){
+  // one manager can own several lanes — collect every label, don't let the last one win
+  const laneOf = new Map();
+  for (const l of pipeline()?.reviews ?? []){
+    if (!l?.manager || !l.label) continue;
+    if (!laneOf.has(l.manager)) laneOf.set(l.manager, []);
+    laneOf.get(l.manager).push(l.label);
+  }
   const out = [], seen = new Set();
-  const add = (name, role) => { if (name && !seen.has(name)){ seen.add(name); out.push({name, role}); } };
-  for (const l of pipeline()?.reviews ?? []) add(l.manager, `runs ${l.label} lane`);
-  add('orchestrator', 'project orchestrator');
-  for (const t of tasks()) if (t.assigneeType==='agent' && t.assignee) add(t.assignee, 'seen on tasks');
+  const lanesOf = n => laneOf.get(n) ?? [];
+  const laneLabel = ls => ls.join(' + ');
+  for (const a of state.data?.project?.agents ?? []){
+    if (!a?.name || seen.has(a.name)) continue;
+    seen.add(a.name);
+    const kind = a.kind || 'agent', ls = lanesOf(a.name);
+    out.push({name:a.name, kind, brief:a.brief||'', trigger:a.trigger||'', lane:laneLabel(ls), laneCount:ls.length, registered:true,
+      role: ls.length ? `${kind} · runs ${laneLabel(ls)} lane${ls.length>1?'s':''}` : kind});
+  }
+  // observed-but-unregistered: a pipeline lane manager or a task assignee the registry never declared
+  const observe = name => { if (!name || seen.has(name)) return; seen.add(name);
+    const ls = lanesOf(name);
+    out.push({name, kind:'', brief:'', trigger:'', lane:laneLabel(ls), laneCount:ls.length, registered:false,
+      role:'not in the registry · seen on this project'}); };
+  for (const m of laneOf.keys()) observe(m);
+  for (const t of tasks()) if (t.assigneeType==='agent' && t.assignee) observe(t.assignee);
   return out;
+}
+
+// one row shape for both groups — the unregistered ones only fade and swap the badge, so the
+// difference reads as provenance rather than as two unrelated widgets
+function agentRow(a){
+  const bp = a.brief ? textPreview(a.brief, BRIEF_CAP) : null;
+  return `<div class="arow${a.registered?'':' unreg'}">
+    <span class="who agent"><span class="a">${esc(initials(a.name))}</span>${esc(a.name)}</span>
+    <span class="ameta">${a.registered
+      ? `<span class="badge" title="registry kind">${esc(a.kind)}</span>`
+      : '<span class="badge off" title="works here but project.agents never declared it">NOT REGISTERED</span>'}
+      ${a.lane?`<span class="alane">runs ${esc(a.lane)} lane${a.laneCount>1?'s':''}</span>`:''}</span>
+    ${bp?`<span class="abrief" title="${esc(a.brief)}">${esc(bp.text)}${bp.marker}</span>`:''}
+    ${a.trigger?`<span class="atrig">on: ${esc(a.trigger)}</span>`:''}
+  </div>`;
 }
 
 const PPL_CAP = 4; // a growing registry must never push into the search bar
@@ -557,7 +608,12 @@ function renderPeople(){
   el.title = ['Project config', say('humans',ppl), say('agents',bots)].filter(Boolean).join(' · ');
 }
 
+// stats are board furniture: the other views want that vertical space for their own rows.
+// Gated on state.view so an SSE re-render can never flash them back onto List/Feedback/Activity/Lane.
 function renderStats(){
+  const el = $('stats');
+  if (state.view !== 'board'){ el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
   const ts = tasks().filter(t=>t.type!=='review');
   const done = ts.filter(t=>t.status==='done').length;
   const reviews = tasks().filter(t=>t.type==='review');
@@ -567,9 +623,9 @@ function renderStats(){
   const humans = new Set(fbs().filter(f=>f.authorType==='human').map(f=>f.author));
   const agents = new Set(fbs().filter(f=>f.authorType==='agent').map(f=>f.author));
   const days=[...Array(7)].map((_,i)=>{const d=new Date();d.setDate(d.getDate()-(6-i));return d.toDateString();});
-  const per=days.map(ds=>(state.data.events||[]).filter(e=>new Date(e.at).toDateString()===ds).length);
+  const per=days.map(ds=>(state.data?.events||[]).filter(e=>new Date(e.at).toDateString()===ds).length);
   const mx=Math.max(...per,1);
-  $('stats').innerHTML = `
+  el.innerHTML = `
     <div class="stat"><div class="lbl">Tasks completed</div><div class="val">${done}<span class="of"> / ${ts.length}</span></div>
       <div class="progress"><i style="width:${ts.length?Math.round(done/ts.length*100):0}%"></i></div></div>
     <div class="stat"><div class="lbl">Feedback · needs triage</div><div class="val">${pend}</div>
@@ -749,24 +805,25 @@ function renderDrawer(){
     const stake = p.stakeholders || [];
     const lanes = pipeline()?.reviews ?? [];
     const agents = agentRoster();
+    const reg = agents.filter(a=>a.registered), unreg = agents.filter(a=>!a.registered);
     const charter = p.charter || '';
-    const cp = charterPreview(charter);
+    const cp = textPreview(charter);
     dr.innerHTML = `
-      <div class="dhead">${backBtn}<span class="chip">${esc(p.prefix)}</span><span class="id">PROJECT CONFIG</span><span class="grow"></span>${closeBtn}</div>
+      <div class="dhead">${backBtn}<span class="id">PROJECT CONFIG</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
+        <div class="dbadges"><span class="chip">${esc(p.prefix)}</span></div>
         <div class="dtitle">${esc(p.name)}</div>
         <div class="note">read-only · humans and agents never share a list</div>
         <div class="dsec"><h3>Stakeholders · ${stake.length} human${stake.length===1?'':'s'}</h3>
           <div class="mini">${stake.map(s=>`<div class="crow">
             <span class="who human"><span class="a">${esc(initials(s.name))}</span>${esc(s.name)}</span>
             <span class="crole">${esc(s.role||'stakeholder')}</span>
-            ${s.slackUserId?'<span class="slk" title="linked to Slack: gets thread replies">SLACK ✓</span>':'<span class="slk off" title="no Slack link">NO SLACK</span>'}
+            ${s.slackUserId?'<span class="badge" title="linked to Slack: gets thread replies">SLACK ✓</span>':'<span class="badge off" title="no Slack link">NO SLACK</span>'}
           </div>`).join('') || '<div class="kempty">none configured</div>'}</div></div>
-        <div class="dsec"><h3>Agents · ${agents.length}</h3>
-          <div class="mini">${agents.map(a=>`<div class="crow">
-            <span class="who agent"><span class="a">${esc(initials(a.name))}</span>${esc(a.name)}</span>
-            <span class="crole">${esc(a.role)}</span>
-          </div>`).join('') || '<div class="kempty">none yet</div>'}</div></div>
+        <div class="dsec"><h3>Agents · ${reg.length} registered</h3>
+          <div class="mini">${reg.map(agentRow).join('') || '<div class="kempty">registry is empty</div>'}</div>
+          ${unreg.length?`<div class="note">${unreg.length}${reg.length?' more':''} agent${unreg.length===1?'':'s'} seen on this project but not in the registry</div>
+          <div class="mini">${unreg.map(agentRow).join('')}</div>`:''}</div>
         <div class="dsec"><h3>Pipeline · ${lanes.length} lane${lanes.length===1?'':'s'}</h3>
           ${lanes.length?`<div class="mini">${lanes.map(l=>`<div class="crow">
             <span style="font-weight:600">${esc(l.label)}</span>
@@ -793,11 +850,10 @@ function renderDrawer(){
     const laneInfo = t.type==='review' ? (pipeline()?.reviews??[]).find(l=>l.lane===t.lane) : null;
     dr.innerHTML = `
       <div class="dhead">${backBtn}<span class="id">${esc(t.shortId)}</span>
-        <span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span>
-        ${laneChips(t)}
         <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
         ${parent?`<div class="note">${t.type==='review'?'review lane of':'subtask of'} <a href="#" data-go-task="${esc(parent.shortId)}">${esc(parent.shortId)} · ${esc(parent.title)}</a></div>`:''}
+        <div class="dbadges"><span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span></div>
         <div class="dtitle">${esc(t.title)}</div>
         ${t.description?`<p style="color:var(--ink-soft);margin-top:6px">${esc(t.description)}</p>`:''}
         <div class="dgrid">
@@ -837,7 +893,7 @@ function renderDrawer(){
     dr.innerHTML = `
       <div class="dhead">${backBtn}<span class="id">${esc(f.shortId)}</span><span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span><span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+        <div class="dbadges">
           <span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span>
           <span class="typ typ-${esc(f.type)}">${esc(f.type)}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span>
@@ -959,7 +1015,7 @@ window.addEventListener('hashchange', ()=>{
 function setView(v, lane=null){
   state.view = v; state.lane = lane;
   document.body.dataset.view = v;
-  renderTopNav(); renderContent(); renderDrawer();
+  renderTopNav(); renderStats(); renderContent(); renderDrawer();
 }
 
 // ---------- drag & drop (status moves; server enforces gates, tunnel viewers get 403) ----------
