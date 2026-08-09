@@ -185,7 +185,14 @@ gated.
 | `origin`, `commits`, `shortId`, `parentTaskRef`/`parentTaskId`, `project`/`projectId` on `PATCH /tasks` | 400 `not settable on an existing task: origin — set at create only (POST /tasks {"origin": …})`, one clause per field sent |
 | prefix with a digit on `POST /projects` | 400 `name (string) and prefix (2-6 letters) required` |
 | duplicate project prefix | 409 |
-| malformed `stakeholders[].slackUserId` on `POST`/`PATCH /projects` | 400 naming the index and the `U`/`W` shape; on a POST nothing is created |
+| malformed `stakeholders[].slackUserId` on `POST`/`PATCH /projects` | 400 naming the index and the `U`/`W` shape; on a POST nothing is created. Through a granular route the same 400 names the person instead: `stakeholder "Tanisha": slackUserId must be a slack USER id when present ...` |
+| a granular config PATCH/DELETE naming an agent, lane or stakeholder that is not there | 404 `agent "staff-enginer" is not registered — registry holds: staff-engineer, qa-lead, orchestrator`, and the same shape for `lane "x" is not configured — pipeline holds: ...` and `stakeholder "X" is not on this project — listed: ...`. Never an upsert |
+| a granular POST of a name already taken, case and spacing folded | 409 naming the existing entry and the PATCH that edits it: `agent "staff-engineer" is already registered (you sent "Staff-Engineer", ...)` |
+| granular PATCH with no editable field | 400 `nothing to update (kind, brief, trigger, rename)`, `(label, manager, rename)`, `(slackUserId, role, rename)`, `(autoAdvance) — lanes are edited one at a time under /pipeline/lanes`, `(prefix, target, public)` |
+| removing or renaming a lane open tasks select | 409 `removing lane "qa" is invisible to open work: 1 task(s) select it explicitly (DAR-7) and would be left with no configured lane, so at in_review they skip review entirely and (with autoAdvance on) go straight to DONE UNREVIEWED` — or, for the last lane, `... take the default of all lanes (DAR-7) and this removes the last one, so at in_review they spawn nothing, log nothing and STALL in in_review`. `?force=true` (DELETE) or `"force": true` (PATCH) repeats it and returns the same sentences as warnings |
+| `enabled` in the body of `PATCH /projects/:ref/proxy` | 400 `enabled is not editable here — use PATCH /api/projects/:ref/proxy/enabled, which states what becomes reachable and requires the prefix as confirmation` |
+| `PATCH /projects/:ref/proxy/enabled {"enabled":true}` with no `confirm` | 400 `enabling this share needs confirmation. <url> becomes reachable by ANYONE holding the link ... Repeat with "confirm":"<prefix>"`. Nothing is published |
+| a granular proxy or pipeline route on a project that has neither configured | 404 `project has no shared surface configured — declare one with PATCH /api/projects/:ref {proxy} (it starts disabled), then edit it here` / `project has no review pipeline — add the first lane with POST /api/projects/:ref/pipeline/lanes` |
 | `resolvedTaskRef` naming a task that does not exist | 404 `task DAR-999 not found — resolvedTaskRef is the link the ship sweep follows ... so an unknown id would leave DAR-FB-3 promoted in name only` |
 | `resolved`/`rejected`/`needs_clarification` with no `resolution` in the body and none on the row | 400 `DAR-FB-3 → rejected replies to <author> in their own thread and that reply IS the resolution text, so "resolution" is required: ...` |
 | `limit` outside 1 to 1000, or a non-integer `limit`/`offset`, on `GET /tasks` | 400 `limit must be a whole number between 1 and 1000 (got "1001")`. Never clamped |
@@ -220,7 +227,9 @@ rejected field looks like a success. Read back what you wrote.
 - `PATCH /feedback/:shortId`: `status`, `resolution`, `type`, `resolvedTaskRef`.
   Promotion from `pending` with no explicit status auto-sets `triaged`.
 - `PATCH /projects/:ref`: `charter`, `slackChannel`, `stakeholders`, `pipeline`, `agents`,
-  `proxy`. Each replaces its value wholesale; read, edit, send whole. A body with none of
+  `proxy`. Each replaces its value wholesale; read, edit, send whole. Use it to DECLARE a
+  surface, never to change one entry: a one-element `agents` array deletes the rest and
+  returns 200. Section 7b is the per-entry door. A body with none of
   them 400s `nothing to update (charter, slackChannel, stakeholders, pipeline, agents,
   proxy)`, which is also how you check the list.
 - `POST /projects`: `name`, `prefix`, `repos`, `charter`, `stakeholders`, `slackChannel`,
@@ -232,7 +241,68 @@ rejected field looks like a success. Read back what you wrote.
 MCP tools cover most of this but not all: `update_task` has no `title`, `description`,
 `lane` or `assigneeType`; `create_task` has no `notes` or `lane`; there is no
 create-project tool; `resolve_feedback` cannot set `pending` (only Gabbar's thread reopen
-does). Use curl for those.
+does); no tool rewrites a charter (`append_to_charter` only adds a line) and there is no
+`set_stakeholders`, so a bulk stakeholder list is the POST at init or this PATCH. Use curl
+for those.
+
+## 7b. Editing config one entry at a time
+
+One route per intent, each sending only what changes. The server reads the current value,
+merges, and runs the result through the same validators as the wholesale PATCH above, so
+these cannot produce a config that door would refuse; the 400s and the event log are
+identical. Addressing is edit-only, and every unknown name, taken name, gate and
+confirmation string is in section 6. When each door is the right one is the skill's B4.
+
+```bash
+B=localhost:4899/api/projects/DAR
+H='content-type: application/json'
+
+# stakeholders — access control: the slack id is what Gabbar's feedback gate matches
+curl -s -X POST   $B/stakeholders -H "$H" -d '{"name":"Tanisha","slackUserId":"U08SXQF8RTQ","role":"backend"}'
+curl -s -X PATCH  $B/stakeholders/Tanisha -H "$H" -d '{"slackUserId":null,"role":"product","rename":"Tanisha K"}'
+curl -s -X DELETE "$B/stakeholders/Tanisha%20K"    # the URL addresses the CURRENT name
+
+# agents — `name` is the assignee key, so a rename is not a cosmetic change
+curl -s -X POST   $B/agents -H "$H" -d '{"name":"deploy-devx","kind":"helper","brief":"...","trigger":"after lanes close"}'
+curl -s -X PATCH  $B/agents/staff-engineer -H "$H" -d '{"brief":"new standing brief"}'
+curl -s -X DELETE $B/agents/deploy-devx
+
+# review lanes, and autoAdvance on its own
+curl -s -X POST   $B/pipeline/lanes -H "$H" -d '{"lane":"qa","label":"QA","manager":"qa-lead"}'
+curl -s -X PATCH  $B/pipeline/lanes/qa -H "$H" -d '{"manager":"qa-lead","rename":"quality","force":true}'
+curl -s -X DELETE "$B/pipeline/lanes/qa?force=true"
+curl -s -X PATCH  $B/pipeline -H "$H" -d '{"autoAdvance":false}'
+
+# charter — appends one line at the end, never replaces
+curl -s -X POST   $B/charter/append -H "$H" -d '{"text":"- Lane selection is mandatory at create."}'
+
+# shared surface — editing and publishing are two routes on purpose
+curl -s           $B/proxy                                        # the only read that carries the target
+curl -s -X PATCH  $B/proxy -H "$H" -d '{"public":["/assets/","/$"]}'
+curl -s -X PATCH  $B/proxy/enabled -H "$H" -d '{"enabled":false}'  # withdraw; enabling needs "confirm"
+```
+
+- The URL addresses the entry; `rename` changes it. On stakeholders a `name` in the BODY
+  400s rather than passing as a silent no-op.
+- `null` clears: `slackUserId` (revokes feedback filing), `role`, `trigger`. Omitted fields
+  are left alone.
+- `force` exists only on lane rename and lane removal: `"force": true` in the PATCH body,
+  `?force=true` on the DELETE. Nothing else takes it.
+- Read `warnings` on every response. That is where a rename reports the open tasks still
+  assigned to the old name, an agent removal reports the lane it managed, a lane change
+  reports the tasks that lose a review, adding a stakeholder reports what Slack says about
+  the id, and adding the first lane reports that a pipeline was created with
+  `autoAdvance: true`. None of it fails the call.
+- `PATCH /proxy` refuses `enabled` outright. It asks for `{"confirm":"<prefix>"}` only when
+  the route is currently enabled AND the edit changes the prefix or target or adds an
+  allowlist entry that was not already there; edits to a withdrawn route never ask.
+  `PATCH /proxy/enabled` needs `{"confirm":"<prefix>"}` to publish and nothing to withdraw
+  (the MCP tools spell this argument `confirmPrefix`),
+  and reports `routeLive` (the route table), which is what the link actually resolving
+  depends on, not the saved config.
+- Appending the same charter text twice succeeds and warns `that text is already in the
+  charter verbatim; appended anyway (this route is not idempotent, check before repeating
+  a failed call)`.
 
 ## 8. End-of-round board audit
 
@@ -284,26 +354,28 @@ Log anything worth a trace: `POST /api/events {"project":"DAR","text":"..."}`.
 Full safety properties, and why teardown is not optional, are in the skill (Step 2 and B4).
 Two commands.
 
-**Announce it with the board link.** `GET /api/projects/DAR/context` has the config; the
-board payload carries `baseUrl` plus the published prefix, so you can state the link
-exactly as a stakeholder receives it. Never paste the target host:port where a link-holder
-can read it.
+**Announce it with the board link.** `GET /api/projects/DAR/context` has the config with
+the target redacted; the board payload carries `baseUrl` plus the published prefix, so you
+can state the link exactly as a stakeholder receives it. `GET /api/projects/DAR/proxy` is
+the one read that carries the target. Never paste that host:port where a link-holder can
+read it.
 
-**Withdraw it when the project closes.** Send the whole object; this config is replaced
-wholesale.
+**Withdraw it when the project closes.** One field, one route; nothing else is resent and
+withdrawing needs no confirmation.
 
 ```bash
 # keep the config, take the URL down:
-curl -s -X PATCH localhost:4899/api/projects/DAR -H 'content-type: application/json' \
-  -d '{"proxy":{"prefix":"fe","target":"http://127.0.0.1:5173/fe","public":["/"],"enabled":false}}'
-# or clear it entirely:
+curl -s -X PATCH localhost:4899/api/projects/DAR/proxy/enabled -H 'content-type: application/json' \
+  -d '{"enabled":false}'
+# or clear the config entirely (the wholesale door, still the only way to remove it):
 curl -s -X PATCH localhost:4899/api/projects/DAR -H 'content-type: application/json' -d '{"proxy":null}'
 ```
 
-Then verify rather than assume: `proxyPublished` on the returned doc is what is actually
-live. Empty is the state you want at close; anything else means the withdrawal did not
-land and the URL is still open, so re-check. Never hand-edit the proxy route table or
-`data/routes.json`.
+Then verify rather than assume. The enabled route answers `routeLive`, and
+`GET /api/projects/DAR/proxy` carries `proxyPublished`, which is what the server reports it
+actually put in the route table. `routeLive: false` with an empty `proxyPublished` is the
+state you want at close; anything else means the withdrawal did not land and the URL is
+still open, so re-check. Never hand-edit the proxy route table or `data/routes.json`.
 
 ## 10. Resume contract
 
