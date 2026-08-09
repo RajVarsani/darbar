@@ -18,7 +18,7 @@ async function call(path: string, method = 'GET', body?: unknown) {
 
 const server = new McpServer({ name: 'darbar', version: '0.1.0' });
 
-server.tool('get_project_context', 'Fetch a project charter: protocols, repos, stakeholders. Every agent should read this before working.',
+server.tool('get_project_context', 'Fetch a project charter: protocols, repos, stakeholders, and the agent registry (lane managers, helpers, orchestrator — each with its standing brief). Every agent should read this before working.',
   { project: z.string().describe('project prefix, name, or capId') },
   ({ project }) => call(`/projects/${encodeURIComponent(project)}/context`));
 
@@ -74,6 +74,18 @@ server.tool('set_pipeline', 'Configure the review pipeline for a project: lanes 
     })),
   },
   ({ project, ...rest }) => call(`/projects/${encodeURIComponent(project)}`, 'PATCH', { pipeline: rest }));
+
+server.tool('set_agents', 'Register the project agent registry: lane managers, helpers, and the orchestrator. Replaces the whole list. Pipeline review managers should exist here — the server logs a warning event when one is missing. Names must be unique (they are the assignee key); agents: [] clears the registry and will warn for every pipeline manager.',
+  {
+    project: z.string(),
+    agents: z.array(z.object({
+      name: z.string().describe('agent name, e.g. qa-manager — task assignees reference this'),
+      kind: z.enum(['lane-manager', 'helper', 'orchestrator']),
+      brief: z.string().describe('the agent standing charter — the orchestrator uses it as the dispatch prompt (what it does, how, what never to touch)'),
+      trigger: z.string().optional().describe('when-to-dispatch hint for the orchestrator'),
+    })),
+  },
+  ({ project, agents }) => call(`/projects/${encodeURIComponent(project)}`, 'PATCH', { agents }));
 
 server.tool('file_feedback', 'File a finding as feedback (lanes use this). Lands in the same pending queue as human feedback.',
   {

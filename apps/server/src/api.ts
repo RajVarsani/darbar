@@ -4,7 +4,7 @@ import { streamSSE } from 'hono/streaming';
 import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
 import { config } from '@darbar/core';
-import type { FeedbackDoc, Pipeline, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
+import type { FeedbackDoc, Pipeline, ProjectAgent, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
 
 export const api = new Hono();
 
@@ -67,20 +67,52 @@ async function resolveTaskRef(ref: string) {
   return Tasks.findOne({ shortId: ref.toUpperCase() });
 }
 
-// pipeline config comes from user JSON: rebuild it field-by-field, never store the raw object
-function readPipeline(v: unknown): Pipeline | undefined {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+// pipeline config comes from user JSON: rebuild it field-by-field, never store the raw object.
+// Malformed input errors with what failed instead of being dropped (FB-48/FB-56: error, never coerce)
+function readPipeline(v: unknown): { pipeline: Pipeline } | { error: string } {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return { error: 'pipeline must be an object {autoAdvance?, reviews}' };
   const o = v as Record<string, unknown>;
-  const reviews = Array.isArray(o.reviews)
-    ? o.reviews.flatMap((r) => {
-        if (!r || typeof r !== 'object') return [];
-        const { lane, label, manager } = r as Record<string, unknown>;
-        return typeof lane === 'string' && lane && typeof manager === 'string' && manager
-          ? [{ lane, label: typeof label === 'string' && label ? label : lane, manager }]
-          : [];
-      })
-    : [];
-  return { autoAdvance: o.autoAdvance !== false, reviews };
+  if (o.autoAdvance !== undefined && typeof o.autoAdvance !== 'boolean') return { error: 'pipeline.autoAdvance must be a boolean when present' };
+  // reviews replaces the whole lane list, so an omitted/garbage array would silently wipe it
+  if (!Array.isArray(o.reviews)) return { error: 'pipeline.reviews must be an array of {lane, label?, manager}' };
+  const reviews: Pipeline['reviews'] = [];
+  const errs: string[] = [];
+  o.reviews.forEach((r, i) => {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) { errs.push(`pipeline.reviews[${i}]: not an object`); return; }
+    const { lane, label, manager } = r as Record<string, unknown>;
+    const bad: string[] = [];
+    if (typeof lane !== 'string' || !lane) bad.push('lane (non-empty string) required');
+    if (typeof manager !== 'string' || !manager) bad.push('manager (non-empty string) required');
+    if (label !== undefined && typeof label !== 'string') bad.push('label must be a string when present');
+    if (bad.length) { errs.push(`pipeline.reviews[${i}]: ${bad.join('; ')}`); return; }
+    reviews.push({ lane: lane as string, label: typeof label === 'string' && label ? label : (lane as string), manager: manager as string });
+  });
+  return errs.length ? { error: errs.join(' | ') } : { pipeline: { autoAdvance: o.autoAdvance !== false, reviews } };
+}
+
+// agent registry from user JSON: rebuilt field-by-field like readPipeline, but malformed
+// entries 400 with what failed instead of silently filtering (FB-48: error, never coerce)
+const AGENT_KINDS: ProjectAgent['kind'][] = ['lane-manager', 'helper', 'orchestrator'];
+function readAgents(v: unknown): { agents: ProjectAgent[] } | { error: string } {
+  if (!Array.isArray(v)) return { error: 'agents must be an array of {name, kind, brief, trigger?}' };
+  const agents: ProjectAgent[] = [];
+  const errs: string[] = [];
+  const seen = new Set<string>();
+  v.forEach((r, i) => {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) { errs.push(`agents[${i}]: not an object`); return; }
+    const { name, kind, brief, trigger } = r as Record<string, unknown>;
+    const bad: string[] = [];
+    if (typeof name !== 'string' || !name) bad.push('name (non-empty string) required');
+    if (typeof kind !== 'string' || !AGENT_KINDS.includes(kind as ProjectAgent['kind'])) bad.push(`kind must be ${AGENT_KINDS.join('|')}`);
+    if (typeof brief !== 'string' || !brief) bad.push('brief (non-empty string) required');
+    if (trigger !== undefined && typeof trigger !== 'string') bad.push('trigger must be a string when present');
+    if (bad.length) { errs.push(`agents[${i}]: ${bad.join('; ')}`); return; }
+    // name is the assignment/lookup key: a duplicate makes every name-based lookup ambiguous
+    if (seen.has(name as string)) { errs.push(`agents[${i}]: duplicate name ${name}`); return; }
+    seen.add(name as string);
+    agents.push({ name: name as string, kind: kind as ProjectAgent['kind'], brief: brief as string, ...(typeof trigger === 'string' ? { trigger } : {}) });
+  });
+  return errs.length ? { error: errs.join(' | ') } : { agents };
 }
 
 // ---------- review pipeline engine ----------
@@ -235,19 +267,48 @@ api.patch('/projects/:ref', async (c) => {
   const set: Record<string, unknown> = {};
   const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
-  const pipeline = b.pipeline !== undefined ? readPipeline(b.pipeline) : undefined;
-  if (pipeline) set.pipeline = pipeline;
-  if (Object.keys(set).length === 0) return c.json({ error: 'nothing to update (charter, slackChannel, pipeline)' }, 400);
+  let pipeline: Pipeline | undefined;
+  if (b.pipeline !== undefined) {
+    const parsed = readPipeline(b.pipeline);
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    pipeline = parsed.pipeline;
+    set.pipeline = pipeline;
+  }
+  let agents: ProjectAgent[] | undefined;
+  if (b.agents !== undefined) {
+    const parsed = readAgents(b.agents);
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    agents = parsed.agents;
+    set.agents = agents;
+  }
+  if (Object.keys(set).length === 0) return c.json({ error: 'nothing to update (charter, slackChannel, pipeline, agents)' }, 400);
   await Projects.updateOne({ _id: p._id }, { $set: set });
   const laneNote = pipeline ? `: lanes [${pipeline.reviews.map((r) => r.lane).join(', ')}], autoAdvance ${pipeline.autoAdvance}` : '';
-  await logEvent(p._id!, `project updated (${Object.keys(set).join(', ')})${laneNote}`);
+  const agentNote = agents ? `: agents [${agents.map((a) => a.name).join(', ')}]` : '';
+  await logEvent(p._id!, `project updated (${Object.keys(set).join(', ')})${laneNote}${agentNote}`);
+  // soft consistency: pipeline managers should exist in the registry (when one exists) — warn, never fail.
+  // The write is already committed, so a logging failure must not turn a successful PATCH into a 500.
+  if (pipeline || agents) {
+    try {
+      const effPipeline = pipeline ?? p.pipeline;
+      const effAgents = agents ?? p.agents;
+      if (effAgents !== undefined && effPipeline) {
+        const names = new Set(effAgents.map((a) => a.name));
+        for (const r of effPipeline.reviews) {
+          if (!names.has(r.manager)) await logEvent(p._id!, `pipeline manager ${r.manager} not in agent registry`);
+        }
+      }
+    } catch {
+      // warn-only check: swallow so the committed update still returns 200
+    }
+  }
   return c.json(await Projects.findOne({ _id: p._id }));
 });
 
 api.get('/projects/:ref/context', async (c) => {
   const p = await resolveProject(c.req.param('ref'));
   if (!p) return c.json({ error: 'project not found' }, 404);
-  return c.json({ name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders });
+  return c.json({ name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders, agents: p.agents ?? [] });
 });
 
 api.get('/projects/:ref/events', async (c) => {
@@ -267,7 +328,8 @@ api.get('/p/:capId', async (c) => {
     Feedback.find({ projectId: p._id }).sort({ createdAt: -1 }).toArray(),
     Events.find({ projectId: p._id }).sort({ at: -1 }).limit(config.eventsBoardLimit).toArray(),
   ]);
-  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders, pipeline: p.pipeline ?? null }, tasks, feedback, events });
+  // charter sliced to 401: board shows a ~400-char preview and needs the +1 to know it truncated
+  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders, pipeline: p.pipeline ?? null, agents: p.agents ?? [], charter: (p.charter ?? '').slice(0, 401) }, tasks, feedback, events });
 });
 
 api.get('/p/:capId/stream', async (c) => {

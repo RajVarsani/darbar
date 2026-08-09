@@ -7,6 +7,9 @@ export type Stakeholder = { name: string; slackUserId?: string; role?: string };
 export type ReviewLane = { lane: string; label: string; manager: string };
 export type Pipeline = { autoAdvance: boolean; reviews: ReviewLane[] };
 
+// agent registry: brief = standing charter the orchestrator dispatches with; trigger = when-to-dispatch hint
+export type ProjectAgent = { name: string; kind: 'lane-manager' | 'helper' | 'orchestrator'; brief: string; trigger?: string };
+
 export type Project = {
   _id?: ObjectId;
   name: string;
@@ -17,6 +20,7 @@ export type Project = {
   stakeholders: Stakeholder[];
   slackChannel: string | null;
   pipeline?: Pipeline;
+  agents?: ProjectAgent[];
   counters: { task: number; feedback: number };
   createdAt: Date;
 };
