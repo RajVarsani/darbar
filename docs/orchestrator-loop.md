@@ -93,6 +93,12 @@ One builder subagent per task, one scoped task each. The builder owns its own
 row: it PATCHes itself `in_progress` on start and `in_review` (with `notes`)
 when done. The orchestrator never moves a dispatched task's status by hand.
 
+When the agent is in the project's agent registry
+(`GET /api/projects/DAR/context` → `agents: [{name, kind, brief, trigger?}]`,
+or the `get_project_context` MCP tool), that is where the prompt comes from: the
+agent's `brief` IS its standing charter — dispatch it verbatim plus that task's
+context. Do not improvise a charter for an agent that has one.
+
 ```bash
 # builder, on start / on finish:
 curl -s -X PATCH localhost:4899/api/tasks/DAR-12 -H 'content-type: application/json' -d '{"status":"in_progress"}'
@@ -103,7 +109,10 @@ Entering `in_review` spawns the review lanes **server-side** (one `type=review`
 subtask per `project.pipeline.reviews` lane, assigned to that lane's manager).
 Pick a task's lanes by judgment at `create_task` time via `lanes` (code-review
 for code, qa for behavior/outcomes, design-qa only for UI; `[]` = no reviews;
-omit = all configured lanes).
+omit = all configured lanes). Lane keys must exist in the pipeline (unknown keys
+400), and the selection freezes once the review flow starts — status in
+`in_review|qa|done|cancelled` (note `blocked` is not frozen), or any review child
+already spawned (closed ones included), both 409.
 Never hand-create review tasks. Lane managers drain their queue, review, file
 findings as feedback on the parent, and close their lane:
 
@@ -120,6 +129,21 @@ are open, and closing the last lane auto-advances the parent to `done` (unless
 `pipeline.autoAdvance` is false — then push it explicitly). Lane findings
 arrive as agent-authored feedback in your normal drain; triage them like any
 other row (usually: rework verb on the parent).
+
+**Helpers** (`kind: "helper"` in the registry — deploy, seeding, migrations,
+release notes) are dispatched exactly like builders. Give the run a task row,
+prompt the subagent with the helper's `brief` plus the task context, and let it
+PATCH its own row from `in_progress` to `in_review`/`done` — helper work shows
+on the board like everyone else's, never as an invisible side errand:
+
+```bash
+curl -s -X POST localhost:4899/api/tasks -H 'content-type: application/json' \
+  -d '{"project":"DAR","title":"Deploy DAR-12 branch to devx","type":"chore","assignee":"deploy-devx","origin":"helper:DAR-12","lanes":[]}'
+```
+
+A registry `trigger` ("after a task's review lanes close") is a hint about when
+it usually fires, not an automatic rule — nothing server-side dispatches
+helpers. You still decide whether this task warrants one.
 
 ## 5. End-of-round board audit
 
