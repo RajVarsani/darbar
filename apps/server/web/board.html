@@ -270,6 +270,19 @@
   .mini{border:2px solid var(--ink);background:var(--beige-2)}
   .mini .trow,.mini .frow{padding-left:12px}
   .mini .trow.flat{grid-template-columns:auto minmax(0,1fr) auto}
+  /* inherited default, not a choice someone made: dashed and recessive so it can never be
+     misread as an explicit per-task selection sitting in the same slot */
+  .mini.dflt{border-style:dashed;background:var(--beige)}
+  .mini.dflt .lname{font-weight:500;color:var(--ink-soft)}
+  .lname{font-weight:600}
+  /* the lane name is the point of this row: never clip it behind a wide status pill. The meta
+     drops to its own line before the name gives up a character. */
+  .mini .trow.flat.lanerow{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+  /* no min-width floor: a floor makes the wrap decision against itself rather than the title, so
+     every row breaks. .ttl's break-word is what prevents the clip. */
+  .mini .trow.flat.lanerow .col{flex:1 1 auto;min-width:0}
+  .mini .trow.flat.lanerow .ttl{white-space:normal;overflow-wrap:break-word}
+  .mini .trow.flat.lanerow .rmeta{margin-left:auto}
   .quote{background:var(--beige-2);border:2px solid var(--ink);padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-weight:500}
   .shots{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
   .shots a img{width:100px;height:70px;object-fit:cover;border:2px solid var(--ink);transition:.1s;display:block}
@@ -300,6 +313,13 @@
     padding:8px 12px;border-bottom:1.5px solid var(--hair)}
   .crow:last-child{border-bottom:none}
   .crow .crole{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* a dropped entry must never borrow the lane-name treatment: a bare string entry would otherwise
+     render as its own text and read as a real lane. It says what it is, quotes the raw value, and
+     states the rule it failed on its own line rather than hiding it in a tooltip. */
+  .crow.bad .lname{font-weight:500;font-style:italic;color:var(--ink-faint)}
+  .crow.bad .rawv{font-family:var(--mono);font-size:11px;color:var(--ink-soft);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .crow.bad .why{grid-column:1/-1;font-size:11px;color:var(--ink-faint)}
   /* one mini badge for every "state of this row" marker in the panel: slack link, agent kind */
   .badge{font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.06em;padding:1px 5px;white-space:nowrap;
     flex:none;border:1.5px solid var(--green-deep);color:var(--green-deep);background:var(--green-pale)}
@@ -312,8 +332,10 @@
      faintest token here) keeps full weight: it is the one thing asking to be acted on */
   .arow.unreg>*:not(.ameta){opacity:.5}
   .ameta{display:flex;align-items:center;gap:8px;min-width:0;font-size:12px;color:var(--ink-soft)}
-  /* what a manager owns is a bigger fact than its kind — own row, never the tail of a flex line */
-  .alane{grid-column:1/-1;font-size:12px;color:var(--ink-soft)}
+  /* what a manager owns is a bigger fact than its kind — own row, never the tail of a flex line,
+     and typed as a fact (mono, dark) so it never reads as the opening of the brief prose below it */
+  /* subordinate to the agent name chip: same size, one step down in weight and colour */
+  .alane{grid-column:1/-1;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--ink-soft)}
   .abrief{grid-column:1/-1;font-size:12px;line-height:1.45;color:var(--ink-soft)}
   .atrig{grid-column:1/-1;font-family:var(--mono);font-size:10.5px;line-height:1.4;color:var(--ink-faint)}
   .quote.mono{font-family:var(--mono);font-size:11.5px;line-height:1.55}
@@ -441,7 +463,8 @@ const state = {
   pal: {open:false, q:'', sel:0},  // ⌘K palette; survives SSE re-renders
 };
 
-const initials = n => n.split(/[\s-]+/).map(w=>w[0]).join('').slice(0,2).toUpperCase();
+// tolerates a missing/non-string name: roster entries come from unvalidated project config
+const initials = n => String(n ?? '').split(/[\s-]+/).filter(Boolean).map(w=>w[0]).join('').slice(0,2).toUpperCase();
 const relTime = iso => {
   const s = (Date.now() - new Date(iso).getTime())/1000;
   if (s<60) return 'just now';
@@ -480,8 +503,31 @@ const openFb = f => !['resolved','rejected'].includes(f.status);
 const isClosed = t => ['done','cancelled'].includes(t.status);
 const eventsForTask = t => { const re = new RegExp('\\b'+t.shortId+'\\b'); return (state.data?.events??[]).filter(e=>e.taskId===t._id || re.test(e.text||'')); };
 const pipCls = s => s==='in_progress'||s==='in_review'||s==='qa' ? 'p-run' : s==='done' ? 'p-done' : s==='blocked' ? 'p-blocked' : s==='cancelled' ? 'p-cancelled' : '';
+// pipeline lanes, defensively: project config is unvalidated, so a malformed entry must not
+// take the drawer down with it. Dropping is not silent — the config panel names what it dropped,
+// because the server still reads those entries.
+const pipeRaw = () => { const r = pipeline()?.reviews; return Array.isArray(r) ? r : []; };
+const laneOk = l => !!l && typeof l==='object' && typeof l.lane==='string' && !!l.lane;
+const pipeLanes = () => pipeRaw().filter(laneOk);
+// what the board cannot route: bad members of the array, or a reviews value that is not an array
+// at all — either way the config exists and the server reads it, so the panel must not say "none".
+// each dropped entry carries the rule it failed: "malformed" on its own leaves the reader guessing.
+const aOrAn = w => `${/^[aeiou]/.test(w)?'an':'a'} ${w}`;
+const badLaneWhy = v => v == null ? 'entry is empty'
+  : Array.isArray(v) ? 'entry is an array, not a lane object'
+  : typeof v !== 'object' ? `entry is a bare ${typeof v}, not a lane object`
+  : typeof v.lane !== 'string' ? (v.lane === undefined ? 'entry has no lane key' : `lane key is ${aOrAn(typeof v.lane)}, not a string`)
+  : 'lane key is an empty string';
+const pipeBadLanes = () => { const r = pipeline()?.reviews;
+  return Array.isArray(r) ? r.filter(l=>!laneOk(l)).map(v=>({v, why:badLaneWhy(v)}))
+    : r==null ? [] : [{v:r, why:`pipeline.reviews is ${aOrAn(typeof r)}, not an array of lanes`}]; };
 // per-task lane selection chips; default-all (null/absent) renders nothing to avoid noise
-const laneLabel = k => (pipeline()?.reviews??[]).find(l=>l.lane===k)?.label ?? k;
+const laneLabel = k => pipeLanes().find(l=>l.lane===k)?.label || k;
+// the key column is only worth its ink when it says something the label does not
+const keyEchoesLabel = (label,key) => {
+  const norm = s => String(s ?? '').toLowerCase().replace(/[\s\-_]+/g,'');
+  return norm(label) === norm(key);
+};
 const laneChips = t => !Array.isArray(t.lanes) ? '' : (t.lanes.length
   ? t.lanes.map(k=>`<span class="typ typ-lane" title="review lane on in_review">${esc(laneLabel(k))}</span>`).join('')
   : '<span class="typ typ-lane" title="explicitly no review lanes">no reviews</span>');
@@ -489,20 +535,55 @@ const laneChips = t => !Array.isArray(t.lanes) ? '' : (t.lanes.length
 // the drawer states the PLAN before it states the PROGRESS. t.lanes is only editable until review
 // children exist, so without this the selection is invisible exactly while it is still changeable —
 // and lanes:[] never spawns a child at all, so a deliberate skip would be silent forever.
+// one row shape for both lane plans, so the explicit and the default list differ only in the
+// wrapper's treatment — never in what a row claims
+// showKey: the config panel states configuration verbatim — the key is what you type into a task's
+// lanes array and it is not recoverable from the label — so only the drawer blocks suppress it.
+function laneRow(k, l, opts){
+  // the badge means two different things: rows built FROM the pipeline can only be missing a
+  // manager; rows built from a task's lanes array can be missing from the pipeline entirely
+  const why = l ? 'no manager configured for this lane' : `not a lane in this project's pipeline`;
+  return `<div class="crow"><span class="lname">${esc(l?.label || k)}</span>
+    <span class="id">${!opts?.showKey && keyEchoesLabel(l?.label || k, k) ? '' : esc(k)}</span>
+    ${l?.manager?`<span class="who agent"><span class="a">${esc(initials(l.manager))}</span>${esc(l.manager)}</span>`
+      :`<span class="badge off" title="${why}">NO MANAGER</span>`}</div>`;
+}
+// an entry the board cannot route is still in the config the server acts on — name it rather than
+// let the list quietly shrink. The value is printed verbatim and quoted, never as a lane name.
+const badLaneValue = v => { let s; try { s = JSON.stringify(v); } catch { s = null; }
+  s = s ?? String(v);
+  return s.length > 60 ? s.slice(0,59)+'…' : s; };
+const badLaneRow = b => `<div class="crow bad"><span class="lname">unroutable entry</span>
+    <span class="rawv" title="${esc(badLaneValue(b.v))}">${esc(badLaneValue(b.v))}</span>
+    <span class="badge off" title="this board cannot route it, but it is still in the project config">MALFORMED</span>
+    <span class="why">${esc(b.why)}</span></div>`;
 function plannedLanesSec(t){
-  if (!Array.isArray(t.lanes)) return ''; // no selection recorded: every lane runs, same silence as the chips
+  const reviews = pipeLanes();
+  // a closed task has no future to describe: every branch states what did or did not happen, never
+  // what will. A cancelled task will never move to in review, so "these lanes open when it does" is
+  // simply false there.
+  const closed = isClosed(t);
+  // default-all (lanes null/absent) is the state of most tasks, so silence here would leave the
+  // drawer saying nothing about a plan that will in fact spawn every lane. Stated, but as an
+  // inherited default rather than as a selection someone made.
+  if (!Array.isArray(t.lanes)){
+    if (!reviews.length) return ''; // no pipeline: there is genuinely no plan to state
+    // closed: no rows. These rows are the PROJECT's pipeline as it stands today, not this task's —
+    // on an open task the default makes them this task's plan, on a closed one they are a review
+    // that never ran, drawn at full strength above a soft correction. State the fact, stop
+    // illustrating it — the same header+note shape lanes:[] already uses one branch away.
+    // "all 1" is not a count anyone says out loud
+    return `<div class="dsec"><h3>Review lanes · ${closed?'none recorded':reviews.length===1?'1':`all ${reviews.length}`}</h3>
+      ${closed?'':`<div class="mini dflt">${reviews.map(l=>laneRow(l.lane, l)).join('')}</div>`}
+      <div class="note">${closed?'closed with no lanes recorded · no review ran on this task':'default · every configured lane runs · no per-task selection recorded'}</div></div>`;
+  }
   if (!t.lanes.length) return `<div class="dsec"><h3>Review lanes · none</h3>
-    <div class="note">no reviews · this task skips review, so no lanes will spawn</div></div>`;
-  const reviews = pipeline()?.reviews ?? [];
-  return `<div class="dsec"><h3>Review lanes · ${t.lanes.length} planned</h3>
-    <div class="mini">${t.lanes.map(k=>{
-      const l = reviews.find(x=>x.lane===k);
-      return `<div class="crow"><span style="font-weight:600">${esc(laneLabel(k))}</span>
-        <span class="id">${esc(k)}</span>
-        ${l?.manager?`<span class="who agent"><span class="a">${esc(initials(l.manager))}</span>${esc(l.manager)}</span>`
-          :'<span class="badge off" title="not a lane in this project\'s pipeline">NO MANAGER</span>'}</div>`;
-    }).join('')}</div>
-    <div class="note">planned, not spawned · these lanes open when this task moves to in review</div></div>`;
+    <div class="note">${closed?'deliberately skipped · no lanes ever spawned':'deliberately skipped · no lanes will spawn'}</div></div>`;
+  // the explicit array IS a fact about this task — its own recorded selection — so the rows stay
+  // on a closed task; only the tense changes.
+  return `<div class="dsec"><h3>Review lanes · ${t.lanes.length} ${closed?'never spawned':'planned'}</h3>
+    <div class="mini">${t.lanes.map(k=>laneRow(k, reviews.find(x=>x.lane===k))).join('')}</div>
+    <div class="note">${closed?'planned, never spawned · no review ran on this task':'planned, not spawned · these lanes open when this task moves to in review'}</div></div>`;
 }
 
 // prose preview: first paragraph, cut on a word boundary. The ellipsis is derived from what
@@ -510,8 +591,10 @@ function plannedLanesSec(t){
 // Shared by the charter block and the agent briefs — one truncator, two caps.
 const CHARTER_CAP = 400, BRIEF_CAP = 165;
 // a sentence ends on a terminator followed by the end of the text or a new opening capital —
-// "e.g. foo" style dots stay inside the sentence
-const FIRST_SENTENCE = /^[\s\S]*?[.!?](?=$|\s+["'(\[]?[A-Z])/;
+// "e.g. foo" style dots stay inside the sentence. The length floor is what kills the openers the
+// lookahead cannot ("e.g. Lint", "Dr. Smith", "1. Do this"): no real brief opens on a 25-char sentence.
+const SENTENCE_FLOOR = 25;
+const FIRST_SENTENCE = new RegExp(`^[\\s\\S]{${SENTENCE_FLOOR - 1},}?[.!?](?=$|\\s+["'(\\[]?[A-Z])`);
 function textPreview(src, cap = CHARTER_CAP, sentence = false){
   const full = String(src||'').trim();
   const para = full.split(/\n\s*\n/)[0].trim();
@@ -562,7 +645,7 @@ function renderTopNav(){
   ];
   $('views').innerHTML = views.map(v =>
     `<button class="vtab ${state.view===v.id?'on':''}" data-view-btn="${v.id}">${ICONS[v.icon]}${v.label}${v.n!==null?`<span class="n ${v.n?'':'zero'}">${v.n}</span>`:''}</button>`).join('');
-  const lanes = pipeline()?.reviews ?? [];
+  const lanes = pipeLanes();
   $('lanes').innerHTML = lanes.map(l => {
     const open = tasks().filter(t=>t.type==='review'&&t.lane===l.lane&&!isClosed(t)).length;
     return `<button class="lanechip ${state.view==='lane'&&state.lane===l.lane?'on':''}" data-lane-btn="${esc(l.lane)}">${ICONS.lane}${esc(l.label)}<span class="n ${open?'':'zero'}">${open}</span></button>`;
@@ -576,8 +659,10 @@ function renderTopNav(){
 function agentRoster(){
   // one manager can own several lanes — collect every label, don't let the last one win
   const laneOf = new Map();
-  for (const l of pipeline()?.reviews ?? []){
-    if (!l?.manager || !l.label) continue;
+  // pipeLanes(), not the raw read: ?? only defends against null/undefined, so a non-array reviews
+  // (7, true, {…}) threw "not iterable" out of render() and the board never painted at all
+  for (const l of pipeLanes()){
+    if (!l.manager || !l.label) continue;
     if (!laneOf.has(l.manager)) laneOf.set(l.manager, []);
     laneOf.get(l.manager).push(l.label);
   }
@@ -605,13 +690,14 @@ function agentRoster(){
 // difference reads as provenance rather than as two unrelated widgets
 function agentRow(a){
   const bp = a.brief ? textPreview(a.brief, BRIEF_CAP, true) : null;
-  const lane = a.lane ? `runs ${a.lane} lane${a.laneCount>1?'s':''}` : '';
+  // lane first: it is the only varying token, so it must not sit between two fixed words
+  const lane = a.lane ? `${a.lane} lane${a.laneCount>1?'s':''}` : '';
   return `<div class="arow${a.registered?'':' unreg'}">
     <span class="who agent"><span class="a">${esc(initials(a.name))}</span>${esc(a.name)}</span>
     <span class="ameta">${a.registered
       ? `<span class="badge" title="registry kind">${esc(a.kind)}</span>`
       : '<span class="badge off" title="works here but project.agents never declared it">NOT REGISTERED</span>'}</span>
-    ${lane?`<span class="alane" title="${esc(lane)}">${esc(lane)}</span>`:''}
+    ${lane?`<span class="alane" title="runs the ${esc(lane)}">${esc(lane)}</span>`:''}
     ${bp?`<span class="abrief" title="${esc(a.brief)}">${esc(bp.text)}${bp.marker}</span>`:''}
     ${a.trigger?`<span class="atrig">on: ${esc(a.trigger)}</span>`:''}
   </div>`;
@@ -665,7 +751,8 @@ function renderStats(){
     <div class="stat"><div class="lbl">Feedback · needs triage</div><div class="val">${pend}</div>
       <div class="hint">${pend? `awaiting triage · ${open} open total` : open? `<b>triage clear</b> · ${open} open total` : '<b>clear</b>, nothing waiting'}</div></div>
     <div class="stat"><div class="lbl">Reviews in flight</div><div class="val">${openRev}<span class="of">${reviews.length?` / ${reviews.length}`:''}</span></div>
-      <div class="hint">${pipeline()?.reviews?.length ? (openRev ? 'lanes working' : '<b>clear</b>, no open lanes') : 'no pipeline configured'}</div></div>
+      <div class="hint">${pipeLanes().length ? (openRev ? 'lanes working' : '<b>clear</b>, no open lanes')
+        : pipeBadLanes().length ? 'pipeline configured but unroutable' : 'no pipeline configured'}</div></div>
     <div class="stat"><div class="lbl">Activity · 7 days</div>
       <div class="spark">${per.map((n,i)=>`<i class="${i===6?'hot':''}" style="height:${Math.max(12,n/mx*100)}%" title="${days[i].slice(0,10)}: ${n} events"></i>`).join('')}</div>
       <div class="hint">${per[6]} today · ${humans.size} human${humans.size===1?'':'s'}, ${agents.size} agent${agents.size===1?'':'s'} active</div></div>`;
@@ -765,7 +852,7 @@ function renderContent(){
     el.innerHTML = rows.join('') || `<div class="empty">${state.q?`nothing matches “<b>${esc(state.q)}</b>”`:'no tasks yet. the orchestrator will seed them'}</div>`;
   }
   else if (state.view==='lane'){
-    const lanes = pipeline()?.reviews ?? [];
+    const lanes = pipeLanes();
     const lane = lanes.find(l=>l.lane===state.lane);
     const list = tasks().filter(t=>t.type==='review'&&t.lane===state.lane&&matches(t.title+' '+t.shortId));
     const openN = list.filter(t=>!isClosed(t)).length;
@@ -837,7 +924,7 @@ function renderDrawer(){
   if (state.sel.kind==='config'){
     const p = state.data?.project; if(!p){ state.sel=null; return renderDrawer(); }
     const stake = p.stakeholders || [];
-    const lanes = pipeline()?.reviews ?? [];
+    const lanes = pipeLanes(), badLanes = pipeBadLanes();
     const agents = agentRoster();
     const reg = agents.filter(a=>a.registered), unreg = agents.filter(a=>!a.registered);
     const charter = p.charter || '';
@@ -858,12 +945,9 @@ function renderDrawer(){
           <div class="mini">${reg.map(agentRow).join('') || '<div class="kempty">registry is empty</div>'}</div>
           ${unreg.length?`<div class="note">${unreg.length}${reg.length?' more':''} agent${unreg.length===1?'':'s'} seen on this project but not in the registry</div>
           <div class="mini">${unreg.map(agentRow).join('')}</div>`:''}</div>
-        <div class="dsec"><h3>Pipeline · ${lanes.length} lane${lanes.length===1?'':'s'}</h3>
-          ${lanes.length?`<div class="mini">${lanes.map(l=>`<div class="crow">
-            <span style="font-weight:600">${esc(l.label)}</span>
-            <span class="id">${esc(l.lane)}</span>
-            <span class="who agent"><span class="a">${esc(initials(l.manager))}</span>${esc(l.manager)}</span>
-          </div>`).join('')}</div>
+        <div class="dsec"><h3>Pipeline · ${lanes.length} lane${lanes.length===1?'':'s'}${badLanes.length?` · ${badLanes.length} malformed`:''}</h3>
+          ${lanes.length||badLanes.length?`<div class="mini">${lanes.map(l=>laneRow(l.lane, l, {showKey:true})).join('')}${badLanes.map(badLaneRow).join('')}</div>
+          ${badLanes.length?'<div class="note">malformed entries route nowhere on this board · every count and lane spawn comes from the readable lanes · the server still reads pipeline.reviews as written</div>':''}
           <div class="note">${pipeline()?.autoAdvance!==false?'auto-advance on: tasks leave in review when the last lane closes':'auto-advance off: closed lanes wait for an explicit push'}</div>`
           :'<div class="note">no pipeline configured</div>'}</div>
         <div class="dsec"><h3>Repos</h3>
@@ -881,7 +965,7 @@ function renderDrawer(){
     const kids = childrenOf(t), fb = fbForTask(t), parent = t.parentTaskId ? tasks().find(x=>x._id===t.parentTaskId) : null;
     const revKids = reviewKidsOf(t);
     const evs = eventsForTask(t).slice(0,8);
-    const laneInfo = t.type==='review' ? (pipeline()?.reviews??[]).find(l=>l.lane===t.lane) : null;
+    const laneInfo = t.type==='review' ? pipeLanes().find(l=>l.lane===t.lane) : null;
     dr.innerHTML = `
       <div class="dhead">${backBtn}<span class="id">${esc(t.shortId)}</span>
         <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span><span class="grow"></span>${closeBtn}</div>
@@ -892,19 +976,22 @@ function renderDrawer(){
         ${t.description?`<p style="color:var(--ink-soft);margin-top:6px">${esc(t.description)}</p>`:''}
         <div class="dgrid">
           <span class="k">Assignee</span><span>${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:'<span style="color:var(--ink-faint)">unassigned</span>'}</span>
-          ${t.lane?`<span class="k">Lane</span><span class="id">${esc(t.lane)}${laneInfo?` · manager ${esc(laneInfo.manager)}`:''}</span>`:''}
+          ${t.lane?`<span class="k">Lane</span><span class="id">${esc(t.lane)}${laneInfo?.manager?` · manager ${esc(laneInfo.manager)}`:''}</span>`:''}
           ${t.origin?`<span class="k">Origin</span><span>${linkifyIds(t.origin)}</span>`:''}
           ${t.blocker?`<span class="k">Blocked by</span><span style="color:var(--red);font-weight:600">${esc(t.blocker)}</span>`:''}
           <span class="k">Created</span><span title="${new Date(t.createdAt).toLocaleString('en-GB')}">${relTime(t.createdAt)}</span>
           <span class="k">Updated</span><span title="${new Date(t.updatedAt).toLocaleString('en-GB')}">${relTime(t.updatedAt)}</span>
         </div>
         ${t.notes?`<div class="dsec"><h3>Notes</h3><div class="quote">${esc(t.notes)}</div></div>`:''}
+        ${/* existing children first: real spawned lanes are always worth showing, so an unexpected
+              combination shows them rather than hiding them behind the type test */''}
         ${revKids.length?`<div class="dsec"><h3>Review lanes · ${revKids.filter(isClosed).length}/${revKids.length} closed</h3>
           <div class="mini">${revKids.map(k=>{
-            const li=(pipeline()?.reviews??[]).find(l=>l.lane===k.lane);
-            return `<div class="trow flat" data-task="${esc(k.shortId)}"><span class="id">${esc(k.shortId)}</span>
-            <span class="col"><div class="ttl">${esc(li?.label ?? k.lane ?? 'review')}</div></span><span class="rmeta">${k.assignee?`<span class="who agent"><span class="a">${esc(initials(k.assignee))}</span>${esc(k.assignee)}</span>`:''}<span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></span></div>`;}).join('')}</div>
+            const li=pipeLanes().find(l=>l.lane===k.lane);
+            return `<div class="trow flat lanerow" data-task="${esc(k.shortId)}"><span class="id">${esc(k.shortId)}</span>
+            <span class="col"><div class="ttl">${esc(li?.label || k.lane || 'review')}</div></span><span class="rmeta">${k.assignee?`<span class="who agent"><span class="a">${esc(initials(k.assignee))}</span>${esc(k.assignee)}</span>`:''}<span class="pill st-${esc(k.status)}">${esc(nice(k.status))}</span></span></div>`;}).join('')}</div>
           ${pipeline()?.autoAdvance!==false?'<div class="note">auto-advance on: this task moves out of in review when the last lane closes</div>':'<div class="note">auto-advance off: needs an explicit push once lanes close</div>'}</div>`
+        :t.type==='review'?'' /* the server never spawns lanes for a review task, so any plan stated here would be false */
         :plannedLanesSec(t)}
         ${kids.filter(k=>k.type!=='review').length?`<div class="dsec"><h3>Subtasks · ${kids.filter(k=>k.type!=='review'&&k.status==='done').length}/${kids.filter(k=>k.type!=='review').length} done</h3>
           <div class="mini">${kids.filter(k=>k.type!=='review').map(k=>`<div class="trow flat" data-task="${esc(k.shortId)}"><span class="id">${esc(k.shortId)}</span>
@@ -1087,8 +1174,9 @@ document.addEventListener('drop', async e=>{
     if (!r.ok){
       const j = await r.json().catch(()=>({}));
       toast(j.error || (r.status===403 ? 'this board is read-only through the share link' : `move failed (http ${r.status})`));
-    } else if (status==='in_review' && (pipeline()?.reviews??[]).length){
-      toast(`${id} → in review · spawning ${(pipeline().reviews).length} review lane${pipeline().reviews.length>1?'s':''}`);
+    } else if (status==='in_review' && pipeLanes().length){
+      // routable lanes only: that is the count that actually spawns
+      toast(`${id} → in review · spawning ${pipeLanes().length} review lane${pipeLanes().length>1?'s':''}`);
     }
   } catch { toast('move failed: network'); }
   load();
