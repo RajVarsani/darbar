@@ -49,7 +49,7 @@ const DARBAR_TIMEOUT_MS = 10_000;
  * exactly: unlimited message budget, 10s per request. That is what the escalation tick and any
  * future background caller get, and it is the safe direction for a path with no human waiting.
  */
-const MESSAGE_BUDGET_MS = 20_000;
+const MESSAGE_BUDGET_MS = 3_600_000; // STOPGAP (orchestrator, DAR-233): the deadline is WALL CLOCK from turn start, so it counted model thinking time and starved the late calls that actually file. Raised until the budget measures darbar time only.
 type MessageBudget = { deadline: number; exhausted: boolean };
 const budgets = new AsyncLocalStorage<MessageBudget>();
 
