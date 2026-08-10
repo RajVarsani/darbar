@@ -305,6 +305,13 @@
     letter-spacing:.06em;border:2px dashed var(--ink);padding:1.5px 8px;white-space:nowrap}
   .hcause{font-family:var(--mono);font-size:9.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
     padding:2px 6px;border:1.5px dashed rgba(28,28,28,.42);color:var(--ink-soft)}
+  /* A held ADDITION names a real feedback row, and that id is the single most misreadable thing on
+     this surface: everywhere else on the board an id next to a card means the card IS that thing.
+     So it is drawn as a DESTINATION and never as an identity — an arrow pointing away from the card,
+     dashed like everything else held, and the words beside it always say it never arrived. */
+  .hkind{font-family:var(--mono);font-size:9.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
+    padding:2px 6px;border:1.5px dashed var(--ink);color:var(--ink);white-space:nowrap}
+  .hkind .arrow{opacity:.55;padding:0 2px}
   .hdet{padding:2px 16px 14px 42px;border-bottom:1.5px dashed var(--hair);background:rgba(28,28,28,.05);
     box-shadow:inset 3px 0 0 rgba(28,28,28,.3)} /* tied to the row above it, not floating under the band */
   .held .hdet:last-child{border-bottom:none}
@@ -877,6 +884,30 @@ const heldN = () => state.parked?.held ?? 0;
 const heldPartial = () => !!state.parked?.truncated;
 const heldCount = () => `${heldN()}${heldPartial()?'+':''}`;
 const heldUnread = () => Math.max(0, (state.parked?.files ?? 0) - (state.parked?.scanned ?? 0));
+// Two kinds are held and they went wrong in different ways: a report was never FILED, an addition
+// was never ADDED to a row that already exists. Every sentence on this surface that counts held
+// things has to split them, because "N reports not filed" is false of an addition twice over. Same
+// split, same words, as gabbar's owner digest, so the board and the digest cannot describe one lot
+// two ways. Unknown kinds land in `reports` by the reader's own collapse, not by a guess here.
+const heldSplit = list => { const adds = list.filter(i=>i.kind==='addition').length; return {adds, reports: list.length - adds}; };
+const plural = n => n===1 ? '' : 's';
+// the Feedback tab's tooltip. `heldCount()` carries the '+' when the read was capped, so the noun is
+// pluralised off the floor rather than off a number that may not be the whole lot.
+const heldTabWhy = () => {
+  const {adds, reports} = heldSplit(parked());
+  const many = heldN()!==1 || heldPartial();
+  if (!adds) return `${heldCount()} report${many?'s':''} held by the gate, NOT filed and not counted here`;
+  if (!reports) return `${heldCount()} addition${many?'s':''} held by the gate, NEVER added to the row${plural(adds)} ${adds===1?'it names':'they name'} and not counted here`;
+  return `${heldCount()} items held by the gate and not counted here: ${reports} report${plural(reports)} never filed, ${adds} addition${plural(adds)} never added to the row${plural(adds)} ${adds===1?'it names':'they name'}`;
+};
+// the tail on the empty feedback list, which points UP at the band: an inbox that reads "clear" with
+// held items above it is the exact confusion this whole lane exists to stop.
+const heldEmptyTail = () => {
+  const {adds, reports} = heldSplit(parked());
+  if (!adds) return 'none of them filed';
+  if (!reports) return `none of them added to the row${plural(adds)} ${adds===1?'it names':'they name'}`;
+  return 'nothing filed, nothing added to any row';
+};
 const isClosed = t => ['done','cancelled'].includes(t.status);
 const eventsForTask = t => { const re = new RegExp('\\b'+t.shortId+'\\b'); return (state.data?.events??[]).filter(e=>e.taskId===t._id || re.test(e.text||'')); };
 const pipCls = s => s==='in_progress'||s==='in_review'||s==='qa' ? 'p-run' : s==='done' ? 'p-done' : s==='blocked' ? 'p-blocked' : s==='cancelled' ? 'p-cancelled' : '';
@@ -1197,11 +1228,12 @@ function renderTopNav(){
     {id:'board', label:'Board', n: openTasks, icon:'board',
      title:`${openTasks} open committed task${openTasks===1?'':'s'}${backlogN?` · ${backlogN} in backlog, not counted`:''}`},
     {id:'list', label:'List', n: tasks().length, icon:'list', title:`every row, including backlog, reviews and closed work`},
-    // held reports get their own marker beside the count, never added into it: this tab's number is
+    // held items get their own marker beside the count, never added into it: this tab's number is
     // open FILED feedback and stays that, or a held report would be actionable-looking triage the
-    // moment somebody read the tab instead of the lane.
+    // moment somebody read the tab instead of the lane. The tooltip names the kinds for the same
+    // reason the band does: an addition was not "not filed", it was never added to the row it names.
     {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback', held: heldN() ? heldCount() : 0,
-     title:`${openFbN} open feedback${heldN()?` · ${heldCount()} report${heldN()===1&&!heldPartial()?'':'s'} held by the gate, NOT filed and not counted here${heldPartial()?` — and that is a floor: ${heldUnread()} more file${heldUnread()===1?'':'s'} in the parking lot were never opened`:''}`:''}`},
+     title:`${openFbN} open feedback${heldN()?` · ${heldTabWhy()}${heldPartial()?` — and that is a floor: ${heldUnread()} more file${heldUnread()===1?'':'s'} in the parking lot were never opened`:''}`:''}`},
     {id:'activity', label:'Activity', n: null, icon:'activity', title:'project event log'},
   ];
   $('views').innerHTML = views.map(v =>
@@ -1500,8 +1532,8 @@ function taskRowHtml(t, isSub){
     </span></div>`;
 }
 
-// ---------- held reports (Gabbar's parking lot) ----------
-// A held report is somebody's words that the stakeholder gate refused to file, kept on Gabbar's
+// ---------- held items (Gabbar's parking lot) ----------
+// A held item is somebody's words that the stakeholder gate refused, kept on Gabbar's
 // disk instead of being dropped. It is pending work nobody can see, which is what a board is for,
 // and it is NOT feedback, which is what this band has to keep saying at every glance. So it gets a
 // band ABOVE the feedback list rather than rows inside it: a human looking for intake finds it in
@@ -1509,6 +1541,16 @@ function taskRowHtml(t, isSub){
 // borders throughout, a PARK-* id, no status pill, no drawer, no triage affordance of any kind.
 // It is not a fourth top-level tab for the same reason it is not blended in: a surface of its own
 // is a surface people forget to open, and this is the one queue that already suffers from that.
+//
+// TWO KINDS ARE HELD, and the addition is the one this band has to work hardest on. A held REPORT is
+// words nobody has filed. A held ADDITION is evidence for a feedback row that already exists, so it
+// is the only card here that carries a real feedback id — and everywhere else on this board an id
+// beside a card means the card IS that row. Read as ownership, an addition would look like the one
+// thing every other rule here exists to prevent: a held item wearing a filed row's identity. So the
+// id is always drawn and worded as a DESTINATION (`.hkind`, an arrow, "never added"), the stamp says
+// never added rather than not filed, and the remedy promises an append rather than a filing. What is
+// NOT relaxed for it: dashed and hatched throughout, a PARK-* id of its own, no status pill, no
+// drawer, no palette entry, and no place in the Feedback tab's number.
 // NULL-PROTOTYPE, because `cause` is an untrusted string from the parked file used as the lookup
 // key: on an ordinary object literal a cause of "constructor" resolves up the prototype chain and
 // renders the chip as "function Object() { [native code] }". Same family as every other "hostile
@@ -1563,10 +1605,22 @@ const heldShots = i => (i.attachments||[]).filter(safeUrl).map((a,n)=>
 // never clear the gate, so offering a button that can only 400 would be naming a remedy that is not
 // one. It also means the only id this surface ever sends is a bounded token.
 const SLACK_ID_RE = /^[UW][A-Z0-9]{6,20}$/;
+//
+// THE REMEDY IS THE SAME GRANT FOR BOTH KINDS, AND THE OUTCOME IS NOT. Registering the sender clears
+// the cause either way. What Gabbar then does with the held words differs: a report becomes a new
+// feedback row, an addition is appended to the row it names and creates nothing. Saying "files it"
+// over an addition would promise exactly the duplicate that POST /feedback/:id/append exists to
+// avoid, so the copy names the append instead, and says out loud that it never becomes a second row.
+// An addition that no longer names a row is the one case where the grant is not sufficient by
+// itself, and the card says so rather than implying the button finishes the job.
 function heldFix(i){
   const t = 'what clears it';
+  const add = i.kind==='addition';
+  const row = add ? (i.appendTo || null) : null;
   if (i.cause==='outage') return {t,
-    p:'Nothing to do here. The gate never got an answer, not a refusal. Gabbar re-checks held reports as messages come in and this one files itself once darbar answers.', act:null};
+    p: add
+      ? `Nothing to do here. The gate never got an answer, not a refusal. Gabbar re-checks held items as messages come in, and ${row?`this one adds itself to ${row}`:'this one is ready to be added'} once darbar answers.`
+      : 'Nothing to do here. The gate never got an answer, not a refusal. Gabbar re-checks held reports as messages come in and this one files itself once darbar answers.', act:null};
   if (i.cause==='bad_reference') return {t,
     p:'Only the reporter can say which project they meant. Ask them in the thread, then tell Gabbar to promote it once you know.', act:null};
   if (!SLACK_ID_RE.test(i.authorSlackId||'')) return {t,
@@ -1580,9 +1634,15 @@ function heldFix(i){
     p:`Register ${i.author} as a stakeholder on this project. The gate matches slack id ${i.authorSlackId}.`, act:null};
   const known = (p.stakeholders||[]).find(s => s.slackUserId === i.authorSlackId);
   if (known) return {t,
-    p:`That slack id is already registered, as ${known.name}. The gate will pass for them now — this report was held before that, and Gabbar files it on its next sweep.`, act:null};
+    p: add
+      ? `That slack id is already registered, as ${known.name}. The gate will pass for them now. This addition was held before that, and Gabbar ${row?`adds it to ${row}`:'can add it'} on its next sweep.`
+      : `That slack id is already registered, as ${known.name}. The gate will pass for them now — this report was held before that, and Gabbar files it on its next sweep.`, act:null};
   return {t,
-    p:`Register ${i.author} as a stakeholder. This does not file the report: it clears the gate, and Gabbar files it on its next sweep, through the same check, in their name.`,
+    p: !add
+      ? `Register ${i.author} as a stakeholder. This does not file the report: it clears the gate, and Gabbar files it on its next sweep, through the same check, in their name.`
+      : row
+        ? `Register ${i.author} as a stakeholder. This does not add anything to ${row}: it clears the gate, and Gabbar adds their words to that row on its next sweep, through the same check, in their name. It never becomes a second row.`
+        : `Register ${i.author} as a stakeholder. That clears the gate, but it is not the whole job here: this addition no longer names the row its words belong on, so Gabbar has nowhere to put them. Ask Gabbar to promote it with the right row id once you know which one it was.`,
     act:{parkId:i.parkId, name:i.author, slackUserId:i.authorSlackId, prefix:p.prefix}};
 }
 
@@ -1591,11 +1651,18 @@ function heldFix(i){
 // a fetch body, so no untrusted byte is ever part of a command, a path, or an attribute that means
 // anything. The labels are fixed strings; the untrusted name appears once, in the armed sentence,
 // as escaped text, because that sentence is the point of the confirm step.
-function heldActHtml(a){
+// The item is passed alongside the action for the last clause only: the grant itself is identical for
+// both kinds (a stakeholder may file), but "it does not file this report" is not what an operator is
+// declining to do on an addition, and the sentence that names the consequence is the whole point of
+// the armed step. The action payload stays exactly the four values that travel to the API.
+function heldActHtml(a, i){
   if (state.parkArm !== a.parkId) {
     return `<button class="pbtn" type="button" data-arm="${esc(a.parkId)}" style="margin-top:8px">register them</button>`;
   }
-  return `<div class="hgrant">This grants <b>${esc(a.name)}</b> (${esc(a.slackUserId)}) the standing right to file feedback on ${esc(a.prefix)} from Slack. It does not file this report.</div>
+  const not = i && i.kind==='addition'
+    ? (i.appendTo ? `It does not add anything to ${esc(i.appendTo)}.` : 'It does not add these words to any row.')
+    : 'It does not file this report.';
+  return `<div class="hgrant">This grants <b>${esc(a.name)}</b> (${esc(a.slackUserId)}) the standing right to file feedback on ${esc(a.prefix)} from Slack. ${not}</div>
     <button class="pbtn" type="button" data-register="${esc(a.parkId)}" style="margin-top:8px">yes, register them</button>
     <button class="pbtn" type="button" data-arm-cancel="1" style="margin-top:8px;margin-left:6px">cancel</button>`;
 }
@@ -1605,25 +1672,47 @@ function heldRowHtml(i){
   const words = oneLine(i.theirWords) || oneLine(i.body);
   const where = i.onTask ? `on ${esc(i.onTask)}` : i.project ? esc(i.project) : 'no project resolved';
   const shots = (i.attachments||[]).length;
-  const row = `<div class="hrow ${open?'open':''}" data-park="${esc(i.parkId)}" title="${open?'collapse':'expand'} this held report">
+  const add = i.kind==='addition';
+  const toRow = add ? (i.appendTo || null) : null;
+  // the stamp is the card's one-word verdict, and for an addition "not filed" names the wrong
+  // failure: nothing was supposed to be filed, and the row that was supposed to gain these words
+  // never did. Same dashed anti-pill either way, so neither reads as a status.
+  const stamp = add
+    ? {txt:'held · never added', why: toRow
+        ? `nothing was added to ${toRow} for this: that row is unchanged and shows no sign anything was sent, this has no feedback id of its own, and no task is tracking it`
+        : 'these words were never added to any row: this has no feedback id of its own, and no task is tracking it'}
+    : {txt:'held · not filed', why:'nothing was filed for this: it has no feedback id, it is in no triage queue, and no task is tracking it'};
+  // the destination chip. The arrow and the "→" are doing real work: they are what make the id read
+  // as where the evidence was going rather than as what this card is.
+  const kindChip = add
+    ? `<span class="hkind" title="${esc(stamp.why)}">addition<span class="arrow">→</span>${esc(toRow || 'row not named')}</span>`
+    : '';
+  const row = `<div class="hrow ${open?'open':''}" data-park="${esc(i.parkId)}" title="${open?'collapse':'expand'} this held ${add?'addition':'report'}">
     <span class="caret ${open?'openc':''}">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m9 5 7 7-7 7"/></svg></span>
     <span class="col">
       <div class="hquote">${words ? `“${esc(words)}”` : '<span style="color:var(--ink-faint)">no words captured, attachment only</span>'}</div>
       <div class="hsub">
         <span class="who human"><span class="a">${esc(initials(i.author))}</span>${esc(i.author)}</span>
+        ${kindChip}
         <span class="hcause" title="${esc(CAUSE_WHY[i.cause] || i.reasonParked || '')}">${esc(causeLabel(i.cause))}</span>
         <span class="id">${where}</span>
         ${shots?`<span class="id">[${shots} file${shots>1?'s':''}]</span>`:''}
         <span class="hid">${esc(i.parkId)}</span>
       </div></span>
     <span class="hright">
-      <span class="hstamp" title="nothing was filed for this: it has no feedback id, it is in no triage queue, and no task is tracking it">held · not filed</span>
+      <span class="hstamp" title="${esc(stamp.why)}">${stamp.txt}</span>
       <span class="time" title="${esc(new Date(i.heldSince).toLocaleString('en-GB'))}">held ${esc(ageShort(i.heldSince))}</span>
     </span></div>`;
   if (!open) return row;
   const fix = heldFix(i);
   const kv = [
+    // first row on an addition, because it is the fact the rest of the card is context for — and the
+    // only one an owner cannot act without. It leads with where the words were going and ends with
+    // the row's actual state, so the id can never be read on its own as "this is on that row".
+    ...(add ? [['addition to', toRow
+      ? `<b>${esc(toRow)}</b> · never added. That row is unchanged and shows no sign anything was sent. Promoting this appends to it, it never becomes a second row.`
+      : `<b>no row named</b> · these words were never added anywhere, and nothing on this item records where they belong.`]] : []),
     ['gabbar read it as', `${esc(i.type)}${i.body?` · ${esc(i.body)}`:''}`],
     ['reported by', `<b>${esc(i.author)}</b>${i.authorSlackId?` · ${esc(i.authorSlackId)}`:' · no slack id recorded'}`],
     ['target', `${i.project?`<b>${esc(i.project)}</b>`:'<b>no project resolved</b>'}${i.onTask?` · on ${esc(i.onTask)}`:''}`],
@@ -1634,12 +1723,12 @@ function heldRowHtml(i){
     ['on disk', `<span class="hid">${esc(`${state.parked?.dir || ''}/${i.parkId}.json`)}</span>`],
   ];
   // their own words lead the expansion, whole and unstyled: that text is the entire reason this
-  // report was kept, and everything else on the card is context for it
+  // item was kept, and everything else on the card is context for it
   return `${row}<div class="hdet">
     <div class="quote mono">${esc(i.theirWords || '(nothing captured)')}${i.theirWordsTruncated?'\n… truncated here, the file on disk has the rest':''}</div>
     <div class="hkv">${kv.map(([k,v])=>`<span class="k">${esc(k)}</span><span class="v">${v}</span>`).join('')}</div>
     <div class="hfix"><div class="t">${esc(fix.t)}</div><p>${esc(fix.p)}</p>
-      ${fix.act?heldActHtml(fix.act):''}</div>
+      ${fix.act?heldActHtml(fix.act, i):''}</div>
   </div>`;
 }
 
@@ -1647,7 +1736,11 @@ function heldBandHtml(){
   const d = state.parked;
   if (!d) return ''; // unavailable (a share-link viewer): no lane, exactly as before this existed
   const all = parked();
-  const list = all.filter(i => matches([i.parkId,i.theirWords,i.body,i.author,i.project,i.onTask].join(' ')));
+  // appendTo joins the searchable fields for consistency with the rest of them, not because anything
+  // sets state.q today (nothing does; the palette replaced that box). Worth stating so nobody reads
+  // this as a shipped feature: the palette is a SEPARATE index and held items are deliberately not
+  // in it, which is one of the invariants keeping a held item out of every filed-feedback affordance.
+  const list = all.filter(i => matches([i.parkId,i.theirWords,i.body,i.author,i.project,i.onTask,i.appendTo].join(' ')));
   const notes = [];
   if (d.error) notes.push(d.error);
   if (d.unreadable) notes.push(`${d.unreadable} file${d.unreadable>1?'s':''} in that directory could not be read`);
@@ -1657,10 +1750,21 @@ function heldBandHtml(){
   const hidden = all.length - n;
   const shown = list.slice(0, HELD_ROW_CAP);
   const overflow = n - shown.length;
+  // The band's headline and its own label have to survive a lot of additions. "Held · not filed" is
+  // the wrong verdict over a lane of additions, so the label narrows to what is true of both kinds
+  // and the sentence underneath carries the split. The reports-only wording is left EXACTLY as it
+  // was rather than generalised into something vaguer, the same choice the owner digest made.
+  const {adds, reports} = heldSplit(list);
+  const many = n>1;
+  const why = !adds
+    ? `<b>${n}</b> report${many?'s':''} Gabbar's gate refused. Not feedback: no id to quote, no triage queue, nothing tracking ${many?'them':'it'}. ${many?'They stay':'It stays'} here until the gate clears.`
+    : !reports
+      ? `<b>${n}</b> addition${many?'s':''} Gabbar's gate refused. Not feedback: ${many?'the rows they name are':'the row it names is'} unchanged and show${many?'':'s'} no sign anything was sent. ${many?'They stay':'It stays'} here until the gate clears.`
+      : `<b>${n}</b> items Gabbar's gate refused: <b>${reports}</b> report${plural(reports)} never filed, <b>${adds}</b> addition${plural(adds)} never added to the row${plural(adds)} ${adds===1?'it names':'they name'}. Not feedback: no id to quote, no triage queue, nothing tracking any of it.`;
   return `<div class="held">
     <div class="heldbar">
-      <span class="h">Held · not filed</span>
-      <span class="why">${n?`<b>${n}</b> report${n>1?'s':''} Gabbar's gate refused. Not feedback: no id to quote, no triage queue, nothing tracking ${n>1?'them':'it'}. ${n>1?'They stay':'It stays'} here until the gate clears.`
+      <span class="h">Held · ${adds&&!reports?'never added':adds?'nothing landed':'not filed'}</span>
+      <span class="why">${n?why
         :state.q?'nothing held matches this search':'nothing held could be listed'}${hidden?` · ${hidden} hidden by search`:''}</span>
       ${notes.length?`<span class="why" style="flex-basis:100%"><b>${esc(notes.join(' · '))}</b></span>`:''}
     </div>
@@ -1705,9 +1809,12 @@ function renderContent(){
     if (state.fbFilter==='closed') list = list.filter(f=>!openFb(f));
     list = list.filter(f=>matches([f.body,f.shortId,f.author,f.taskShortId].join(' ')));
     // the held count is stated apart from the feedback count, in different words, for the same
-    // reason the tab keeps them apart: one of these numbers is rows, the other is not
+    // reason the tab keeps them apart: one of these numbers is rows, the other is not. "not filed" is
+    // only said when nothing held is an addition, since an addition was never going to be filed and
+    // the thing that went wrong with it is that a row it names never got it.
+    const heldLabel = heldSplit(parked()).adds ? 'held, nothing landed' : 'held, not filed';
     vb.innerHTML = `<span class="vtitle">Feedback</span><span class="vn">${list.length}</span>
-      ${heldN()?`<span class="vn" title="held by Gabbar's gate, not filed and not part of the count beside it">· ${heldCount()} held, not filed</span>`:''}
+      ${heldN()?`<span class="vn" title="${esc(heldTabWhy())}">· ${heldCount()} ${heldLabel}</span>`:''}
       <div class="filters">${['open','all','closed'].map(f=>`<button class="seg ${state.fbFilter===f?'on':''}" data-fbf="${f}">${f}</button>`).join('')}</div>`;
     // the held band sits ABOVE the list and outside the open/all/closed filter: those words are
     // feedback lifecycle, and a held report has no lifecycle to filter on
@@ -1724,7 +1831,7 @@ function renderContent(){
         <span style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
           <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span></span>
-      </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}${heldN()&&!state.q?`<br>${heldCount()} held report${heldN()>1||heldPartial()?'s':''} above, none of them filed`:''}</div>`);
+      </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}${heldN()&&!state.q?`<br>${heldCount()} held above, ${heldEmptyTail()}`:''}</div>`);
   }
   else {
     vb.innerHTML = `<span class="vtitle">Activity</span>`;

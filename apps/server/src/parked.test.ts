@@ -64,7 +64,10 @@ const held = (over: Record<string, unknown> = {}) => ({
 type Read = {
   dirPresent: boolean; error: string | null; files: number; ignored: number; scanned: number;
   truncated: boolean; unreadable: number; held: number; returned: number;
-  items: { parkId: string; filed: boolean; author: string; cause: string; status: string; type: string }[];
+  items: {
+    parkId: string; filed: boolean; author: string; cause: string; status: string; type: string;
+    kind: string; appendTo: string | null; addedToRow: false | null;
+  }[];
 };
 const get = async (headers: Record<string, string> = {}): Promise<{ status: number; body: Read }> => {
   const r = await api.request('/parked', { headers });
@@ -123,6 +126,48 @@ test('filed is literally false and the id is a PARK id, on every row', async () 
   }
 });
 
+// ---------- what is held, not just that something is ----------
+// A refused APPEND holds evidence for a feedback row that already exists. Read as a report it
+// becomes a card saying somebody reported a thing, when what they did was add a screenshot to a
+// finding — the board narrating an event that did not happen. The digest already told them apart.
+
+test('a held addition reads as an addition, naming the row it never reached', async () => {
+  park('PARK-C1_1_009', held({ kind: 'addition', appendTo: 'PKT-FB-12' }));
+  const { body } = await get();
+  expect(body.items[0]).toMatchObject({ kind: 'addition', appendTo: 'PKT-FB-12', addedToRow: false, filed: false });
+  // the id it names is a destination, never an identity: this item's own id is still a PARK id
+  expect(body.items[0]!.parkId).toBe('PARK-C1_1_009');
+});
+
+test('a file written before kinds existed is the report it always was', async () => {
+  park('PARK-C1_1_001', held());
+  const { body } = await get();
+  expect(body.items[0]).toMatchObject({ kind: 'report', appendTo: null, addedToRow: null });
+});
+
+test('an unrecognised kind collapses to report rather than disappearing', async () => {
+  // the same collapse gabbar's own reader makes. Conservative in the right direction: a held item
+  // can never be dropped for carrying a word this parser has not been taught.
+  for (const kind of ['correction', '', 7, null, { addition: true }, ['addition']]) {
+    park('PARK-C1_1_010', held({ kind, appendTo: 'PKT-FB-12' }));
+    const { body } = await get();
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({ kind: 'report', appendTo: null, addedToRow: null });
+  }
+});
+
+test('a report file carrying a stray appendTo does not get a feedback id on its card', async () => {
+  park('PARK-C1_1_011', held({ appendTo: 'PKT-FB-99' }));
+  const { body } = await get();
+  expect(body.items[0]!.appendTo).toBeNull();
+});
+
+test('an addition that no longer names a row is still held, with nothing invented for it', async () => {
+  park('PARK-C1_1_012', held({ kind: 'addition', appendTo: '   ' }));
+  const { body } = await get();
+  expect(body.items[0]).toMatchObject({ kind: 'addition', appendTo: null, addedToRow: false });
+});
+
 test('no directory means none held, not an error', async () => {
   rmSync(RIG, { recursive: true, force: true });
   const { status, body } = await get();
@@ -176,6 +221,7 @@ const band: Band = new Function('state', 'stubs', `
 const PWN = `';touch /tmp/darbar-should-never-exist;'`;
 const item = (over: Record<string, unknown> = {}) => ({
   parkId: 'PARK-C1_1_001', filed: false, parked: true, status: 'parked',
+  kind: 'report', appendTo: null, addedToRow: null,
   author: 'Priya Nair', authorSlackId: 'U08SXQF8RTQ',
   project: 'Parked Kit', projectRef: 'PKT', onTask: null, type: 'bug',
   body: 'the export button does nothing', theirWords: 'the export button does nothing on safari',
@@ -261,6 +307,77 @@ test('somebody already registered is told so instead of offered a duplicate gran
   const fix = band.heldFix(item());
   expect(fix.act).toBeNull();
   expect(fix.p).toContain('already registered');
+});
+
+// ---------- an addition on the card, where it is easiest to misread ----------
+// An addition is the only held card that carries a real feedback id, and everywhere else on this
+// board an id beside a card means the card IS that row. So what is pinned here is that the id can
+// only ever read as a destination: the card never says filed, never says the row has anything, and
+// the remedy promises an append rather than a filing.
+const addition = (over: Record<string, unknown> = {}) =>
+  item({ kind: 'addition', appendTo: 'PKT-FB-12', addedToRow: false, ...over });
+
+test('a held addition is never described in report language', () => {
+  board();
+  const html = band.heldRowHtml(addition());
+  expect(html).toContain('never added');
+  expect(html).not.toContain('not filed');       // the wrong failure for this item
+  expect(html).toContain('PKT-FB-12');
+  // and the row it names is stated to be untouched, in the card, not only in a tooltip
+  expect(html).toContain('That row is unchanged and shows no sign anything was sent');
+  // the identity of this card is still its own PARK id, in the id slot
+  expect(html).toContain('<span class="hid">PARK-C1_1_001</span>');
+});
+
+test('a held report is untouched by any of that', () => {
+  board();
+  const html = band.heldRowHtml(item());
+  expect(html).toContain('held · not filed');
+  expect(html).not.toContain('never added');
+  expect(html).not.toContain('hkind');
+});
+
+test('the remedy on an addition promises an append, never a filing', () => {
+  board();
+  const fix = band.heldFix(addition());
+  expect(fix.p).toContain('does not add anything to PKT-FB-12');
+  expect(fix.p).toContain('never becomes a second row');
+  expect(fix.p).not.toContain('file the report');
+  expect(fix.act).toEqual({ parkId: 'PARK-C1_1_001', name: 'Priya Nair', slackUserId: 'U08SXQF8RTQ', prefix: 'PKT' });
+});
+
+test('the armed grant on an addition declines the right thing', () => {
+  board({ parkArm: 'PARK-C1_1_001' });
+  const html = band.heldRowHtml(addition());
+  expect(html).toContain('the standing right to file feedback on PKT');
+  expect(html).toContain('It does not add anything to PKT-FB-12.');
+  expect(html).not.toContain('It does not file this report.');
+});
+
+test('an addition with no row left to name says the grant is not the whole job', () => {
+  board();
+  const fix = band.heldFix(addition({ appendTo: null }));
+  expect(fix.p).toContain('no longer names the row');
+  expect(fix.p).not.toContain('never becomes a second row'); // nothing to append to, so no promise
+  expect(fix.act).not.toBeNull(); // clearing the gate is still right, it is just not sufficient
+  const html = band.heldRowHtml(addition({ appendTo: null }));
+  expect(html).toContain('row not named');
+  expect(html).not.toContain('not filed');
+});
+
+test('an outage on an addition does not claim it will file itself', () => {
+  board();
+  const fix = band.heldFix(addition({ cause: 'outage' }));
+  expect(fix.p).toContain('adds itself to PKT-FB-12');
+  expect(fix.p).not.toContain('files itself');
+});
+
+test('a hostile appendTo is text on the card and a word of nothing', () => {
+  board({ parkArm: 'PARK-C1_1_001' });
+  const html = band.heldRowHtml(addition({ appendTo: `PKT-FB-12"><script>alert(1)</script>` }));
+  expect(html).not.toContain('<script');
+  expect(html).toContain('&lt;script&gt;');
+  for (const v of actionableAttrs(html)) expect(v).not.toContain('alert(1)');
 });
 
 test('a cause named after a prototype key renders as a cause, not as native code', () => {

@@ -288,6 +288,27 @@ export type ParkedSummary = {
   filed: false;
   parked: true;
   status: string; // parked | promoted | superseded
+  /**
+   * WHAT is held, which decides how it would be promoted and therefore what the board may say about
+   * it. A `report` is promoted by filing a new feedback row; an `addition` is promoted by appending
+   * to the row named in `appendTo`, and creates nothing. Describing the second one in report
+   * language is the board telling a story that did not happen, so the distinction rides on the read.
+   *
+   * Unlike `status` and `cause` above this IS a union, because the parser does not pass it through:
+   * it COLLAPSES anything that is not literally 'addition' to 'report', exactly as gabbar's own
+   * reader does, so a file written before kinds existed reads as the report it is and no held item
+   * can vanish for being an unrecognised word. The cost is stated rather than hidden: a THIRD kind
+   * would render as a report until it is added here and to the collapse in api.ts.
+   */
+  kind: 'report' | 'addition';
+  /** the feedback row an addition was meant to be added to (e.g. MRF-FB-23). Always null on a report. */
+  appendTo: string | null;
+  /**
+   * false on an addition, null on a report, never true — the same field, for the same reason, as
+   * gabbar's summarize(). `appendTo` is the only field on a held item that names a feedback id, and
+   * a reader holding just that id could take it for a row this reached. Held means it did not.
+   */
+  addedToRow: false | null;
   author: string;
   authorSlackId: string;
   /** display name for the target: what Gabbar resolved, else what the reporter typed */

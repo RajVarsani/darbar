@@ -2288,6 +2288,8 @@ api.post('/feedback/:shortId/append', async (c) => {
 // feedbackType, body, rawMessage, attachments, mediaNotes, gate.detail, promotion.feedbackShortId).
 // cause / escalatedAt / lastAttemptAt come from escalation work still in review, so they are read
 // when present and absent otherwise; nothing here breaks if that lands, changes, or never does.
+// kind / appendTo arrived with held ADDITIONS and degrade the same way: no kind is a report, which
+// is what every file written before them actually is.
 //
 // Two alternatives, rejected:
 //  · Gabbar POSTs held reports to the server, which stores them. That gives a refused report a home
@@ -2315,10 +2317,26 @@ const trimOrNull = (v: unknown): string | null => { const s = str(v)?.trim(); re
 function parkedSummary(parkId: string, raw: Record<string, unknown>, mtime: Date): ParkedSummary {
   const author = objOf(raw.author), target = objOf(raw.target), gate = objOf(raw.gate), promotion = objOf(raw.promotion);
   const words = str(raw.rawMessage) ?? '';
+  // WHAT is held, not just that something is. A refused APPEND holds evidence for a row that already
+  // exists, and rendering it in report language says somebody reported a thing when what they did was
+  // add a screenshot to a finding — the board narrating an event that did not happen. Gabbar's
+  // escalation digest already tells the two apart, so this reader was the surface that lagged.
+  // Collapsed exactly the way parked.ts collapses its own files: anything that is not literally
+  // 'addition' is a report, which is also what a file written before `kind` existed is. Conservative
+  // in the right direction — an unknown word cannot make a held item disappear, it reads as the
+  // ordinary case, and a third kind would have to be added here and in ParkedSummary to be told apart.
+  const kind: ParkedSummary['kind'] = trimOrNull(raw.kind) === 'addition' ? 'addition' : 'report';
   return {
     parkId,
     filed: false, // literally false on every row, like Gabbar's own summarize()
     parked: true,
+    kind,
+    // read only on an addition: a report has no destination, and a stray appendTo on a report file
+    // would put a feedback id on a card whose words are not going to any row
+    appendTo: kind === 'addition' ? trimOrNull(raw.appendTo) : null,
+    // constant per kind, and here for the reason parked.ts's summarize() carries it: the field that
+    // says nothing reached that row travels beside the only field that names one
+    addedToRow: kind === 'addition' ? false : null,
     status: trimOrNull(raw.status) ?? 'parked',
     author: trimOrNull(author.name) ?? 'unknown',
     authorSlackId: trimOrNull(author.slackUserId) ?? '',
