@@ -1,17 +1,29 @@
-// DAR-210: one deadline for the whole message, not one per request.
+// DAR-210: one budget for the whole message, not one per request.
+// DAR-233: and it is time spent WAITING ON DARBAR, not time elapsed during the turn.
 //
 // The per-request AbortSignal bounded a single call. A turn makes three or four, and a turn from
 // somebody with held reports makes up to ten more in the sweep before it starts, so a darbar that
 // accepts connections and never answers cost 28 seconds on a plain question and minutes on a bad
-// one, with a person watching an "is thinking..." that never resolves. What is pinned here is the
-// three things that has to be true of the fix and are easy to get wrong:
+// one, with a person watching an "is thinking..." that never resolves.
 //
-//  1. the budget covers the MESSAGE. Three hung calls cost one budget, not three timeouts, and the
+// The first fix measured the wrong quantity. It was a wall-clock deadline set when the scope opened,
+// and the scope wraps the model loop, so Opus's thinking time was charged to darbar. Darbar answered
+// in 30ms all day and the budget still ran out, and it ran out LATE in the turn, which is exactly
+// where filing happens: pending_feedback and file_feedback were the tools reported as never
+// attempted, and three of Raj's reports were lost. The tests below did not catch it because they
+// forced the spent branch with ms:0, which is true under either meaning. The gap test at the top of
+// the DAR-233 block is the one that would have.
+//
+// What is pinned here is the four things that have to be true and are easy to get wrong:
+//
+//  1. spend ACCUMULATES PER CALL. Only the duration of a fetch is charged; a gap between two calls,
+//     however long, costs nothing.
+//  2. the budget covers the MESSAGE. Three hung calls cost one budget, not three timeouts, and the
 //     calls after it is spent are not made at all.
-//  2. it still FAILS CLOSED. A spent budget is unreachable, and unreachable is a refusal at the
-//     stakeholder gate. A deadline that let somebody through because the check timed out would be
+//  3. it still FAILS CLOSED. A spent budget is unreachable, and unreachable is a refusal at the
+//     stakeholder gate. A budget that let somebody through because the check timed out would be
 //     worse than the hang it replaces.
-//  3. a turn that ran out SAYS SO. Answering from whatever was fetched before the clock ran out is
+//  4. a turn that ran out SAYS SO. Answering from whatever was fetched before the budget went is
 //     the defect class this project keeps finding, so the admission is written in code on the way
 //     out rather than left to the model, and it appears ONLY on budget exhaustion.
 //
@@ -58,8 +70,9 @@ if (!loopback(config.slackApiBase) || !loopback(config.apiUrl)) {
 
 // Nothing reaches the network. `mode` decides what the stub does with a request; every test says
 // which one it wants, and a url outside the two stub bases is a thrown test failure, not a request.
-type Mode = 'ok' | 'hang' | 'boom';
+type Mode = 'ok' | 'hang' | 'boom' | 'slow';
 let mode: Mode = 'ok';
+let slowMs = 80;
 let bodyOut = '{}';
 const asked: string[] = [];
 const realFetch = globalThis.fetch;
@@ -70,17 +83,27 @@ globalThis.fetch = (async (input: unknown, init?: { signal?: AbortSignal }) => {
   }
   asked.push(url);
   if (mode === 'boom') throw new Error('connection refused');
-  if (mode === 'hang') {
-    // a darbar that accepts the connection and never answers: resolves only when the caller's own
-    // AbortSignal fires, which is exactly the shape DAR-210 is about
-    return new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+  if (mode === 'hang' || mode === 'slow') {
+    // hang is a darbar that accepts the connection and never answers, so it resolves only when the
+    // caller's own AbortSignal fires, which is exactly the shape DAR-210 is about. slow is a darbar
+    // that does answer, eventually, which is how spend accumulates across calls that all succeed.
+    return new Promise((resolve, reject) => {
+      const t = mode === 'slow'
+        ? setTimeout(() => resolve(new Response(bodyOut, { status: 200, headers: { 'content-type': 'application/json' } })), slowMs)
+        : null;
+      init?.signal?.addEventListener('abort', () => {
+        if (t) clearTimeout(t);
+        reject(init.signal!.reason);
+      });
     });
   }
   return new Response(bodyOut, { status: 200, headers: { 'content-type': 'application/json' } });
 }) as typeof globalThis.fetch;
 
-const { fetchDarbar, runWithMessageBudget, withBudgetNotice, verifyStakeholder } = await import('./agent');
+const {
+  fetchDarbar, runWithMessageBudget, withBudgetNotice, verifyStakeholder,
+  MESSAGE_BUDGET_MS, DARBAR_TIMEOUT_MS,
+} = await import('./agent');
 
 afterAll(() => {
   globalThis.fetch = realFetch;
@@ -88,6 +111,7 @@ afterAll(() => {
 });
 beforeEach(() => {
   mode = 'ok';
+  slowMs = 80;
   bodyOut = '{}';
   asked.length = 0;
 });
@@ -113,6 +137,68 @@ test('a call with no message scope behaves exactly as before', async () => {
   expect(asked.length).toBe(1);
 });
 
+// ---------- DAR-233: what the budget MEASURES ----------
+
+// THE TEST THAT WOULD HAVE CAUGHT IT. Every darbar call here is instant and the gap between them is
+// longer than the entire budget, which is a turn where Opus thought for a while between tool calls.
+// Under the wall-clock deadline the late call was refused and never put on the wire; under spend
+// that accumulates per call this message has used about a millisecond and the call is made.
+test('a long gap between fast calls costs the budget nothing', async () => {
+  bodyOut = JSON.stringify({ name: 'Stub Project' });
+  const budget = await runWithMessageBudget(async (b) => {
+    for (let i = 0; i < 3; i++) expect((await fetchDarbar('/projects')).reachable).toBe(true);
+    await new Promise((r) => setTimeout(r, 300)); // the model thinking between tool calls
+    const late = await fetchDarbar('/feedback', 'POST', { body: 'a report' });
+    expect(late.reachable, 'the late call was refused for time the model spent, not darbar').toBe(true);
+    return b;
+  }, 200);
+  expect(asked.length, 'the call that files was never attempted').toBe(4);
+  expect(budget.exhausted).toBe(false);
+  expect(withBudgetNotice('filed it.', budget)).toBe('filed it.');
+});
+
+// the same shape one level up, where the damage actually happened: filing runs late in a turn, so
+// the gate call in front of it was the one starved, and a starved gate call is a refusal that parks
+// the report instead of filing it
+test('a stakeholder is still recognised late in a slow turn', async () => {
+  bodyOut = JSON.stringify({ name: 'Stub Project', stakeholders: [{ slackUserId: 'U000000SOMEONE' }] });
+  const v = await runWithMessageBudget(async () => {
+    await fetchDarbar('/projects'); // context gathering, early in the turn
+    await new Promise((r) => setTimeout(r, 300));
+    return verifyStakeholder(ctx, { project: 'STUB' }); // the gate in front of file_feedback
+  }, 200);
+  expect(v.ok, 'a real stakeholder was refused because the turn had been going a while').toBe(true);
+});
+
+// the other half of the same property: time darbar takes IS charged, and it adds up across calls
+// that each succeed, so a darbar that is merely slow still cannot run a message forever
+test('spend accumulates across calls that darbar does answer', async () => {
+  mode = 'slow';
+  slowMs = 60; // ten of these is 600ms of waiting, against a 200ms budget
+  const started = Date.now();
+  const answered: boolean[] = [];
+  const budget = await runWithMessageBudget(async (b) => {
+    for (let i = 0; i < 10; i++) answered.push((await fetchDarbar('/projects')).reachable);
+    return b;
+  }, 200);
+  const elapsed = Date.now() - started;
+  expect(answered[0], 'the first call was refused on an untouched budget').toBe(true);
+  expect(answered.filter(Boolean).length, 'a 60ms darbar answered more often than a 200ms budget pays for').toBeLessThanOrEqual(3);
+  expect(answered.at(-1), 'the budget never ran out against a darbar slower than it').toBe(false);
+  expect(elapsed, 'every slow call was allowed, so the budget is still per request').toBeLessThan(400);
+  expect(asked.length, 'calls kept going on the wire after the budget was gone').toBeLessThanOrEqual(4);
+  expect(budget.exhausted).toBe(true);
+});
+
+// the number is a claim about the worst case, so it is written down rather than left to be
+// rediscovered: 20s of waiting buys exactly two attempts at the 10s per-request timeout, and every
+// call after those is refused without touching the wire. 20s of WAITING is also unreachable on a
+// healthy darbar, where a fourteen-call turn spends about 400ms.
+test('the chosen budget says what a hanging darbar costs per message', () => {
+  expect(MESSAGE_BUDGET_MS).toBe(20_000);
+  expect(MESSAGE_BUDGET_MS / DARBAR_TIMEOUT_MS, 'attempts a fully hanging darbar gets per message').toBe(2);
+});
+
 test('once the budget is spent the remaining calls are not made at all', async () => {
   const budget = await runWithMessageBudget(async (b) => {
     for (let i = 0; i < 5; i++) {
@@ -126,19 +212,26 @@ test('once the budget is spent the remaining calls are not made at all', async (
   expect(budget.exhausted).toBe(true);
 });
 
+// the original protection, unchanged by DAR-233: a darbar that accepts the connection and then
+// never answers is still bounded, and the bound is the BUDGET rather than the budget per call.
+// Scaled down here because the shipped pair is 20s over a 10s timeout, which is a slow test; the
+// arithmetic test above pins what those two produce.
 test('the budget bounds the whole message, not each call', async () => {
   mode = 'hang';
   const started = Date.now();
   const budget = await runWithMessageBudget(async (b) => {
-    for (let i = 0; i < 3; i++) await fetchDarbar('/projects');
+    for (let i = 0; i < 3; i++) {
+      const f = await fetchDarbar('/projects');
+      expect(f.reachable).toBe(false);
+    }
     return b;
   }, 150);
   const spent = Date.now() - started;
   // one budget for three calls. The old behaviour was three 10s timeouts; anything near that here
-  // would mean the deadline is still per request.
-  expect(spent).toBeLessThan(2_000);
+  // would mean the bound is still per request.
+  expect(spent, 'a hanging darbar cost more than the whole budget').toBeLessThan(1_000);
   expect(budget.exhausted).toBe(true);
-  expect(asked.length, 'calls after the deadline were still attempted').toBe(1);
+  expect(asked.length, 'calls after the budget was gone were still attempted').toBe(1);
 });
 
 test('the deadline survives the async hops a real turn makes', async () => {

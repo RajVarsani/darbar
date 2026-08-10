@@ -31,7 +31,7 @@ type Fetched =
   | { reachable: true; status: number; json: Record<string, unknown> }
   | { reachable: false; detail: string };
 
-const DARBAR_TIMEOUT_MS = 10_000;
+export const DARBAR_TIMEOUT_MS = 10_000;
 
 /**
  * DAR-210. The per-request AbortSignal bounds ONE call; a slack message is three or four, plus up
@@ -41,22 +41,38 @@ const DARBAR_TIMEOUT_MS = 10_000;
  * that never resolves. This is the second bound: one budget for every darbar call a single message
  * makes, per-request timeout still on top of it.
  *
+ * IT IS TIME SPENT WAITING ON DARBAR, ACCUMULATED PER CALL, and DAR-233 is why that sentence is
+ * spelled out. The first implementation was a wall-clock deadline set when the scope opened, and
+ * the scope wraps the whole turn including the model loop, so it charged Opus's thinking time to
+ * darbar. With darbar answering in 30ms throughout, the budget still ran out, and the calls it
+ * starved were the late ones: filing happens after the context gathering, so pending_feedback and
+ * file_feedback were the exact tools reported as never attempted, and three of Raj's reports were
+ * lost. Only the duration of the fetch itself is charged now. Model time, slack time and anything
+ * else the turn does are free, because none of them is the failure this bounds.
+ *
+ * 20s of waiting is a much larger allowance than it sounds: a healthy turn is fourteen calls at
+ * 30ms, so under half a second, and even a badly degraded darbar at 300ms a call spends 4s. It is
+ * only reachable when darbar has stopped answering, and then it buys exactly two attempts at the
+ * 10s per-request timeout before every remaining call is refused for free. Worst case per message
+ * is therefore 20s of waiting, not 28s and not minutes.
+ *
  * AsyncLocalStorage rather than a module-level variable because two slack messages are genuinely
- * in flight at once (bot.ts handles each event concurrently), and a shared deadline would let a
+ * in flight at once (bot.ts handles each event concurrently), and a shared counter would let a
  * long message spend the budget of a short one that arrived after it.
  *
  * Nothing outside a message opens a scope, and a call with no scope keeps the old behaviour
  * exactly: unlimited message budget, 10s per request. That is what the escalation tick and any
  * future background caller get, and it is the safe direction for a path with no human waiting.
  */
-const MESSAGE_BUDGET_MS = 3_600_000; // STOPGAP (orchestrator, DAR-233): the deadline is WALL CLOCK from turn start, so it counted model thinking time and starved the late calls that actually file. Raised until the budget measures darbar time only.
-type MessageBudget = { deadline: number; exhausted: boolean };
+// exported for agent-budget.test.ts: the pair is the worst case, so the test pins their ratio
+export const MESSAGE_BUDGET_MS = 20_000;
+type MessageBudget = { budgetMs: number; spentMs: number; exhausted: boolean };
 const budgets = new AsyncLocalStorage<MessageBudget>();
 
-// exported for agent-budget.test.ts: the deadline is only worth having if it still fails CLOSED at
+// exported for agent-budget.test.ts: the budget is only worth having if it still fails CLOSED at
 // the stakeholder gate and still tells the sender, and both of those are properties of this scope
 export function runWithMessageBudget<T>(fn: (budget: MessageBudget) => Promise<T>, ms: number = MESSAGE_BUDGET_MS): Promise<T> {
-  const budget: MessageBudget = { deadline: Date.now() + ms, exhausted: false };
+  const budget: MessageBudget = { budgetMs: ms, spentMs: 0, exhausted: false };
   return budgets.run(budget, () => fn(budget));
 }
 
@@ -69,25 +85,36 @@ export function runWithMessageBudget<T>(fn: (budget: MessageBudget) => Promise<T
  * away, so the admission is written HERE, in code, on the way out: if the budget was blown, the
  * reply says the answer may be incomplete whatever the model chose to write. Same shape as
  * withFilingNotice, which exists for the same reason.
+ *
+ * The wording has to be true of what the flag now means (DAR-233). It is set only when a call was
+ * refused or cut short because the message had spent its whole allowance of WAITING ON DARBAR, so
+ * "darbar was too slow" is a fact about darbar, not about how long the turn took. It no longer
+ * appears on a turn that simply took a while to think, which is what was telling senders their
+ * answer might be incomplete when nothing had been skipped at all.
  */
 export function withBudgetNotice(reply: string, budget: { exhausted: boolean }): string {
   if (!budget.exhausted) return reply;
-  return `${reply.trim()}\n\nheads up: darbar stopped answering partway through this one, so i ran out of time to check everything. whatever i said above may be missing something, ask me again in a minute.`;
+  return `${reply.trim()}\n\nheads up: darbar was answering too slowly on this one, so i ran out of time waiting on it and skipped some checks. whatever i said above may be missing something, ask me again in a minute.`;
 }
 
 // exported for agent-budget.test.ts alongside runWithMessageBudget: this function IS the
 // reachable/unreachable distinction the gate reads, so the budget's effect on it is worth pinning
 export async function fetchDarbar(path: string, method = 'GET', body?: unknown): Promise<Fetched> {
   const budget = budgets.getStore();
-  const left = budget ? budget.deadline - Date.now() : Number.POSITIVE_INFINITY;
+  const left = budget ? budget.budgetMs - budget.spentMs : Number.POSITIVE_INFINITY;
   // Spent. The call is not made at all, which is the point: the remaining tool calls of a doomed
   // turn now cost nothing instead of ten seconds each. It is reported as unreachable, so every
   // caller — the gate included — treats it exactly as it treats a darbar that is down.
   if (left <= 0) {
     budget!.exhausted = true;
-    return { reachable: false, detail: `this message used up its ${MESSAGE_BUDGET_MS}ms budget for darbar calls, so this one was not attempted` };
+    return { reachable: false, detail: `this message used up its ${budget!.budgetMs}ms budget of time waiting on darbar, so this one was not attempted` };
   }
+  // Still capped by what is left, so the budget is a real ceiling: without the cap a message could
+  // wait its whole budget and then start one more full 10s call on top. A short cap costs a healthy
+  // darbar nothing, since a call that answers in 30ms answers inside any of these, and if it does
+  // time out the catch below reports the budget as the reason rather than blaming darbar's speed.
   const timeout = Math.min(DARBAR_TIMEOUT_MS, left);
+  const startedAt = Date.now();
   try {
     const r = await fetch(`${config.apiUrl}${path}`, {
       method,
@@ -111,16 +138,21 @@ export async function fetchDarbar(path: string, method = 'GET', body?: unknown):
     // which are undefined on an array, so it still refuses safely.
     return { reachable: true, status: r.status, json: parsed as Record<string, unknown> };
   } catch (e) {
-    // a timeout that landed ON the deadline is the budget, not the per-request limit, and only that
-    // one marks the turn: a network failure or a single slow call is the pre-existing behaviour and
-    // must not start telling every sender their answer is incomplete
+    // a timeout on a call the BUDGET shortened is the budget's doing, not the per-request limit's,
+    // and only that one marks the turn: a network failure or a single slow call is the pre-existing
+    // behaviour and must not start telling every sender their answer is incomplete. The test is
+    // whether this call got less than the full 10s, which is true only when the budget capped it.
     const timedOut = (e as { name?: string })?.name === 'TimeoutError';
-    if (timedOut && budget && Date.now() >= budget.deadline) {
+    if (timedOut && budget && timeout < DARBAR_TIMEOUT_MS) {
       budget.exhausted = true;
-      return { reachable: false, detail: `this message used up its ${MESSAGE_BUDGET_MS}ms budget for darbar calls while waiting on this one` };
+      return { reachable: false, detail: `this message used up its ${budget.budgetMs}ms budget of time waiting on darbar while waiting on this one` };
     }
     const why = timedOut ? `darbar did not answer within ${timeout}ms` : `darbar unreachable: ${String(e).slice(0, 80)}`;
     return { reachable: false, detail: why };
+  } finally {
+    // the only thing charged to the message: how long darbar took, whether it answered, failed or
+    // timed out. Everything between two calls is somebody else's time.
+    if (budget) budget.spentMs += Date.now() - startedAt;
   }
 }
 
@@ -1176,9 +1208,11 @@ export async function runAgent(
   // costs: five distinct targets is up to ten gate calls before the turn starts, and bounding only
   // the turn would have left the worst case untouched.
   //
-  // It covers darbar calls only. The model calls (triage, chat, the tool runner) are not on it: they
-  // are a different failure mode with its own timeouts, and putting them under one clock would mean
-  // a slow model silently truncating the board reads it needs.
+  // It covers darbar calls only. The scope spans the model loop because the sweep and the tool calls
+  // sit either side of it, but nothing inside the loop is CHARGED to it: the budget accumulates the
+  // duration of each fetch, so triage, chat and the tool runner cost it nothing. That distinction is
+  // DAR-233. When the scope's mere span was the measure, a slow model silently truncated the board
+  // reads it needed, and worse, the filing calls at the end of a turn were the ones it starved.
   return runWithMessageBudget(async (budget) => {
     // recovery first, and in code: whether a held report gets filed depends only on the verified
     // sender id, so no message and no route can influence it in either direction
