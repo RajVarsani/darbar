@@ -466,3 +466,45 @@ server's config for a real project. There is no `DELETE /api/projects` and no
 `DELETE /api/tasks`, so cleanup is direct Mongo against `mission_control`: delete the
 throwaway's `tasks`, `feedback` and `events` by `projectId`, then the project document.
 Verify nothing of it remains and touch no other prefix.
+
+## 12. Restarting the api without a write window
+
+The api gets restarted by hand, from a shell, several times a day to pick up shipped
+code — and every restart used to be a few seconds where every write failed. `server.ts`
+sets `reusePort: true` on the Bun serve options, so a freshly started process can bind
+the SAME port while the outgoing one is still bound to it. Both hold the port during the
+handoff, so the kernel keeps accepting connections throughout; nothing gets refused.
+
+```bash
+OLD=$(pgrep -f 'src/server.ts')                      # capture the pid BEFORE starting the new one
+bun run server &
+NEW=$!                                                 # the launch command's own pid IS the new server's pid
+until [ "$(curl -sf -D - http://127.0.0.1:4899/healthz -o /dev/null 2>/dev/null \
+      | tr -d '\r' | awk -F': ' '/^x-darbar-pid/{print $2}')" = "$NEW" ]; do sleep 0.2; done
+kill -TERM "$OLD"                                      # only that pid, never a broad pkill
+```
+
+- **Wait for `/healthz` to answer WITH THE NEW PID, polled, not a fixed sleep.** Once
+  `reusePort` has two processes sharing the port, the kernel can route a poll to either
+  one — "`/healthz` returned 200" is not proof the new process specifically is up, only
+  that *something* still is, which the old process alone already satisfied. `/healthz`
+  answers with an `x-darbar-pid` header, so the loop waits for that header to carry `$NEW`
+  before treating the handoff as done. The route also cannot answer at all until the port
+  binds, which waits on `initDb()` (server.ts awaits it before calling `Bun.serve`), so
+  seeing the new pid already proves that process's DB connectivity too. A fixed sleep
+  would either race a slow boot or waste seconds on a fast one, and would not even ask
+  the "which process" question.
+- **Only SIGTERM the old pid, and only after the new one answers.** Capture `$OLD` before
+  launching the new process — once both are up, `pgrep -f 'src/server.ts'` matches both and
+  you can no longer tell them apart by pattern. If the new process crashes or never comes
+  up, the old one is simply never killed and keeps serving; a failed deploy costs you a
+  restart to retry, not the service. Do not move the kill earlier as a shortcut.
+- **SIGTERM drains, it does not kill.** `server.ts` catches SIGTERM and calls
+  `server.stop()`, which stops accepting new connections but lets whatever is already
+  in flight finish before the process exits. A bare SIGTERM with no handler was verified
+  to drop an in-flight request outright (no response at all) — that gap is why the handler
+  exists.
+
+What you should see: `lsof -i :4899` briefly lists two pids while the health-check loop is
+polling, the loop returns within a couple of seconds, and afterwards exactly one process is
+left. No request made during the handoff comes back failed.
