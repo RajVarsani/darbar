@@ -14,8 +14,8 @@ import { memoryTool, memoryTree, readPersonFile } from './memory';
 import { mediaNotes, NO_ATTACHMENTS, type Attachments } from './media';
 import {
   buildEscalationDigest, dueForEscalation, listParked, markAttempted, markEscalated, markPromoted,
-  markSuperseded, parkedTarget, parkReport, planSweep, readParked, summarize, withFilingNotice,
-  type ParkCause, type ParkedItem,
+  markSuperseded, parkAddition, parkedTarget, parkReport, planSweep, readParked, summarize,
+  withFilingNotice, type ParkCause, type ParkedItem,
 } from './parked';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
@@ -253,19 +253,23 @@ export async function verifyStakeholder(
  * a reopen: the row is still there, the thread is still there, and the owner is told what was
  * said, so the only thing a park could add is fabricated board data.
  *
- * An `append` (DAR-182) sits with `reopen` rather than with `file`, and the reason is worth stating
- * because it looks like the wrong side. The words ARE the sender's own, so parking them would lose
- * nothing that belongs to somebody else. But a parked report is promoted by filing a NEW FEEDBACK
- * ROW, and a new row is exactly the defect DAR-182 exists to remove: the whole point of an append is
- * that one finding stays one row. Parking it would fix the loss by rebuilding the duplicate. So a
- * refused append is refused plainly, nothing is held, the sender is told nothing was added so they
- * can send it again, and on a stakeholder gap the owner still gets their words in the ping. Making a
- * refused append survivable needs an append-aware held record, which lives in parked.ts.
+ * An `append` (DAR-182) sits with `file` and NOT with `reopen`, which is the correction DAR-219
+ * made. The test is whose words are at stake, not which row is named: an append carries the
+ * sender's own screenshot or sentence, and refusing it used to throw exactly that away. It sat with
+ * reopen only because promotion meant filing a NEW row, and a new row for evidence that belongs on
+ * an existing finding is the duplicate DAR-182 removed. parked.ts now holds an append as an
+ * ADDITION, promoted by appending to the row it names, so the reason it could not be held is gone
+ * and the reason it should be is unchanged.
+ *
+ * A `reopen` still parks nothing, at either end of that argument: it carries no words of the
+ * sender's, and the row it names is untouched by the refusal.
  */
 type GateIntent =
   | { kind: 'file'; body: string; type?: string }
   | { kind: 'reopen'; feedbackShortId: string }
-  | { kind: 'append'; feedbackShortId: string };
+  // `note` is what the sender is adding, in their own terms. It is on the intent because a refusal
+  // now HOLDS it, and a gate that was not given the words could not hold them.
+  | { kind: 'append'; feedbackShortId: string; note: string };
 
 function causeFor(kind: Exclude<Verdict, { ok: true }>['kind']): ParkCause {
   if (kind === 'not_stakeholder') return 'stakeholder_gap';
@@ -273,7 +277,12 @@ function causeFor(kind: Exclude<Verdict, { ok: true }>['kind']): ParkCause {
   return 'bad_reference'; // bad_ref, and a project darbar says does not exist
 }
 
-async function stakeholderGate(
+/**
+ * Exported for parked-append.test.ts. "A refusal holds what the sender wrote" is decided here and
+ * nowhere else, and the three intents now answer it three different ways, so the test asserts what
+ * this function did to disk rather than trusting that an append inherited the file path's behaviour.
+ */
+export async function stakeholderGate(
   ctx: AgentContext,
   target: { taskRef?: string; project?: string },
   intent: GateIntent,
@@ -289,34 +298,75 @@ async function stakeholderGate(
   const pingable = v.kind === 'not_stakeholder';
   const cause = causeFor(v.kind);
 
-  // The two intents that operate on a row somebody already filed. Neither parks: a reopen would
-  // copy another author's words into a held item, an append would be promoted as a second row, and
-  // both refusals leave the existing row exactly as it was, which is the honest thing to report.
-  if (intent.kind === 'reopen' || intent.kind === 'append') {
+  // A reopen is the one intent that parks NOTHING: it carries no words of the sender's, so there is
+  // nothing of theirs to lose, and the row it names is untouched by the refusal. Holding one could
+  // only ever be promoted into somebody else's words under this sender's name.
+  if (intent.kind === 'reopen') {
     const id = intent.feedbackShortId;
-    const isAppend = intent.kind === 'append';
-    const did = isAppend ? 'add anything to' : 'reopen';
-    const untouched = isAppend
-      ? `${id} was NOT changed, nothing was added to it, and nothing was filed`
-      : `${id} was NOT reopened, it is untouched, and nothing was filed`;
     if (pingable) {
       await notifyOwnerGated(
         ctx,
-        isAppend
-          ? `tried to add to ${id} on *${where}* but is not on its stakeholder list. nothing was added and nothing was filed, ${id} is untouched. add them as a stakeholder if their evidence should count.`
-          : `tried to reopen ${id} on *${where}* but is not on its stakeholder list. nothing was reopened and nothing was filed, ${id} is untouched. add them as a stakeholder if their follow-up should count.`,
+        `tried to reopen ${id} on *${where}* but is not on its stakeholder list. nothing was reopened and nothing was filed, ${id} is untouched. add them as a stakeholder if their follow-up should count.`,
         ctx.messageText,
       );
     }
     return {
       ok: false,
       result: JSON.stringify({
-        ...(isAppend ? { added: false } : { reopened: false }),
+        reopened: false,
         filed: false,
         parked: false,
-        ...(v.kind === 'not_stakeholder' ? { gated: true } : { error: `${v.detail}, nothing ${isAppend ? 'added' : 'reopened'}` }),
-        reason: `${v.detail}. ${untouched}.${pingable ? ' the owner has been pinged already.' : ''}`,
-        instruction: `tell the sender plainly, in persona, that you could not ${did} ${id} and nothing was filed${v.kind === 'not_stakeholder' ? " because they are not on this project's stakeholder list" : ''}${pingable ? ', and that the owner has been pinged' : ''}. do NOT claim anything was filed, ${isAppend ? 'added, ' : 'reopened, '}held or parked: nothing here was held anywhere, so do not tell them it is waiting or being tracked. do NOT retry or work around this.`,
+        ...(v.kind === 'not_stakeholder' ? { gated: true } : { error: `${v.detail}, nothing reopened` }),
+        reason: `${v.detail}. ${id} was NOT reopened, it is untouched, and nothing was filed.${pingable ? ' the owner has been pinged already.' : ''}`,
+        instruction: `tell the sender plainly, in persona, that you could not reopen ${id} and nothing was filed${v.kind === 'not_stakeholder' ? " because they are not on this project's stakeholder list" : ''}${pingable ? ', and that the owner has been pinged' : ''}. do NOT claim anything was filed, reopened, held or parked: nothing here was held anywhere, so do not tell them it is waiting or being tracked. do NOT retry or work around this.`,
+      }),
+    };
+  }
+
+  // An append IS the sender's own evidence, so a refusal holds it (DAR-219). It is held as an
+  // ADDITION, which is promoted later by appending to this same row: nothing here can ever become a
+  // second feedback row. The row itself is untouched right now and the reply has to say so.
+  if (intent.kind === 'append') {
+    const id = intent.feedbackShortId;
+    const item = parkAddition({
+      channel: ctx.channel,
+      ts: ctx.messageTs,
+      threadTs: ctx.threadTs,
+      authorId: ctx.senderId,
+      authorName: ctx.senderName,
+      projectRef: v.projectRef,
+      projectName: v.projectName,
+      taskRef: target.taskRef ?? null,
+      // an addition has no feedback type of its own: it is never filed as a row, so there is no
+      // type to pick, and saying 'bug' here would invent one
+      feedbackType: 'addition',
+      body: intent.note,
+      rawMessage: ctx.messageText,
+      attachments: ctx.attachments,
+      mediaNotes: mediaNotes(ctx.attach.items),
+      gateKind: v.kind,
+      gateDetail: v.detail,
+      cause,
+      appendTo: id,
+    });
+    if (pingable) {
+      await notifyOwnerGated(
+        ctx,
+        `tried to add to ${id} on *${where}* but is not on its stakeholder list. nothing was added and nothing was filed, ${id} is untouched. what they were adding is held as \`${item.parkId}\`, add them as a stakeholder or ask me to promote it onto ${id}.`,
+        intent.note || ctx.messageText,
+      );
+    }
+    return {
+      ok: false,
+      result: JSON.stringify({
+        added: false,
+        filed: false,
+        parked: true,
+        parkId: item.parkId,
+        ...(v.kind === 'not_stakeholder' ? { gated: true } : { error: `${v.detail}, nothing added` }),
+        reason: `${v.detail}. ${id} was NOT changed, nothing was added to it, and nothing was filed.${pingable ? ' the owner has been pinged already.' : ''}`,
+        held: `what they were adding, and any attachments, are held as ${item.parkId} until the owner promotes it or they are added as a stakeholder. promoting it ADDS it to ${id}; it never becomes a feedback row of its own. this is NOT a feedback row and it is not on any board.`,
+        instruction: `tell the sender plainly, in persona, that nothing was added to ${id} and nothing was filed${v.kind === 'not_stakeholder' ? " because they are not on this project's stakeholder list" : ''}, that what they sent is being held for the owner, and${pingable ? ' that the owner has been pinged.' : ''} do NOT claim anything was added or filed: ${id} looks exactly as it did. ${item.parkId} is a holding id, not a feedback id: do not hand it out as one and do not imply the work is tracked. do NOT retry or work around this.`,
       }),
     };
   }
@@ -394,8 +444,63 @@ async function promoteParked(
   return { ok: true, shortId: res.shortId, boardUrl: res.boardUrl ?? null };
 }
 
+type AdditionResult =
+  | { ok: true; appendedTo: string; warnings: string[] }
+  | { ok: false; gone: boolean; error: string };
+
 /**
- * Held reports surface to the owner on a CLOCK, not on whether anyone happens to talk to Gabbar.
+ * Promote a held ADDITION: append it to the row it was always meant for, creating nothing.
+ *
+ * This is the whole reason a refused append can be held at all. It runs through the append route
+ * (DAR-182) rather than POST /feedback, so a held addition can never turn into a second row for one
+ * finding. Attribution stays with the original sender, like promoteParked, and the provenance line
+ * says the words were held rather than sent just now, because a reader seeing today's date on a
+ * screenshot from three weeks ago would draw the wrong conclusion.
+ *
+ * TWO CASES THE ROW CAN BE IN BY THE TIME THIS RUNS, both decided here rather than by accident:
+ *
+ * · CLOSED (resolved or rejected). It is appended anyway. The evidence belongs on that finding
+ *   whatever its status, and the route deliberately does not reopen a row on an append: reopening
+ *   is a decision with a slack message attached and stays a deliberate act. What is NOT acceptable
+ *   is landing it silently, since a closed row is in no triage queue, so the route's warning is
+ *   carried back up to the caller and reaches the sender.
+ *
+ * · GONE (404). Nothing is created and the addition STAYS HELD. The alternative is filing its words
+ *   as a new row, which is both the DAR-182 duplicate and a row whose entire context, the finding
+ *   they were adding to, no longer exists. Holding costs one cheap 404 per sweep turn and keeps the
+ *   words; the owner can point it at the right row with promote_parked feedbackRef, which is the
+ *   case where a human knows something the sweep cannot.
+ */
+// exported for parked-append.test.ts: "a held addition never becomes a feedback row" is a property
+// of WHICH ROUTE this calls, so the test watches the urls this puts on the wire
+export async function promoteAddition(item: ParkedItem, promotedBy: string, appendTo?: string): Promise<AdditionResult> {
+  const row = (appendTo ?? item.appendTo ?? '').trim();
+  if (!row) return { ok: false, gone: false, error: `${item.parkId} is a held addition with no row on it, so there is nothing to add it to` };
+  const note = [
+    item.body.trim() || item.rawMessage.trim(),
+    `[sent in slack by ${item.author.name} on ${item.createdAt}, held as ${item.parkId} because ${item.gate.detail}, added later by ${promotedBy}.]`,
+    item.mediaNotes.length ? `evidence: ${item.mediaNotes.join(' | ').slice(0, 1200)}` : '',
+  ].filter(Boolean).join('\n\n');
+
+  const f = await fetchDarbar(`/feedback/${encodeURIComponent(row)}/append`, 'POST', {
+    note,
+    attachments: item.attachments,
+    author: item.author.name,
+    authorType: 'human',
+  });
+  if (!f.reachable) return { ok: false, gone: false, error: f.detail };
+  // the route's own 404: the row was deleted between the refusal and now
+  if (f.status === 404) return { ok: false, gone: true, error: `${row} no longer exists, so nothing was added and nothing was created` };
+  if (f.json.appended !== true) return { ok: false, gone: false, error: String(f.json.error ?? 'darbar refused the append') };
+  markPromoted(item.parkId, row, promotedBy);
+  const warnings = Array.isArray(f.json.warnings) ? (f.json.warnings as unknown[]).map(String) : [];
+  return { ok: true, appendedTo: row, warnings };
+}
+
+/**
+ * Held items surface to the owner on a CLOCK, not on whether anyone happens to talk to Gabbar. A
+ * held addition rides the same clock and the same digest as a held report; what differs is only the
+ * wording, since "never filed" is not what went wrong with an addition (see buildEscalationDigest).
  *
  * This is the bound the whole design rests on: a report the gate refused becomes visible to a
  * human within an hour (outage or bad reference, where nobody was told anything) or a day
@@ -455,13 +560,14 @@ export async function escalateStaleParked(now: Date = new Date()): Promise<numbe
 // Raising the budget would not have fixed this; only ordering does.
 const MAX_TARGETS_PER_SWEEP = 5;
 
-type SweepResult = { parkId: string | null; filed: string | null; notice: string };
+type SweepResult = { parkId: string | null; filed: string | null; added: string | null; notice: string };
 
 async function sweepParked(ctx: AgentContext): Promise<SweepResult[]> {
   const held = listParked({ status: 'parked', authorId: ctx.senderId });
   if (!held.length) return [];
   const out: SweepResult[] = [];
   const attempted: string[] = [];
+  const by = `gabbar, automatically once ${ctx.senderName} was recognised as a stakeholder`;
 
   for (const group of planSweep(held, MAX_TARGETS_PER_SWEEP)) {
     const v = await verifyStakeholder(ctx, group.target); // ONE call for the whole group
@@ -469,10 +575,31 @@ async function sweepParked(ctx: AgentContext): Promise<SweepResult[]> {
       attempted.push(item.parkId);
       const where = item.target.projectName ?? item.target.projectRef ?? 'an unresolved project';
       if (!v.ok) continue; // still refused; the aggregate line below covers it
-      const r = await promoteParked(item, `gabbar, automatically once ${ctx.senderName} was recognised as a stakeholder`, group.target);
+      // Same gate answer, two different promotions. An addition goes onto the row it named and
+      // NEVER through file_feedback, which is what keeps one finding on one row.
+      if (item.kind === 'addition') {
+        const a = await promoteAddition(item, by);
+        out.push(a.ok
+          ? {
+            parkId: item.parkId,
+            filed: null,
+            added: a.appendedTo,
+            notice: `${item.parkId} (what they earlier tried to add to ${a.appendedTo}) was being HELD and was never added at the time. it has NOW been added to ${a.appendedTo}, because they are a recognised stakeholder now. tell them that in your reply. NOTHING was filed and no new row exists: ${a.appendedTo} is the same row it always was, it just carries their words now.${a.warnings.length ? ` darbar also said, and they should hear it: ${a.warnings.join(' ')}` : ''}`,
+          }
+          : {
+            parkId: item.parkId,
+            filed: null,
+            added: null,
+            notice: a.gone
+              ? `${item.parkId} (their earlier addition to ${item.appendTo}) is STILL HELD: that row no longer exists, so nothing was added and nothing was filed. their words are still held and are not lost. do not claim it was added, and do not describe it as a report or a new row.`
+              : `${item.parkId} (their earlier addition to ${item.appendTo}) is STILL HELD, adding it just failed: ${a.error}. do not claim it was added.`,
+          });
+        continue;
+      }
+      const r = await promoteParked(item, by, group.target);
       out.push(r.ok
-        ? { parkId: item.parkId, filed: r.shortId, notice: `${item.parkId} (their earlier report on ${v.projectName ?? where}) was being HELD and was never filed at the time. it has NOW been filed as ${r.shortId}, because they are a recognised stakeholder now. tell them this in your reply with the id, and do not describe the earlier report as having been filed back then.` }
-        : { parkId: item.parkId, filed: null, notice: `${item.parkId} (their earlier report on ${where}) is STILL HELD, filing it just failed: ${r.error}. do not claim it was filed.` });
+        ? { parkId: item.parkId, filed: r.shortId, added: null, notice: `${item.parkId} (their earlier report on ${v.projectName ?? where}) was being HELD and was never filed at the time. it has NOW been filed as ${r.shortId}, because they are a recognised stakeholder now. tell them this in your reply with the id, and do not describe the earlier report as having been filed back then.` }
+        : { parkId: item.parkId, filed: null, added: null, notice: `${item.parkId} (their earlier report on ${where}) is STILL HELD, filing it just failed: ${r.error}. do not claim it was filed.` });
     }
   }
   markAttempted(attempted);
@@ -480,12 +607,15 @@ async function sweepParked(ctx: AgentContext): Promise<SweepResult[]> {
   // ONE aggregate line for everything still held, not one per item. Per-item notices put a line
   // into this sender's system prompt on every message forever, and their only job is to stop the
   // model calling them filed, which a single sentence does just as well at any scale.
-  const stillHeld = held.length - out.filter((r) => r.filed).length;
+  const stillHeld = held.length - out.filter((r) => r.filed || r.added).length;
   if (stillHeld > 0) {
     out.push({
       parkId: null,
       filed: null,
-      notice: `${stillHeld} earlier report${stillHeld > 1 ? 's' : ''} from this sender ${stillHeld > 1 ? 'are' : 'is'} STILL HELD and NOT filed, waiting on the owner. do not describe any of them as filed, tracked, raised or picked up.`,
+      added: null,
+      // "not filed" alone would be a true sentence that misses half of what is held: an addition
+      // was never filed AND never added, and only the second one names what went wrong with it.
+      notice: `${stillHeld} earlier item${stillHeld > 1 ? 's' : ''} from this sender ${stillHeld > 1 ? 'are' : 'is'} STILL HELD, waiting on the owner: nothing was filed, and nothing was added to any row that already exists. do not describe any of them as filed, added, tracked, raised or picked up.`,
     });
   }
   return out;
@@ -715,9 +845,11 @@ function buildTools(ctx: AgentContext) {
         // feedback", which is not a reply in that row's thread, so a thread restriction would not
         // have fixed anything. What keeps a wrong ref cheap is that this only ever APPENDS, under
         // the sender's name — the original report stays readable and a mistake is visible.
-        const gate = await stakeholderGate(ctx, { project: String(row.projectId) }, { kind: 'append', feedbackShortId: id });
+        // the note rides on the intent because a refusal HOLDS it now (DAR-219): a gate that was
+        // not handed the sender's words could not have held them
+        const gate = await stakeholderGate(ctx, { project: String(row.projectId) }, { kind: 'append', feedbackShortId: id, note: String(note ?? '') });
         if (!gate.ok) return gate.result;
-        return mc(`/feedback/${encodeURIComponent(id)}/append`, 'POST', {
+        const res = await mc(`/feedback/${encodeURIComponent(id)}/append`, 'POST', {
           note: String(note ?? ''),
           // transport-controlled, exactly like file_feedback: the model picks the row, never the
           // evidence or the name it is filed under
@@ -725,6 +857,11 @@ function buildTools(ctx: AgentContext) {
           author: ctx.senderName,
           authorType: 'human',
         });
+        // an earlier attempt on this same message may have parked an addition for this same row
+        // (a refusal the model then retried after the roster changed). It landed, so retire the
+        // held copy rather than leave the sweep about to add the same words a second time.
+        if ((JSON.parse(res) as { appended?: boolean }).appended === true) markSuperseded(ctx.channel, ctx.messageTs, id, id);
+        return res;
       },
     }),
     betaTool({
@@ -819,14 +956,15 @@ function buildTools(ctx: AgentContext) {
   ];
 }
 
-// Owner-only: the parking lot. Held reports belong to other people, so listing them is
+// Owner-only: the parking lot. Held items belong to other people, so listing them is
 // restricted the same way memory is, and promotion is the owner acting deliberately (which is
-// exactly what Raj did by hand for Tanisha, minus the waiting).
+// exactly what Raj did by hand for Tanisha, minus the waiting). Promotion means two different
+// things depending on the kind, and the tools below route on it rather than asking the model to.
 function parkedTools(ctx: AgentContext) {
   return [
     betaTool({
       name: 'list_parked',
-      description: 'Reports the stakeholder gate refused and that are being HELD, not filed. These are NOT feedback rows: they are on no board, no orchestrator has them, and their PARK-* ids are not feedback ids. Use when raj asks what got turned away or what is waiting, then promote_parked to file one for real.',
+      description: 'Everything the stakeholder gate refused and that is being HELD. Two kinds, shown by "kind": a REPORT nobody has filed, and an ADDITION somebody tried to add to a feedback row that already exists (its "appendTo"), which never reached that row. Neither is a feedback row: they are on no board, no orchestrator has them, and their PARK-* ids are not feedback ids. An addition\'s appendTo IS a real feedback id, but it is where the words were headed, not proof they arrived, and that row is unchanged. Use when raj asks what got turned away or what is waiting, then promote_parked.',
       inputSchema: {
         type: 'object',
         properties: { includeResolved: { type: 'boolean', description: 'also show ones already promoted or superseded' } },
@@ -835,31 +973,56 @@ function parkedTools(ctx: AgentContext) {
       run: async ({ includeResolved }: any) => {
         const items = includeResolved ? listParked() : listParked({ status: 'parked' });
         return JSON.stringify({
-          note: 'nothing here is filed feedback. a PARK-* id is a holding id, never quote it as a feedback id',
+          note: 'nothing here is filed feedback. a PARK-* id is a holding id, never quote it as a feedback id. a row with kind:"addition" was never added to the feedback row in its appendTo either, and that row is untouched: promoting it adds it there, it never becomes a second row',
           held: items.map(summarize),
         });
       },
     }),
     betaTool({
       name: 'promote_parked',
-      description: 'File a held report as real feedback, attributed to the person who originally sent it. Use when raj says to file it, or after he adds the reporter as a stakeholder. Pass project or taskRef only to retarget it.',
+      description: 'Put a held item where it belongs, attributed to the person who originally sent it. A held REPORT is filed as real feedback (retarget with project or taskRef). A held ADDITION is added to the feedback row it names, and never becomes a row of its own; pass feedbackRef only to point it at a different row, which is what to do when its own row is gone. Use when raj says to file it, or after he adds the reporter as a stakeholder.',
       inputSchema: {
         type: 'object',
         properties: {
           parkId: { type: 'string', description: 'the PARK-* id from list_parked' },
-          project: { type: 'string', description: 'optional: file against this project instead' },
-          taskRef: { type: 'string', description: 'optional: file against this task instead' },
+          project: { type: 'string', description: 'optional, reports only: file against this project instead' },
+          taskRef: { type: 'string', description: 'optional, reports only: file against this task instead' },
+          feedbackRef: { type: 'string', description: 'optional, additions only: add it to this feedback row instead of the one it names' },
         },
         required: ['parkId'], additionalProperties: false,
       },
-      run: async ({ parkId, project, taskRef }: any) => {
+      run: async ({ parkId, project, taskRef, feedbackRef }: any) => {
         const item = readParked(String(parkId ?? ''));
-        if (!item) return JSON.stringify({ promoted: false, error: `no held report with id ${parkId}` });
+        if (!item) return JSON.stringify({ promoted: false, error: `no held item with id ${parkId}` });
         if (item.status !== 'parked') {
           return JSON.stringify({
             promoted: false,
             error: `${item.parkId} is already ${item.status}${item.promotion ? ` as ${item.promotion.feedbackShortId}` : ''}, nothing to do`,
           });
+        }
+        // A held addition goes onto a row that already exists, so it never touches the filing path
+        // below and project/taskRef mean nothing to it.
+        if (item.kind === 'addition') {
+          const to = (String(feedbackRef ?? '').trim() || item.appendTo || '').toUpperCase();
+          if (!to) return JSON.stringify({ promoted: false, added: false, error: `${item.parkId} is a held addition with no row on it. pass feedbackRef to say which feedback row it belongs on` });
+          // gated on the CALLER's verified id, same rule as anything else that writes. The project
+          // checked is the one the TARGET ROW belongs to, re-resolved when the caller retargets,
+          // since a different row can sit on a different project entirely.
+          if (ctx.senderId !== config.gabbarOwnerId) {
+            const rowP = to === (item.appendTo ?? '').toUpperCase()
+              ? item.target.projectRef
+              : ((JSON.parse(await mc(`/feedback/${encodeURIComponent(to)}`)) as { projectId?: unknown }).projectId ?? null);
+            if (!rowP) return JSON.stringify({ promoted: false, added: false, error: `could not resolve which project ${to} belongs to, nothing was added` });
+            const v = await verifyStakeholder(ctx, { project: String(rowP) });
+            if (!v.ok) return JSON.stringify({ promoted: false, added: false, filed: false, error: `${v.detail}, nothing added` });
+          }
+          const a = await promoteAddition(item, `${ctx.senderName} via gabbar`, to);
+          return JSON.stringify(a.ok
+            ? { promoted: true, added: true, filed: false, appendedTo: a.appendedTo, newRow: false, author: item.author.name, from: item.parkId, warnings: a.warnings }
+            : {
+              promoted: false, added: false, error: a.error,
+              ...(a.gone ? { rowGone: true, stillHeld: item.parkId, hint: `${to} does not exist, so nothing was added and nothing was created. their words are still held. if this belongs on a different row now, call promote_parked again with feedbackRef` } : {}),
+            });
         }
         const target = parkedTarget(item, { project, taskRef });
         if (!target) return JSON.stringify({ promoted: false, error: `${item.parkId} has no project on it, pass project or taskRef` });
@@ -983,7 +1146,14 @@ export async function runAgent(
     });
     const notices = sweep.map((r) => r.notice);
     const filedNow = sweep.flatMap((r) => (r.filed ? [r.filed] : []));
-    const reply = withFilingNotice(await respond(ctx, history, text, notices, filedNow.length > 0), filedNow);
+    // a row that gained their words in their name is the same honesty problem as a row filed in it,
+    // so it gets the same code-written notice rather than being left to the model
+    const addedNow = sweep.flatMap((r) => (r.added ? [r.added] : []));
+    const reply = withFilingNotice(
+      await respond(ctx, history, text, notices, filedNow.length + addedNow.length > 0),
+      filedNow,
+      addedNow,
+    );
     return withBudgetNotice(reply, budget);
   });
 }

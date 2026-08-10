@@ -148,6 +148,135 @@ test('only the ids the reply missed get appended', () => {
   expect(out.match(/MRF-FB-7/g)).toHaveLength(1);
 });
 
+// ---------- held ADDITIONS (DAR-219) ----------
+// A refused append used to be held nowhere, so a non-stakeholder adding a screenshot to an existing
+// finding lost it. Holding one is only safe if it can never be promoted the way a report is: filing
+// a row for evidence that belongs on an existing finding is the duplicate DAR-182 removed. These
+// pin the distinction, and the wording that stops a held addition reading as one that landed.
+const addition = (over: Partial<Parameters<typeof P.parkAddition>[0]> = {}) => P.parkAddition({
+  ...input({ feedbackType: 'addition', body: 'it also happens on the settings screen', ...over }),
+  appendTo: 'MRF-FB-23',
+  ...over,
+});
+
+test('a refused addition is held, and knows it belongs on a row rather than in a new one', () => {
+  const item = addition();
+  expect(item.kind).toBe('addition');
+  expect(item.appendTo).toBe('MRF-FB-23');
+  expect(P.readParked(item.parkId)?.kind).toBe('addition');
+  // a park id is still a park id: it cannot be mistaken for the feedback id it names
+  expect(P.isParkId(item.parkId)).toBe(true);
+  expect(item.parkId).not.toMatch(/-FB-\d+$/);
+  expect(item.parkId.startsWith('PARK-')).toBe(true);
+});
+
+test('a held addition reads as not filed AND not added to its row', () => {
+  const s = P.summarize(addition());
+  expect(s.filed).toBe(false);
+  expect(s.parked).toBe(true);
+  expect(s.kind).toBe('addition');
+  expect(s.appendTo).toBe('MRF-FB-23'); // where it belongs
+  expect(s.addedToRow).toBe(false); // and the fact that it never got there, next to it
+  expect(s.promotedTo).toBeNull();
+});
+
+test('a report still carries no feedback id anywhere in its summary', () => {
+  const s = P.summarize(P.parkReport(input()));
+  expect(s.kind).toBe('report');
+  expect(s.appendTo).toBeNull();
+  expect(s.addedToRow).toBeNull();
+  expect(JSON.stringify(s)).not.toMatch(/-FB-\d+/);
+});
+
+test('one message refused a filing AND an append holds both, not one over the other', () => {
+  // the same slack message, two refusals: keying both on the message alone lost the first one
+  const report = P.parkReport(input());
+  const add = addition();
+  expect(add.parkId).not.toBe(report.parkId);
+  const all = P.listParked({ status: 'parked' });
+  expect(all).toHaveLength(2);
+  expect(P.listParked({ status: 'parked', kind: 'addition' })).toHaveLength(1);
+  expect(P.readParked(report.parkId)?.body).toBe(input().body);
+});
+
+test('one message adding to two different rows holds two additions', () => {
+  addition();
+  addition({ appendTo: 'MRF-FB-99', body: 'and this one is on the other row' });
+  expect(P.listParked({ status: 'parked', kind: 'addition' })).toHaveLength(2);
+});
+
+test('a message that goes on to append for real retires only that row addition', () => {
+  const onFb23 = addition();
+  const onFb99 = addition({ appendTo: 'MRF-FB-99' });
+  P.markSuperseded('D0AH8292D7Y', '1754771234.123456', 'MRF-FB-23', 'MRF-FB-23');
+  expect(P.readParked(onFb23.parkId)?.status).toBe('superseded');
+  expect(P.readParked(onFb99.parkId)?.status).toBe('parked');
+});
+
+test('an addition that lost its row id is never quietly relabelled a report', async () => {
+  // the one relabelling that would put the DAR-182 duplicate back: a report is the only kind that
+  // can be promoted by FILING a row, so a broken addition waits instead of becoming promotable
+  const broken = { ...addition(), parkId: 'PARK-broken_addition', appendTo: null } as Record<string, unknown>;
+  await Bun.write(path.join(RIG, 'PARK-broken_addition.json'), JSON.stringify(broken));
+  const read = P.readParked('PARK-broken_addition');
+  expect(read?.kind).toBe('addition');
+  expect(read?.appendTo).toBeNull();
+});
+
+test('a record written before additions existed reads as a report', async () => {
+  const legacy = { ...P.parkReport(input()), parkId: 'PARK-legacy_kind' } as Record<string, unknown>;
+  delete legacy.kind; delete legacy.appendTo;
+  await Bun.write(path.join(RIG, 'PARK-legacy_kind.json'), JSON.stringify(legacy));
+  const read = P.readParked('PARK-legacy_kind');
+  expect(read?.kind).toBe('report'); // which is what those files actually are
+  expect(read?.appendTo).toBeNull();
+});
+
+test('a held addition joins the same rotation as a report, not a queue of its own', () => {
+  // the sweep spends its budget on ONE question, "is this sender a stakeholder on that project",
+  // and the answer is identical for both kinds, so they group and take turns together
+  const held = [P.parkAddition({ ...input({ projectRef: 'ALPHA', projectName: 'ALPHA' }), appendTo: 'ALPHA-FB-1' }), parkOnAlpha()];
+  const plan = P.planSweep(held, 5);
+  expect(plan).toHaveLength(1);
+  expect(plan[0]!.target).toEqual({ project: 'ALPHA' });
+  expect(plan[0]!.items).toHaveLength(2);
+});
+function parkOnAlpha() {
+  return P.parkReport(input({ ts: '1754771299.000001', projectRef: 'ALPHA', projectName: 'ALPHA' }));
+}
+
+test('a landed addition is announced as landing on its row, never as a filing', () => {
+  const out = P.withFilingNotice('nice one', [], ['MRF-FB-23']);
+  expect(out).toContain('is now on MRF-FB-23');
+  expect(out).not.toContain('filed');
+  // both at once still read correctly, and a reply that already said it is left alone
+  expect(P.withFilingNotice('hey', ['MRF-FB-7'], ['MRF-FB-23'])).toContain('now filed as MRF-FB-7; what you were adding earlier was being held and is now on MRF-FB-23');
+  expect(P.withFilingNotice('added it to MRF-FB-23', [], ['MRF-FB-23'])).toBe('added it to MRF-FB-23');
+});
+
+test('the digest says an addition was never ADDED, not that it was never filed', () => {
+  const { text } = P.buildEscalationDigest([addition()], Date.now());
+  expect(text).toContain('an addition is still held and was NEVER added to the row it names');
+  expect(text).toContain('an addition to MRF-FB-23 that was NEVER added to it');
+  expect(text).toContain('that row is unchanged');
+  expect(text).toContain('it never becomes a second row');
+  expect(text).not.toMatch(/https?:\/\//);
+});
+
+test('a mixed backlog counts both kinds instead of calling them all reports', () => {
+  const { text } = P.buildEscalationDigest([P.parkReport(input()), addition(), addition({ appendTo: 'MRF-FB-99' })], Date.now());
+  expect(text).toContain('3 items are still held: 1 report never filed, and 2 additions never added to the rows they name');
+  expect(text).toContain('nothing here is filed');
+  expect(text).toContain('those rows are unchanged');
+});
+
+test('a reports-only digest is worded exactly as it was', () => {
+  const { text } = P.buildEscalationDigest([P.parkReport(input())], Date.now());
+  expect(text).toContain('a report is still held and NOT filed:');
+  expect(text).not.toContain('addition');
+  expect(text).not.toMatch(/-FB-\d+/);
+});
+
 // ---------- the escalation clock ----------
 // Parking fixed "a refusal loses the report" and left a smaller version of it: a held item
 // nobody is told about sits in a directory until a human reads it. These pin the bound.

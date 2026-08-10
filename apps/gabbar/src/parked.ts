@@ -8,15 +8,28 @@
 //   - it never touches mongo, so GET /feedback/pending and the board cannot show it
 //   - its id lives in the PARK-* namespace, which can never collide with <PREFIX>-FB-<n>
 //   - every read path returns it with filed:false attached
-// so there is no surface on which a parked item can pass for filed feedback. Promotion into
-// a real feedback row is the only way it becomes one, and that runs through the same gate.
+// so there is no surface on which a parked item can pass for filed feedback. Promotion is the only
+// way anything here reaches the board, and it runs through the same gate.
+//
+// Two kinds are held, and the difference is the whole of DAR-219 (see ParkedKind). A REPORT is
+// promoted by filing a new feedback row. An ADDITION is promoted by appending to a row that already
+// exists, and it must never be promoted the other way: filing a row for evidence that belongs on an
+// existing finding is the duplicate DAR-182 removed, so parking an addition without this
+// distinction would have fixed a loss by rebuilding a bug.
 //
 // One file per parked item, keyed by the slack message it came from, so a model that retries
 // the same message with a different project ref refines one parked item instead of piling up.
+// An addition is keyed by the message AND the row it targets, because one message can be refused
+// more than one thing (see parkIdFor).
 import fs from 'node:fs';
 import path from 'node:path';
 
-const ROOT = path.resolve(process.env.PARKED_DIR || new URL('../../../data/parked/', import.meta.url).pathname);
+// Resolved per read rather than once at import, for the reason api.ts's reader already carries: at
+// import it made the directory depend on WHICH FILE IMPORTED THIS MODULE FIRST. Two test files each
+// pointing PARKED_DIR at their own rig shared whichever one won, so one wrote held items into a
+// directory the other believed it owned and deleted. It is the same string either way in a running
+// gabbar, and a path read where it is used cannot be captured by an import order nobody can see.
+const root = (): string => path.resolve(process.env.PARKED_DIR || new URL('../../../data/parked/', import.meta.url).pathname);
 
 /**
  * WHY it is held, which decides what happens next.
@@ -28,6 +41,29 @@ const ROOT = path.resolve(process.env.PARKED_DIR || new URL('../../../data/parke
  */
 export type ParkCause = 'stakeholder_gap' | 'outage' | 'bad_reference';
 
+/**
+ * WHAT is held, which decides how it is promoted.
+ *
+ * A `report` is something nobody has filed, so promoting it CREATES a feedback row. An `addition`
+ * is evidence or a correction for a row that already exists, so promoting it APPENDS to that row
+ * and creates nothing. The difference is recorded rather than inferred later, because a held
+ * addition promoted down the report path would file a second row for one finding, which is exactly
+ * the duplicate DAR-182 removed.
+ *
+ * WHICH REFUSALS PARK AT ALL is the third variation on one question, so all three are stated here
+ * in one place instead of once per call site:
+ *   - file   → PARKS a report. The words are the sender's own and nobody else has a copy.
+ *   - append → PARKS an addition. The words are equally the sender's own; the only reason a refused
+ *              append could not be held before was that promotion meant filing a new row, and that
+ *              is no longer true.
+ *   - reopen → PARKS NOTHING, and that is not an oversight. A reopen carries no words of the
+ *              sender's at all: the body belongs to whoever filed the row, the row is untouched by
+ *              the refusal, and the owner is told what was said. Promoting a held reopen could only
+ *              mean writing somebody else's words into a new row under this sender's name.
+ * The rule underneath all three: hold what the sender WROTE, never what their request referred to.
+ */
+export type ParkedKind = 'report' | 'addition';
+
 export type ParkedStatus =
   | 'parked' // held, nothing filed
   | 'promoted' // became a real feedback row (see promotion.feedbackShortId)
@@ -36,6 +72,10 @@ export type ParkedStatus =
 export type ParkedItem = {
   parkId: string;
   status: ParkedStatus;
+  /** report unless stated; see ParkedKind for why this is on the record and not worked out later */
+  kind: ParkedKind;
+  /** the feedback row an addition belongs on (e.g. MRF-FB-23). Always null on a report. */
+  appendTo: string | null;
   createdAt: string;
   updatedAt: string;
   author: { slackUserId: string; name: string };
@@ -61,12 +101,25 @@ export type ParkedItem = {
   supersededBy: string | null;
 };
 
+const idSafe = (s: string): string => s.replace(/[^A-Za-z0-9]+/g, '_');
+
 function slackKey(channel: string, ts: string): string {
-  return `${channel}-${ts}`.replace(/[^A-Za-z0-9]+/g, '_');
+  return idSafe(`${channel}-${ts}`);
 }
 
-export function parkIdFor(channel: string, ts: string): string {
-  return `PARK-${slackKey(channel, ts)}`;
+/**
+ * One slack message, one held item — except that a message can be refused more than one thing. The
+ * model can try file_feedback and then add_to_feedback on the same message, or add to two different
+ * rows, and keying every one of those on the message alone meant the second refusal overwrote the
+ * first one's words. An addition is therefore keyed by the row it targets as well.
+ *
+ * The row id is flattened to underscores like everything else here, so a park id still cannot end
+ * in -FB-<n> and still cannot be mistaken for a feedback id.
+ */
+export function parkIdFor(channel: string, ts: string, appendTo?: string | null): string {
+  const base = `PARK-${slackKey(channel, ts)}`;
+  const row = appendTo?.trim();
+  return row ? `${base}_ON_${idSafe(row.toUpperCase())}` : base;
 }
 
 /** PARK-* is a namespace of its own on purpose: nothing here can be mistaken for a feedback id. */
@@ -75,11 +128,11 @@ export function isParkId(s: string): boolean {
 }
 
 function fileFor(parkId: string): string {
-  return path.join(ROOT, `${parkId}.json`);
+  return path.join(root(), `${parkId}.json`);
 }
 
 function writeItem(item: ParkedItem): void {
-  fs.mkdirSync(ROOT, { recursive: true });
+  fs.mkdirSync(root(), { recursive: true });
   const target = fileFor(item.parkId);
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(item, null, 2)}\n`);
@@ -92,10 +145,19 @@ export function readParked(parkId: string): ParkedItem | null {
     const raw = fs.readFileSync(fileFor(parkId.trim()), 'utf-8');
     const item = JSON.parse(raw) as ParkedItem;
     if (!item || typeof item.parkId !== 'string') return null;
+    // Every record written before additions existed is a report, which is also the safe default: a
+    // report is the only kind that can be promoted by filing a new row, and it is what those files
+    // actually are. The reverse default would turn old reports into appends onto nothing.
+    const kind: ParkedKind = item.kind === 'addition' ? 'addition' : 'report';
     // defaults for records written before a cause was recorded: an unknown cause is treated as a
     // gap, which is the conservative choice (it waits for a human instead of retrying quietly)
     return {
       ...item,
+      kind,
+      // An addition whose target row id is missing or unusable stays an ADDITION with no target: it
+      // becomes unpromotable and waits for a human, rather than being quietly relabelled a report,
+      // which is the one relabelling that would put the DAR-182 duplicate back on the board.
+      appendTo: kind === 'addition' && typeof item.appendTo === 'string' && item.appendTo.trim() ? item.appendTo.trim() : null,
       cause: item.cause ?? 'stakeholder_gap',
       lastAttemptAt: item.lastAttemptAt ?? null,
       escalatedAt: item.escalatedAt ?? null,
@@ -126,18 +188,20 @@ export type ParkInput = {
 };
 
 /**
- * Hold a refused report. Upserts on the slack message, and never overwrites an item that
- * already reached a terminal state — once something is really filed, the record of how it
- * got there stops changing.
+ * Hold a refused item. Upserts on its key, and never overwrites one that already reached a
+ * terminal state — once something is really filed or added, the record of how it got there stops
+ * changing.
  */
-export function parkReport(input: ParkInput): ParkedItem {
-  const parkId = parkIdFor(input.channel, input.ts);
+function hold(input: ParkInput, kind: ParkedKind, appendTo: string | null): ParkedItem {
+  const parkId = parkIdFor(input.channel, input.ts, appendTo);
   const existing = readParked(parkId);
   if (existing && existing.status !== 'parked') return existing;
   const now = new Date().toISOString();
   const item: ParkedItem = {
     parkId,
     status: 'parked',
+    kind,
+    appendTo,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
     author: { slackUserId: input.authorId, name: input.authorName },
@@ -159,15 +223,29 @@ export function parkReport(input: ParkInput): ParkedItem {
   try {
     writeItem(item);
   } catch (e) {
-    console.error('gabbar: failed to park report:', e);
+    console.error(`gabbar: failed to park ${kind}:`, e);
   }
   return item;
 }
 
-export function listParked(filter?: { status?: ParkedStatus; authorId?: string }): ParkedItem[] {
+/** A refused report of the sender's own: promoted by FILING a new feedback row. */
+export function parkReport(input: ParkInput): ParkedItem {
+  return hold(input, 'report', null);
+}
+
+/**
+ * A refused addition to a row that already exists: promoted by APPENDING to that row, never by
+ * filing anything. The words are the sender's own, which is why this is held at all; the row id is
+ * what keeps promotion off the file_feedback path.
+ */
+export function parkAddition(input: ParkInput & { appendTo: string }): ParkedItem {
+  return hold(input, 'addition', input.appendTo.trim());
+}
+
+export function listParked(filter?: { status?: ParkedStatus; authorId?: string; kind?: ParkedKind }): ParkedItem[] {
   let names: string[];
   try {
-    names = fs.readdirSync(ROOT).filter((n) => n.endsWith('.json'));
+    names = fs.readdirSync(root()).filter((n) => n.endsWith('.json'));
   } catch {
     return [];
   }
@@ -177,11 +255,17 @@ export function listParked(filter?: { status?: ParkedStatus; authorId?: string }
     if (!item) continue;
     if (filter?.status && item.status !== filter.status) continue;
     if (filter?.authorId && item.author.slackUserId !== filter.authorId) continue;
+    if (filter?.kind && item.kind !== filter.kind) continue;
     out.push(item);
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/**
+ * Terminal. `feedbackShortId` is the row this ended up on: the row that was CREATED for a report,
+ * the row that was APPENDED TO for an addition. Either way the held copy leaves the queue and the
+ * record points at where the words actually live now.
+ */
 export function markPromoted(parkId: string, feedbackShortId: string, promotedBy: string): ParkedItem | null {
   const item = readParked(parkId);
   if (!item || item.status !== 'parked') return null;
@@ -200,11 +284,15 @@ export function markPromoted(parkId: string, feedbackShortId: string, promotedBy
 }
 
 /**
- * The gate refused once, the model then filed successfully for the same slack message.
- * Retire the parked copy so the queue never shows a duplicate of something already filed.
+ * The gate refused once, the model then succeeded for the same slack message. Retire the parked
+ * copy so the queue never shows a duplicate of something already on the board.
+ *
+ * `appendTo` addresses the held ADDITION for that row rather than the held report, because the two
+ * are separate records under separate ids (parkIdFor). Passing the wrong one retires nothing, which
+ * is the safe direction: an item that stays held is visible, one retired by mistake is not.
  */
-export function markSuperseded(channel: string, ts: string, feedbackShortId: string): void {
-  const item = readParked(parkIdFor(channel, ts));
+export function markSuperseded(channel: string, ts: string, feedbackShortId: string, appendTo?: string | null): void {
+  const item = readParked(parkIdFor(channel, ts, appendTo));
   if (!item || item.status !== 'parked') return;
   try {
     writeItem({ ...item, status: 'superseded', updatedAt: new Date().toISOString(), supersededBy: feedbackShortId });
@@ -213,12 +301,22 @@ export function markSuperseded(channel: string, ts: string, feedbackShortId: str
   }
 }
 
-/** Shape handed to the model. filed:false rides along on every row, in every direction. */
+/**
+ * Shape handed to the model. filed:false rides along on every row, in every direction.
+ *
+ * `kind`, `appendTo` and `addedToRow` are what stop a held ADDITION reading as a held report. The
+ * row id has to be here, since it is the only thing that says where the words belong and the owner
+ * cannot act without it, so `addedToRow:false` is next to it: an id on a held item is a destination,
+ * never evidence that anything reached it.
+ */
 export function summarize(item: ParkedItem) {
   return {
     parkId: item.parkId,
     filed: false,
     parked: true,
+    kind: item.kind,
+    appendTo: item.appendTo, // null on a report
+    addedToRow: item.kind === 'addition' ? false : null, // never true here: held means not on the row
     status: item.status,
     author: item.author.name,
     authorSlackId: item.author.slackUserId,
@@ -247,14 +345,24 @@ export function summarize(item: ParkedItem) {
  * silently dropping the report, pointing the other way, so the id is appended here unless the
  * reply already carries it.
  */
-export function withFilingNotice(reply: string, filedNow: string[]): string {
-  const missing = filedNow.filter((id) => !reply.includes(id));
-  if (!missing.length) return reply;
-  const [one] = missing;
-  const tail = missing.length > 1
-    ? `your earlier reports that were being held are now filed as ${missing.join(' and ')}`
-    : `your earlier report that was being held is now filed as ${one}`;
-  return `${reply.trim()}\n\nalso: ${tail}.`;
+export function withFilingNotice(reply: string, filedNow: string[], addedNow: string[] = []): string {
+  const missingFiled = filedNow.filter((id) => !reply.includes(id));
+  // An addition that landed is NOT a filing and must not be announced as one: nothing new exists,
+  // an existing row gained their words. Said in its own clause for that reason.
+  const missingAdded = addedNow.filter((id) => !reply.includes(id));
+  const tails: string[] = [];
+  if (missingFiled.length) {
+    tails.push(missingFiled.length > 1
+      ? `your earlier reports that were being held are now filed as ${missingFiled.join(' and ')}`
+      : `your earlier report that was being held is now filed as ${missingFiled[0]}`);
+  }
+  if (missingAdded.length) {
+    tails.push(missingAdded.length > 1
+      ? `what you were adding earlier was being held and is now on ${missingAdded.join(' and ')}`
+      : `what you were adding earlier was being held and is now on ${missingAdded[0]}`);
+  }
+  if (!tails.length) return reply;
+  return `${reply.trim()}\n\nalso: ${tails.join('; ')}.`;
 }
 
 // ---------- escalation: nothing may sit here unseen ----------
@@ -328,7 +436,15 @@ export function markEscalated(parkId: string, at: Date = new Date()): void {
   }
 }
 
-/** one line per held item for the owner digest. Never says filed, never quotes a feedback id. */
+/**
+ * One line per held item for the owner digest. Never says filed, and never claims a held item HAS a
+ * feedback id.
+ *
+ * A held addition is the one line that names a feedback id, and that is a narrowing of the old rule
+ * rather than a break with it. The id is the row the sender was trying to add to, not an id this
+ * item was given, and the owner cannot do anything about a held addition without knowing which row
+ * it belongs on. The clause that carries it says NEVER added, so the id reads as a destination.
+ */
 export function escalationLine(item: ParkedItem, now: number = Date.now()): string {
   const hours = Math.max(1, Math.round((now - Date.parse(item.createdAt)) / 3_600_000));
   const why = item.cause === 'stakeholder_gap'
@@ -336,7 +452,10 @@ export function escalationLine(item: ParkedItem, now: number = Date.now()): stri
     : item.cause === 'outage'
       ? 'darbar could not be reached when they sent it, so it was never checked'
       : 'no project could be resolved for it';
-  return `\`${item.parkId}\` held ${hours}h, from ${item.author.name}: "${item.rawMessage.slice(0, 140)}" (${why})`;
+  const what = item.kind === 'addition'
+    ? `, an addition to ${item.appendTo ?? 'a row it no longer names'} that was NEVER added to it`
+    : '';
+  return `\`${item.parkId}\` held ${hours}h, from ${item.author.name}${what}: "${item.rawMessage.slice(0, 140)}" (${why})`;
 }
 
 /**
@@ -375,14 +494,32 @@ export function buildEscalationDigest(due: ParkedItem[], now: number = Date.now(
   const oldest = [...due].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const shown = oldest.slice(0, MAX_DIGEST_LINES);
   const omitted = oldest.length - shown.length;
-  const head = due.length > 1 ? `${due.length} reports are still held and NOT filed:` : 'a report is still held and NOT filed:';
+  // "N reports are still held and NOT filed" is false of an addition twice over: it is not a report
+  // and NOT FILED is not the thing that went wrong with it. A backlog of both says both, and the
+  // reports-only wording is left exactly as it was rather than generalised into something vaguer.
+  const adds = oldest.filter((i) => i.kind === 'addition').length;
+  const reports = oldest.length - adds;
+  const s = (n: number) => (n > 1 ? 's' : '');
+  const head = adds === 0
+    ? (due.length > 1 ? `${due.length} reports are still held and NOT filed:` : 'a report is still held and NOT filed:')
+    : reports === 0
+      ? (adds > 1
+        ? `${adds} additions are still held and were NEVER added to the rows they name:`
+        : 'an addition is still held and was NEVER added to the row it names:')
+      : `${due.length} items are still held: ${reports} report${s(reports)} never filed, and ${adds} addition${s(adds)} never added to the row${s(adds)} they name:`;
   const lines = [head, ...shown.map((i) => escalationLine(i, now))];
-  if (omitted > 0) lines.push(`...and ${omitted} more held report${omitted > 1 ? 's' : ''} not listed here. ask me to list_parked for the full set.`);
+  if (omitted > 0) {
+    const noun = adds === 0 ? 'held report' : 'held item';
+    lines.push(`...and ${omitted} more ${noun}${omitted > 1 ? 's' : ''} not listed here. ask me to list_parked for the full set.`);
+  }
   // "none of this is on a board" was true when it was written and is not any more: the board's
   // Feedback view carries a held band now. What has not changed is that nothing here is filed and
   // nobody is working it, which is the part that matters, so the claim narrows to that instead of
   // being dropped. Still no feedback id and still no link, because a held report has neither.
   lines.push('', 'nothing here is filed. no feedback id, no triage queue, no orchestrator working it. add the person as a stakeholder, or ask me to promote it.');
+  // and the row an addition names is not carrying it either, which the sentence above does not say:
+  // that row exists, is on the board, and looks untouched because it IS untouched.
+  if (adds > 0) lines.push(`the ${adds > 1 ? 'additions' : 'addition'} above never reached the row${s(adds)} named: ${adds > 1 ? 'those rows are' : 'that row is'} unchanged and ${adds > 1 ? 'show' : 'shows'} no sign anything was sent. promoting ${adds > 1 ? 'one' : 'it'} adds it to that row, it never becomes a second row.`);
   let text = lines.join('\n');
   if (text.length > MAX_DIGEST_CHARS) text = `${text.slice(0, MAX_DIGEST_CHARS - 80)}\n...truncated. ask me to list_parked for the full set.`;
   return { text, listed: shown.length, omitted };
@@ -425,6 +562,15 @@ function rotationOrder(a: ParkedItem, b: ParkedItem): number {
  *   - never-attempted items go first, then least-recently-attempted, so every held item gets a
  *     turn within ceil(distinct targets / budget) messages instead of never
  * Raising the budget would not have fixed this. Only the ordering does.
+ *
+ * A held ADDITION plans exactly like a held report and deliberately gets no path of its own. The
+ * question the sweep spends its budget on is "is this sender a stakeholder on that project", and
+ * that question and its answer are identical for both kinds, so an addition groups by the same
+ * target, is verified by the same single call, and takes its turn in the same rotation. Only what
+ * happens AFTER the gate says yes differs, and that belongs to the promoter, not to the plan. A
+ * separate queue for additions would have been a second fairness guarantee to keep in step with
+ * this one, and the stated bound of a turn within ceil(distinct targets / budget) messages would
+ * have quietly stopped covering every held item.
  */
 export function planSweep(held: ParkedItem[], maxTargets: number): Attempt[] {
   const groups = new Map<string, Attempt>();
