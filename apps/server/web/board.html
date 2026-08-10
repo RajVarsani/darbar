@@ -638,7 +638,6 @@ const state = {
   collapsed: new Set(),    // task shortIds with hidden children
   doneExpanded: false,     // done column, when open: false = latest 5 only
   folded: new Set(['backlog','done']), // columns folded to a 44px rail; independent per column
-  canWrite: null,          // null = unknown; probed once. Tunnel viewers get 403 on writes.
   pal: {open:false, q:'', sel:0},  // ⌘K palette; survives SSE re-renders
   // reports Gabbar's stakeholder gate refused: held on its disk, never filed, never in Mongo.
   // null means the held lane is UNAVAILABLE rather than empty — /api/parked is not on the proxy's
@@ -2121,6 +2120,8 @@ document.addEventListener('drop', async e=>{
   col.classList.remove('over');
   if (!t || t.status === status) return;
   try {
+    // no upfront write-permission probe: there is no endpoint to ask, so read-only-ness is
+    // learned from the 403 on the attempt itself, same as the stakeholders POST below.
     const r = await fetch(`/api/tasks/${id}`, {
       method:'PATCH', headers:{'content-type':'application/json'}, body: JSON.stringify({status}),
     });
