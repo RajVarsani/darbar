@@ -37,6 +37,7 @@ server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only t
     parentTaskRef: z.string().optional(), assignee: z.string().optional(),
     assigneeType: z.enum(['agent', 'human']).optional(), origin: z.string().optional(),
     type: TYPE.optional(), status: STATUS.optional(),
+    blocker: z.string().optional().describe('why this task cannot be started, when you are filing it already blocked. It is applied at create now; it used to be dropped under a 200, which put blocked cards on the board with no why on them. Changing or clearing it later is update_task {blocker} / {blocker: null}'),
     lanes: z.array(z.string()).optional().describe('review lanes to spawn when this task hits in_review — pick by judgment: code-review for code changes, qa for behavior/outcomes, design-qa only for UI surfaces; [] = explicitly no reviews; omit = all configured lanes'),
   },
   (args) => call('/tasks', 'POST', args));
@@ -192,6 +193,10 @@ server.tool('set_auto_advance', 'Flip only the pipeline\'s autoAdvance: true = t
   { project: z.string(), autoAdvance: z.boolean() },
   ({ project, autoAdvance }) => call(`/projects/${px(project)}/pipeline`, 'PATCH', { autoAdvance }));
 
+server.tool('set_repos', 'Set the repos a project is worked in. The charter tells every builder which checkout it is in and this list is the machine-readable half of that, so losing it hands agents the wrong repo: PATCH /projects had no branch for `repos` at all, and {charter, repos} applied the charter and dropped the repos under a 200. WHOLESALE, like every other list on the project document: what you send becomes the list, so ADD a repo by sending the existing entries plus the new one (get_project_context returns them) and repos: [] clears it — a single-element array here is not "add one", it is "these are now the only repos". A non-string entry is a 400 rather than a quietly filtered array.',
+  { project: z.string(), repos: z.array(z.string()).describe('the full repo list after this edit, in the terms the charter uses (a name like "darbar", or a path); it replaces whatever is stored') },
+  ({ project, repos }) => call(`/projects/${px(project)}`, 'PATCH', { repos }));
+
 server.tool('append_to_charter', 'Append one rule, decision or note to a project charter without resending it. The charter is prose every agent reads before working, so this is how a protocol locked mid-session gets recorded. Appends on its own line at the end; PATCH /api/projects/:ref {charter} is still the way to rewrite or restructure the whole thing.',
   { project: z.string(), text: z.string().describe('the line(s) to append, written as they should read in the charter') },
   ({ project, text }) => call(`/projects/${px(project)}/charter/append`, 'POST', { text }));
@@ -214,13 +219,24 @@ server.tool('set_proxy_enabled', 'Publish or withdraw the project shared surface
   },
   ({ project, enabled, confirmPrefix }) => call(`/projects/${px(project)}/proxy/enabled`, 'PATCH', { enabled, ...(confirmPrefix ? { confirm: confirmPrefix } : {}) }));
 
-server.tool('file_feedback', 'File a finding as feedback (lanes use this). Lands in the same pending queue as human feedback.',
+server.tool('file_feedback', 'File a NEW finding as feedback (lanes use this). Lands in the same pending queue as human feedback. If what you have is MORE of something already filed — a screenshot for a row on the board, a correction, another screen it also happens on — use append_to_feedback instead: a second row for one defect puts it in the triage queue twice and leaves somebody deduping what was never two things.',
   {
     taskRef: z.string().optional(), project: z.string().optional(),
     author: z.string(), type: z.enum(['bug', 'design', 'idea', 'approval']).optional(),
     body: z.string(),
   },
   (args) => call('/feedback', 'POST', { ...args, authorType: 'agent' }));
+
+server.tool('append_to_feedback', 'Add evidence or a follow-up detail to a feedback row that ALREADY EXISTS, so one finding stays one row. This is the tool that prevents the duplicate: an image sent for a finding already on the board was filed as a second row linked as a follow-up, one defect then sat in the triage queue twice, and the orchestrator had to dedupe something that was never two things. Use it whenever somebody is adding to something already filed (a screenshot, a correction, a second screen it also happens on) rather than reporting a new thing (file_feedback). The words go in `note`, not `body`: there is no `body` parameter, and one sent anyway gets a 400 asking for `note` rather than a 200 with your sentence gone. The row body is never replaceable, here or on PATCH /feedback, because nobody rewrites what its author wrote. The note lands at the END of that body under a line naming who added it and when, not one byte of the existing text changes, and `additions[]` carries the same fact structurally for a reader who should not have to parse prose. Attachments are unioned into the row\'s own attachments array, deduped against it AS IT STANDS AT WRITE TIME, so a url a concurrent append got in first is stored once and reported back as a warning. `author` is required (400 without it): there is no "unknown" default, since an addition nobody is named for is the silent rewrite wearing a label. Status is NOT touched and the reporter\'s slack thread is NOT replied to: appending to a resolved or rejected row succeeds with a warning that the addition sits in no triage queue, and reopening stays a deliberate act (resolve_feedback). Not idempotent — a repeat adds a second attributed line and says so.',
+  {
+    feedbackRef: z.string().describe('the existing row, short id like TST-FB-1 (404 if it does not exist; nothing is created here)'),
+    author: z.string().describe('REQUIRED: whoever is ADDING this, not the person who filed the row. It is what the new line in the body is attributed to'),
+    note: z.string().optional().describe('the words being added, in the terms they were given to you. Optional only when attachments are the whole point: note and attachments both empty is a 400 naming both'),
+    attachments: z.array(z.string()).optional().describe('urls or paths of the evidence being added; they join the row\'s attachments (deduped) and the count appears in the attribution line'),
+    authorType: z.enum(['agent', 'human']).optional().describe('defaults to agent, because an MCP caller is an agent session. Send human when you are relaying what a person handed you, so the human trail the board renders stays true'),
+  },
+  ({ feedbackRef, authorType, ...rest }) =>
+    call(`/feedback/${encodeURIComponent(feedbackRef)}/append`, 'POST', { ...rest, authorType: authorType ?? 'agent' }));
 
 server.tool('next_pending_feedback', 'The manager inbox: oldest-first pending + needs_clarification feedback.',
   { project: z.string().optional() },
