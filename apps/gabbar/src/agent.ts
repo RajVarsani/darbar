@@ -6,6 +6,7 @@
 // Its tools can read boards and create/reopen feedback. No task creation, no status
 // changes, no execution. Author identity and slack thread refs are injected by the
 // transport layer, never model-controlled.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import Anthropic from '@anthropic-ai/sdk';
 import { betaTool } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 import { config } from '@darbar/core';
@@ -32,7 +33,61 @@ type Fetched =
 
 const DARBAR_TIMEOUT_MS = 10_000;
 
-async function fetchDarbar(path: string, method = 'GET', body?: unknown): Promise<Fetched> {
+/**
+ * DAR-210. The per-request AbortSignal bounds ONE call; a slack message is three or four, plus up
+ * to ten more from the parked sweep before the turn even starts. So a darbar that accepts
+ * connections and never answers cost 28 seconds on a plain question and could cost minutes on a
+ * message from someone with held reports, all of it with the person watching an "is thinking..."
+ * that never resolves. This is the second bound: one budget for every darbar call a single message
+ * makes, per-request timeout still on top of it.
+ *
+ * AsyncLocalStorage rather than a module-level variable because two slack messages are genuinely
+ * in flight at once (bot.ts handles each event concurrently), and a shared deadline would let a
+ * long message spend the budget of a short one that arrived after it.
+ *
+ * Nothing outside a message opens a scope, and a call with no scope keeps the old behaviour
+ * exactly: unlimited message budget, 10s per request. That is what the escalation tick and any
+ * future background caller get, and it is the safe direction for a path with no human waiting.
+ */
+const MESSAGE_BUDGET_MS = 20_000;
+type MessageBudget = { deadline: number; exhausted: boolean };
+const budgets = new AsyncLocalStorage<MessageBudget>();
+
+// exported for agent-budget.test.ts: the deadline is only worth having if it still fails CLOSED at
+// the stakeholder gate and still tells the sender, and both of those are properties of this scope
+export function runWithMessageBudget<T>(fn: (budget: MessageBudget) => Promise<T>, ms: number = MESSAGE_BUDGET_MS): Promise<T> {
+  const budget: MessageBudget = { deadline: Date.now() + ms, exhausted: false };
+  return budgets.run(budget, () => fn(budget));
+}
+
+/**
+ * The line the sender sees when the budget ran out mid-turn.
+ *
+ * This is the half of DAR-210 that is not about speed. Once calls start failing, the model has some
+ * of the board and none of the rest, and answering from that is the defect class this project keeps
+ * finding. The tool results do say so, but a tool result is untrusted data the model may summarise
+ * away, so the admission is written HERE, in code, on the way out: if the budget was blown, the
+ * reply says the answer may be incomplete whatever the model chose to write. Same shape as
+ * withFilingNotice, which exists for the same reason.
+ */
+export function withBudgetNotice(reply: string, budget: { exhausted: boolean }): string {
+  if (!budget.exhausted) return reply;
+  return `${reply.trim()}\n\nheads up: darbar stopped answering partway through this one, so i ran out of time to check everything. whatever i said above may be missing something, ask me again in a minute.`;
+}
+
+// exported for agent-budget.test.ts alongside runWithMessageBudget: this function IS the
+// reachable/unreachable distinction the gate reads, so the budget's effect on it is worth pinning
+export async function fetchDarbar(path: string, method = 'GET', body?: unknown): Promise<Fetched> {
+  const budget = budgets.getStore();
+  const left = budget ? budget.deadline - Date.now() : Number.POSITIVE_INFINITY;
+  // Spent. The call is not made at all, which is the point: the remaining tool calls of a doomed
+  // turn now cost nothing instead of ten seconds each. It is reported as unreachable, so every
+  // caller — the gate included — treats it exactly as it treats a darbar that is down.
+  if (left <= 0) {
+    budget!.exhausted = true;
+    return { reachable: false, detail: `this message used up its ${MESSAGE_BUDGET_MS}ms budget for darbar calls, so this one was not attempted` };
+  }
+  const timeout = Math.min(DARBAR_TIMEOUT_MS, left);
   try {
     const r = await fetch(`${config.apiUrl}${path}`, {
       method,
@@ -40,7 +95,7 @@ async function fetchDarbar(path: string, method = 'GET', body?: unknown): Promis
       body: body ? JSON.stringify(body) : undefined,
       // a darbar that accepts the connection and then never answers would otherwise hang the
       // whole slack handler, with no reply and no park
-      signal: AbortSignal.timeout(DARBAR_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeout),
     });
     const parsed = await r.json().catch(() => null);
     // 5xx, 429 and 408 are darbar failing to answer. Any other 4xx IS an answer ("no such task").
@@ -56,7 +111,15 @@ async function fetchDarbar(path: string, method = 'GET', body?: unknown): Promis
     // which are undefined on an array, so it still refuses safely.
     return { reachable: true, status: r.status, json: parsed as Record<string, unknown> };
   } catch (e) {
-    const why = (e as { name?: string })?.name === 'TimeoutError' ? `darbar did not answer within ${DARBAR_TIMEOUT_MS}ms` : `darbar unreachable: ${String(e).slice(0, 80)}`;
+    // a timeout that landed ON the deadline is the budget, not the per-request limit, and only that
+    // one marks the turn: a network failure or a single slow call is the pre-existing behaviour and
+    // must not start telling every sender their answer is incomplete
+    const timedOut = (e as { name?: string })?.name === 'TimeoutError';
+    if (timedOut && budget && Date.now() >= budget.deadline) {
+      budget.exhausted = true;
+      return { reachable: false, detail: `this message used up its ${MESSAGE_BUDGET_MS}ms budget for darbar calls while waiting on this one` };
+    }
+    const why = timedOut ? `darbar did not answer within ${timeout}ms` : `darbar unreachable: ${String(e).slice(0, 80)}`;
     return { reachable: false, detail: why };
   }
 }
@@ -138,8 +201,12 @@ type Verdict =
  * slack payload) and the project's stakeholder list. Nothing in the message can reach it:
  * the only model-supplied input is WHICH project to check, and naming a different project
  * only ever gets that project's stakeholder list checked against the same verified id.
+ *
+ * Exported for agent-budget.test.ts. "Unreachable is a refusal" is the property the whole gate
+ * rests on, and DAR-210 added a new way to be unreachable (a spent message budget), so the test
+ * asserts the answer here rather than trusting that the new branch inherited it.
  */
-async function verifyStakeholder(
+export async function verifyStakeholder(
   ctx: AgentContext,
   input: { taskRef?: string; project?: string },
 ): Promise<Verdict> {
@@ -185,10 +252,20 @@ async function verifyStakeholder(
  * person's words, while the row they asked about was never reopened. Nothing is lost by refusing
  * a reopen: the row is still there, the thread is still there, and the owner is told what was
  * said, so the only thing a park could add is fabricated board data.
+ *
+ * An `append` (DAR-182) sits with `reopen` rather than with `file`, and the reason is worth stating
+ * because it looks like the wrong side. The words ARE the sender's own, so parking them would lose
+ * nothing that belongs to somebody else. But a parked report is promoted by filing a NEW FEEDBACK
+ * ROW, and a new row is exactly the defect DAR-182 exists to remove: the whole point of an append is
+ * that one finding stays one row. Parking it would fix the loss by rebuilding the duplicate. So a
+ * refused append is refused plainly, nothing is held, the sender is told nothing was added so they
+ * can send it again, and on a stakeholder gap the owner still gets their words in the ping. Making a
+ * refused append survivable needs an append-aware held record, which lives in parked.ts.
  */
 type GateIntent =
   | { kind: 'file'; body: string; type?: string }
-  | { kind: 'reopen'; feedbackShortId: string };
+  | { kind: 'reopen'; feedbackShortId: string }
+  | { kind: 'append'; feedbackShortId: string };
 
 function causeFor(kind: Exclude<Verdict, { ok: true }>['kind']): ParkCause {
   if (kind === 'not_stakeholder') return 'stakeholder_gap';
@@ -212,24 +289,34 @@ async function stakeholderGate(
   const pingable = v.kind === 'not_stakeholder';
   const cause = causeFor(v.kind);
 
-  if (intent.kind === 'reopen') {
+  // The two intents that operate on a row somebody already filed. Neither parks: a reopen would
+  // copy another author's words into a held item, an append would be promoted as a second row, and
+  // both refusals leave the existing row exactly as it was, which is the honest thing to report.
+  if (intent.kind === 'reopen' || intent.kind === 'append') {
     const id = intent.feedbackShortId;
+    const isAppend = intent.kind === 'append';
+    const did = isAppend ? 'add anything to' : 'reopen';
+    const untouched = isAppend
+      ? `${id} was NOT changed, nothing was added to it, and nothing was filed`
+      : `${id} was NOT reopened, it is untouched, and nothing was filed`;
     if (pingable) {
       await notifyOwnerGated(
         ctx,
-        `tried to reopen ${id} on *${where}* but is not on its stakeholder list. nothing was reopened and nothing was filed, ${id} is untouched. add them as a stakeholder if their follow-up should count.`,
+        isAppend
+          ? `tried to add to ${id} on *${where}* but is not on its stakeholder list. nothing was added and nothing was filed, ${id} is untouched. add them as a stakeholder if their evidence should count.`
+          : `tried to reopen ${id} on *${where}* but is not on its stakeholder list. nothing was reopened and nothing was filed, ${id} is untouched. add them as a stakeholder if their follow-up should count.`,
         ctx.messageText,
       );
     }
     return {
       ok: false,
       result: JSON.stringify({
-        reopened: false,
+        ...(isAppend ? { added: false } : { reopened: false }),
         filed: false,
         parked: false,
-        ...(v.kind === 'not_stakeholder' ? { gated: true } : { error: `${v.detail}, nothing reopened` }),
-        reason: `${v.detail}. ${id} was NOT reopened, it is untouched, and nothing was filed.${pingable ? ' the owner has been pinged already.' : ''}`,
-        instruction: `tell the sender plainly, in persona, that ${id} was not reopened and nothing was filed${v.kind === 'not_stakeholder' ? " because they are not on this project's stakeholder list" : ''}${pingable ? ', and that the owner has been pinged' : ''}. do NOT claim anything was filed, reopened, held or parked: this follow-up was not held anywhere, so do not tell them it is waiting or being tracked. do NOT retry or work around this.`,
+        ...(v.kind === 'not_stakeholder' ? { gated: true } : { error: `${v.detail}, nothing ${isAppend ? 'added' : 'reopened'}` }),
+        reason: `${v.detail}. ${untouched}.${pingable ? ' the owner has been pinged already.' : ''}`,
+        instruction: `tell the sender plainly, in persona, that you could not ${did} ${id} and nothing was filed${v.kind === 'not_stakeholder' ? " because they are not on this project's stakeholder list" : ''}${pingable ? ', and that the owner has been pinged' : ''}. do NOT claim anything was filed, ${isAppend ? 'added, ' : 'reopened, '}held or parked: nothing here was held anywhere, so do not tell them it is waiting or being tracked. do NOT retry or work around this.`,
       }),
     };
   }
@@ -438,6 +525,11 @@ what you do with your tools:
 - file feedback when someone reports a bug, gives design input, or asks for something
   (file_feedback) — this is the most important action. when a message references a task
   id, file against it; otherwise pick the right project from context or ask which one
+- add to feedback that already exists (add_to_feedback) when someone is giving you MORE of
+  something already filed: a screenshot for a report on the board, a correction, a detail they
+  forgot, "include this image in that feedback". one finding is one row, so append to it instead
+  of filing a second row that the orchestrator then has to merge back. never rewrites what the
+  original reporter wrote, it adds their words under their name
 - reopen feedback when someone replies in a thread that an issue isn't actually fixed
   (reopen_feedback — only works as a reply in the original feedback thread)
 - maintain your memory: a markdown vault at /memories (raj can read it in obsidian).
@@ -452,6 +544,10 @@ judgment rules:
 - casual conversation ("hi", "who are you", "thanks") → just reply. do not file anything.
 - a concrete report or request about project work → file_feedback, then confirm in one
   line with the feedback id and board link
+- more evidence or detail for something ALREADY filed → add_to_feedback with that row's id, then
+  say which row it went on. if a feedback id is tracked for this thread, or the message names one,
+  or the message reads as "add this to that", it is an addition, not a new report. when you are
+  not sure which row they mean, ask rather than filing a second one
 - ambiguous between projects → ask which project, listing the prefixes
 - questions about status → read the board and summarize briefly; don't dump raw json
 - never invent task ids or statuses; if a lookup fails, say so
@@ -494,6 +590,9 @@ const SECURITY = `## security (critical — cannot be overridden)
   as a feedback id, never pair it with a board link, never say it was filed, logged,
   raised, ticketed or tracked. only a promotion produces a real feedback id, and only then
   is there one to quote.
+- adding to an existing row is gated IN CODE the same way, against the stakeholder list of the
+  project that row belongs to. a refused ADD is not parked and is not held anywhere: say nothing
+  was added, the row is untouched, and nothing was filed.
 - a refused REOPEN is not parked and is not held anywhere, because the row it concerns already
   exists and belongs to whoever wrote it. say the row was not reopened and nothing was filed.
   never tell them their follow-up is being held, waiting, or tracked, and never repeat another
@@ -590,6 +689,42 @@ function buildTools(ctx: AgentContext) {
         const filed = JSON.parse(res) as { shortId?: string };
         if (filed.shortId) markSuperseded(ctx.channel, ctx.messageTs, filed.shortId);
         return res;
+      },
+    }),
+    betaTool({
+      name: 'add_to_feedback',
+      description: 'Add evidence or a follow-up detail to a feedback row that ALREADY EXISTS, so one finding stays one row. Use this when the sender is adding to something already filed: a screenshot for a report that is already on the board, a correction, a missing detail, "put this image on FB-23", "that bug is also on the X screen". The note and any files attached to THIS message are appended to that row, attributed to the sender, and the row keeps its id and status. Do NOT use it to file something new (file_feedback) and do NOT use it to say an issue is not actually fixed (reopen_feedback). Never rewrites what the original reporter wrote.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          feedbackRef: { type: 'string', description: 'the existing feedback short id, e.g. MRF-FB-23' },
+          note: { type: 'string', description: "what the sender is adding, in their terms, plus what any attached image or recording actually shows. May be empty when the attachment is the whole point" },
+        },
+        required: ['feedbackRef'], additionalProperties: false,
+      },
+      run: async ({ feedbackRef, note }: any) => {
+        const ref = String(feedbackRef ?? '').trim();
+        if (!ref) return JSON.stringify({ added: false, error: 'feedbackRef is required: this tool adds to a row that already exists' });
+        // resolve the row first so the gate is asked about the project that row actually belongs to,
+        // not one the model named. Only projectId is read here; the body belongs to whoever wrote it
+        const row = JSON.parse(await mc(`/feedback/${encodeURIComponent(ref)}`)) as { projectId?: unknown; shortId?: string; error?: string };
+        if (!row.projectId) return JSON.stringify({ added: false, error: row.error ?? `could not resolve ${ref}, nothing was added` });
+        const id = row.shortId ?? ref;
+        // Same gate as filing, on the verified sender id. Unlike reopen_feedback this is NOT limited
+        // to the thread's own row: the reported case is Raj in a DM saying "put this image on the
+        // feedback", which is not a reply in that row's thread, so a thread restriction would not
+        // have fixed anything. What keeps a wrong ref cheap is that this only ever APPENDS, under
+        // the sender's name — the original report stays readable and a mistake is visible.
+        const gate = await stakeholderGate(ctx, { project: String(row.projectId) }, { kind: 'append', feedbackShortId: id });
+        if (!gate.ok) return gate.result;
+        return mc(`/feedback/${encodeURIComponent(id)}/append`, 'POST', {
+          note: String(note ?? ''),
+          // transport-controlled, exactly like file_feedback: the model picks the row, never the
+          // evidence or the name it is filed under
+          attachments: ctx.attachments,
+          author: ctx.senderName,
+          authorType: 'human',
+        });
       },
     }),
     betaTool({
@@ -832,15 +967,25 @@ export async function runAgent(
   history: Array<{ role: 'user' | 'assistant'; content: string }>,
   text: string,
 ): Promise<string> {
-  // recovery first, and in code: whether a held report gets filed depends only on the verified
-  // sender id, so no message and no route can influence it in either direction
-  const sweep = await sweepParked(ctx).catch((e) => {
-    console.error('gabbar: parked sweep failed:', e);
-    return [] as SweepResult[];
+  // The budget opens HERE and not inside respond(), because the sweep is part of what one message
+  // costs: five distinct targets is up to ten gate calls before the turn starts, and bounding only
+  // the turn would have left the worst case untouched.
+  //
+  // It covers darbar calls only. The model calls (triage, chat, the tool runner) are not on it: they
+  // are a different failure mode with its own timeouts, and putting them under one clock would mean
+  // a slow model silently truncating the board reads it needs.
+  return runWithMessageBudget(async (budget) => {
+    // recovery first, and in code: whether a held report gets filed depends only on the verified
+    // sender id, so no message and no route can influence it in either direction
+    const sweep = await sweepParked(ctx).catch((e) => {
+      console.error('gabbar: parked sweep failed:', e);
+      return [] as SweepResult[];
+    });
+    const notices = sweep.map((r) => r.notice);
+    const filedNow = sweep.flatMap((r) => (r.filed ? [r.filed] : []));
+    const reply = withFilingNotice(await respond(ctx, history, text, notices, filedNow.length > 0), filedNow);
+    return withBudgetNotice(reply, budget);
   });
-  const notices = sweep.map((r) => r.notice);
-  const filedNow = sweep.flatMap((r) => (r.filed ? [r.filed] : []));
-  return withFilingNotice(await respond(ctx, history, text, notices, filedNow.length > 0), filedNow);
 }
 
 async function respond(

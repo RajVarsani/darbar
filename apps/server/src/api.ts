@@ -48,6 +48,161 @@ function typeErrors(b: Record<string, unknown>, spec: Record<string, FieldType>)
   }
   return errs;
 }
+// ---------- fields a route does not apply ----------
+// DAR-208's actual shape, one layer above typeErrors. typeErrors catches a field sent with the
+// WRONG TYPE; this catches a field sent with the right type that the route has no branch for at
+// all, which is dropped under a 200 in exactly the same silence. `repos` on PATCH /projects is the
+// instance that was reported; the sweep found the same property on eleven other fields across nine
+// routes, so this is a table rather than twelve if-statements bolted on one at a time.
+//
+// How it stays a class fix and not a longer list: each DOCUMENT gets one vocabulary of the field
+// names a caller might reasonably send about it, each with the sentence saying where that thing is
+// actually changed. A route declares what it APPLIES; everything else in the vocabulary is a 400
+// naming the right door. So adding a field to a document means adding one vocabulary line, and
+// every route that does not handle it then refuses it loudly instead of eating it.
+//
+// Deliberately NOT a schema: unknown junk is still ignored. These are the words that MEAN something
+// in this system, and a 400 on an unrecognised key would break every caller that pads a body.
+//
+// ---------- and a field echoed back UNCHANGED is not an edit ----------
+// The first cut of this refused a vocabulary field on sight, which broke a caller the code sweep
+// could not see: READ THE WHOLE THING, CHANGE ONE PART, SEND IT BACK. That is the procedure the
+// project-init skill teaches for restructuring a charter or replacing a stakeholder list, every
+// read surface here echoes fields the write path does not apply, and a documented procedure is a
+// caller (DAR-FB-121). Refusing it taught people that the guard is noise, which is how a guard
+// stops being read.
+//
+// So the guard fires on what it was built to catch and nothing else: a CHANGE that would be
+// dropped. A value identical to the stored one drops nothing, whether it was echoed or typed, so
+// it passes and the rest of the body applies. Send a DIFFERENT name and it still 400s, which is
+// the case that was ever worth a 400. Absent / null / [] all read as the same emptiness, because
+// `proxyPublished: []` echoed onto a project that has never published one says exactly what the
+// stored absence says.
+// Comparison is on the JSON shape, which is what a read surface actually handed the caller: a Date
+// comes back as its ISO string and an ObjectId as its hex, and both must count as unchanged.
+type FieldVocab = Record<string, string>;
+const jsonish = (v: unknown): unknown => (v === undefined ? null : JSON.parse(JSON.stringify(v)));
+const isEmpty = (v: unknown) => v === null || (Array.isArray(v) && v.length === 0);
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const ka = Object.keys(a as object), kb = Object.keys(b as object);
+    // key ORDER must not decide this: a caller that re-serialised the body it read has not edited it
+    return ka.length === kb.length && ka.every((k) => k in (b as object) && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+  }
+  return false;
+}
+// exported for silent-drop tests: this predicate is the whole difference between "refuses a dropped
+// change" and "refuses an echo", and it is the reason read-edit-send-whole still works
+export function echoedUnchanged(sent: unknown, stored: unknown): boolean {
+  const a = jsonish(sent), b = jsonish(stored);
+  return (isEmpty(a) && isEmpty(b)) || deepEqual(a, b);
+}
+// `current` is the stored document when there is one. On a CREATE there is nothing to echo, so
+// omitting it refuses every vocabulary field, which is right: nothing sent to a create can be
+// "unchanged".
+function notApplied(
+  b: Record<string, unknown>,
+  vocab: FieldVocab,
+  applied: string[],
+  current?: Record<string, unknown> | null,
+): string | null {
+  const hit = Object.keys(vocab).filter((k) =>
+    b[k] !== undefined && !applied.includes(k) && !(current && echoedUnchanged(b[k], current[k])));
+  return hit.length
+    ? `not settable here, and what you sent differs from what is stored: ${hit.map((k) => `${k} (${vocab[k]})`).join('; ')}`
+    : null;
+}
+// One shape for every refusal, table-driven or hand-written, and no em dashes in any of them:
+// gabbar hands these strings verbatim to a slack-facing model as tool results, and the charter bans
+// em dashes and AI-tell phrasing in anything that can reach slack.
+const notHere = (field: string, why: string) => `not settable here: ${field} (${why})`;
+
+// The project document, as the config write path sees it. `repos` is missing from this table
+// because it is APPLIED now (applyConfig grew the branch it never had); everything else here is
+// server-owned or set once at create.
+const PROJECT_VOCAB: FieldVocab = {
+  name: 'set at create (POST /projects); there is no rename, and the name is one of the keys every project lookup accepts',
+  prefix: 'set at create and permanent: every task and feedback short id already issued is built from it',
+  capId: 'the board capability id is generated by the server; changing it would invalidate every share link already handed out',
+  counters: 'the short-id counters belong to the server; a hand-set value re-issues an id that already exists',
+  proxyPublished: 'that is the record of what the server actually put in the proxy route table, not a setting. Change `proxy` and the reconciliation rewrites it',
+  createdAt: 'stamped by the server at create',
+};
+
+// The seven fields the config write path DOES apply, for use on the granular routes, where each of
+// them is somebody else's door. Sending {text, repos} to /charter/append appended the line and
+// dropped the repos under a 200, which is the same defect one floor down from the one that started
+// this (DAR-216 non-blocking 1). Every granular route now measures itself against this too.
+const CONFIG_VOCAB: FieldVocab = {
+  charter: 'the charter is its own door: POST /api/projects/:ref/charter/append adds a line, PATCH /api/projects/:ref {"charter": …} replaces the whole thing',
+  slackChannel: 'PATCH /api/projects/:ref {"slackChannel": …}',
+  repos: 'PATCH /api/projects/:ref {"repos": ["…"]}',
+  stakeholders: 'stakeholders are edited one at a time under /api/projects/:ref/stakeholders, or wholesale with PATCH /api/projects/:ref {"stakeholders": […]}',
+  pipeline: 'lanes are edited one at a time under /api/projects/:ref/pipeline/lanes, autoAdvance at PATCH /api/projects/:ref/pipeline, or wholesale with PATCH /api/projects/:ref {"pipeline": {…}}',
+  agents: 'agents are edited one at a time under /api/projects/:ref/agents, or wholesale with PATCH /api/projects/:ref {"agents": […]}',
+  proxy: 'the share is edited at PATCH /api/projects/:ref/proxy and published at PATCH /api/projects/:ref/proxy/enabled, or wholesale with PATCH /api/projects/:ref {"proxy": {…}}',
+};
+// what a granular project route is measured against: the server-owned fields plus the config doors.
+// NOTE ON SCOPE: a vocabulary belongs to ONE document, so each route below has to say which of these
+// words it owns. `prefix` under /proxy addresses the SHARE, not the project, and `name` under
+// /stakeholders and /agents addresses the person or the agent, so those routes list them as applied
+// and the project-level meaning is simply not reachable there.
+const PROJECT_GRANULAR_VOCAB: FieldVocab = { ...PROJECT_VOCAB, ...CONFIG_VOCAB };
+
+// The task document. PATCH /tasks/:ref already refused most of these by hand (DAR-187 item 4);
+// they moved here so the create route is held to the same standard with the same sentences.
+const TASK_VOCAB: FieldVocab = {
+  origin: 'set at create only (POST /tasks {"origin": …})',
+  commits: 'append-only: one hash per call via {"addCommit": "<sha>"}',
+  // applied by PATCH /tasks/:ref and by nothing else, so POST /tasks {"addCommit"} returned 200 with
+  // commits still empty. A word this API applies somewhere has to be in the table, or the table has
+  // the same blind spot as the route it is meant to fix (DAR-FB-120)
+  addCommit: 'a commit is appended after the task exists: PATCH /tasks/:ref {"addCommit": "<sha>"}',
+  shortId: 'assigned by the server at create and never changes',
+  parentTaskRef: 'parentage is set at create only (POST /tasks {"parentTaskRef": …})',
+  parentTaskId: 'parentage is set at create only (POST /tasks {"parentTaskRef": …})',
+  project: 'a task cannot move between projects; file it on the other project and cancel this row',
+  projectId: 'a task cannot move between projects; file it on the other project and cancel this row',
+  dispatched: 'filing a task is not dispatching it: hand it to an agent with PATCH /tasks/:ref {"dispatched": true}',
+  dispatchedAt: 'the server owns that clock: send {"dispatched": true} to stamp it now, false to clear it',
+  createdAt: 'stamped by the server at create',
+  updatedAt: 'stamped by the server on every write',
+};
+
+// The feedback document. body and attachments are the DAR-182 pair: both were dropped here under a
+// 200, and both now name the append route, which is the only thing that adds to a filed row.
+const FEEDBACK_VOCAB: FieldVocab = {
+  // the sentence NAMES the field to send. Pointing at the append route without saying "note" sent a
+  // caller who had just been refused for `body` straight back with the same key, into a route that
+  // declared `body` applied and read `note` (DAR-FB-120). A redirection that does not name the field
+  // is how the guidance became the trap.
+  body: 'a feedback body is append-only: POST /api/feedback/:shortId/append with {"note": "…"} adds an attributed note without rewriting what its author wrote',
+  attachments: 'evidence is appended, not replaced: POST /api/feedback/:shortId/append with {"attachments": ["…"]} records who added it and when',
+  // applied by POST /feedback and PATCH /feedback, and by neither of the others, so it was dropped
+  // on the append route under a 200
+  type: 'the kind of a row (bug, design, idea, approval) is set when it is filed and changed with PATCH /feedback/:shortId {"type": …}',
+  author: 'attribution is set when the row is filed and never changes; it is the human trail the board renders',
+  authorType: 'attribution is set when the row is filed and never changes',
+  taskRef: 'the task a row was FILED ON is set at create (POST /feedback {"taskRef": …}); to link the task that FIXES it send resolvedTaskRef',
+  taskId: 'the task a row was FILED ON is set at create (POST /feedback {"taskRef": …}); to link the task that FIXES it send resolvedTaskRef',
+  taskShortId: 'the task a row was FILED ON is set at create (POST /feedback {"taskRef": …}); to link the task that FIXES it send resolvedTaskRef',
+  slack: 'the slack thread a row belongs to is set when it is filed; it is where every reply about it is posted',
+  project: 'feedback cannot move between projects',
+  projectId: 'feedback cannot move between projects',
+  shortId: 'assigned by the server at create and never changes',
+  resolvedTaskRef: 'the task that FIXES a row is linked after triage: PATCH /feedback/:shortId {"resolvedTaskRef": "DAR-12"}',
+  resolvedTaskId: 'send resolvedTaskRef (a short id like DAR-12); the server resolves it and stores both',
+  resolvedTaskShortId: 'send resolvedTaskRef (a short id like DAR-12); the server resolves it and stores both',
+  status: 'a status change is its own act (a newly filed row is always pending, and an append never moves one): PATCH /feedback/:shortId',
+  resolution: 'a resolution is the text posted back to the reporter when a row is resolved or rejected: PATCH /feedback/:shortId',
+  createdAt: 'stamped by the server at create',
+  updatedAt: 'stamped by the server on every write',
+};
+
 // lanes: absent = untouched, null = default-all, [] = explicitly none, array = subset.
 // malformed shapes 400 instead of coercing — lanes:[123] must never read as "explicitly none"
 const LANES_SHAPE_ERROR = 'lanes must be null or an array of lane-key strings';
@@ -690,6 +845,9 @@ api.post('/projects', async (c) => {
   }
   const badTypes = typeErrors(b, { charter: 'string', slackChannel: 'string|null', repos: 'string[]' });
   if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
+  // name and prefix ARE applied here, so they are not refused; the server-owned rest still is
+  const badFields = notApplied(b, PROJECT_VOCAB, [...CONFIG_FIELDS, 'name', 'prefix']);
+  if (badFields) return c.json({ error: badFields }, 400);
   // stakeholders were stored raw here, which let a malformed slackUserId in at CREATE time and then
   // silently refuse that person at Gabbar's gate forever. Same reader as every later write.
   const people = readStakeholders(b.stakeholders ?? []);
@@ -775,6 +933,9 @@ api.get('/projects', async (c) => {
 type ConfigFail = { error: string; status: 400 | 409 };
 type ConfigOk = { doc: Project; warnings: string[] };
 const failed = (r: ConfigFail | ConfigOk): r is ConfigFail => 'error' in r;
+// the whole config surface, in one place: what applyConfig writes, what the 'nothing to update'
+// message lists, and what PROJECT_VOCAB is measured against
+const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy'];
 
 async function applyConfig(p: Project, b: Record<string, unknown>): Promise<ConfigFail | ConfigOk> {
   const warnings: string[] = [];
@@ -783,10 +944,19 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
   // str() returned undefined, the field was skipped, and the write still reported success on
   // everything sent. Every other field here already errors on a shape it cannot store; these two
   // were the exceptions (DAR-187 item 5).
-  const badTypes = typeErrors(b, { charter: 'string', slackChannel: 'string|null' });
+  const badTypes = typeErrors(b, { charter: 'string', slackChannel: 'string|null', repos: 'string[]' });
   if (badTypes.length) return { error: badTypes.join(' | '), status: 400 };
+  // DAR-208. There was no repos branch and no granular route, so {repos, charter} applied the
+  // charter and dropped repos under a 200 — and the charter is the thing that tells every builder
+  // which repo and branch it is working in, so the drop hands agents the wrong one. It is a plain
+  // wholesale list like stakeholders/agents: sent, replaced; absent, untouched.
+  const badFields = notApplied(b, PROJECT_VOCAB, CONFIG_FIELDS, p as unknown as Record<string, unknown>);
+  if (badFields) {
+    return { error: `${badFields}. If you are editing a project by reading it and sending it back, GET /api/projects/${p.prefix} returns exactly the body this route accepts`, status: 400 };
+  }
   const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
+  if (b.repos !== undefined) set.repos = strArr(b.repos);
   let pipeline: Pipeline | undefined;
   if (b.pipeline !== undefined) {
     const parsed = readPipeline(b.pipeline);
@@ -846,7 +1016,7 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
     }
   }
   if (Object.keys(set).length === 0 && Object.keys(unset).length === 0) {
-    return { error: 'nothing to update (charter, slackChannel, stakeholders, pipeline, agents, proxy)', status: 400 };
+    return { error: `nothing to update (${CONFIG_FIELDS.join(', ')})`, status: 400 };
   }
   await Projects.updateOne({ _id: p._id }, {
     ...(Object.keys(set).length ? { $set: set } : {}),
@@ -927,6 +1097,19 @@ api.patch('/projects/:ref', async (c) => {
 
 const agentNames = (p: Project) => (p.agents ?? []).map((a) => a.name);
 
+// "rename" on a CREATE route means the caller meant the edit door. It was dropped under a 200 on all
+// three of these, which reads as "renamed" and is actually "added a second one" (DAR-208 sweep).
+const renameOnCreate = (b: Record<string, unknown>, what: string, editRoute: string): string | null =>
+  b.rename === undefined ? null : notHere('rename', `this route only ADDS ${what}. To rename one, ${editRoute}`);
+
+// The class fix was a TABLE on the wholesale doors and hand-written ifs on the granular ones, which
+// left the new doors with the old defect: POST /charter/append {text, slackChannel, repos} appended
+// the line and dropped both under a 200, and PATCH /pipeline {autoAdvance, charter, repos} did the
+// same. Every granular route runs this now, with the words it genuinely owns declared as applied.
+// `p` rides along so an echoed-unchanged field still passes (see notApplied).
+const granularDrops = (b: Record<string, unknown>, p: Project, applied: string[]): string | null =>
+  notApplied(b, PROJECT_GRANULAR_VOCAB, applied, p as unknown as Record<string, unknown>);
+
 // readAgents/readPipeline report the index within the MERGED list, which means nothing to a caller
 // who addressed one entry by name. Re-label it with the thing they actually addressed.
 const relabel = (msg: string, i: number, label: string) =>
@@ -995,6 +1178,11 @@ api.post('/projects/:ref/stakeholders', async (c) => {
   if (!p) return c.json({ error: 'project not found' }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const renameHere = renameOnCreate(b, 'a stakeholder', 'PATCH /api/projects/:ref/stakeholders/:name with {"rename": …}');
+  if (renameHere) return c.json({ error: renameHere }, 400);
+  // `name` here is the PERSON, so the project-level meaning of the word is not reachable on this route
+  const dropped = granularDrops(b, p, ['name']);
+  if (dropped) return c.json({ error: dropped }, 400);
   const name = str(b.name)?.trim();
   if (!name) return c.json({ error: 'name (non-empty string) required' }, 400);
   const current = p.stakeholders ?? [];
@@ -1032,9 +1220,17 @@ api.patch('/projects/:ref/stakeholders/:name', async (c) => {
   // `updated` while changing nothing, because only `rename` is ever applied — a silent success on the
   // access-control surface, reachable by the curl the charter tells builders to use (same defect class
   // as DAR-187). Now it falls through to the 400 below, exactly like the agent route.
-  if (!['slackUserId', 'role', 'rename'].some((k) => b[k] !== undefined)) {
-    return c.json({ error: `nothing to update (slackUserId, role, rename)${b.name !== undefined ? ' — to change the display name send "rename", since "name" addresses the person in the URL' : ''}` }, 400);
+  // `name` fell through to the 400 below only when it was sent ALONE. {"name":"Tanisha","role":"x"}
+  // applied the role and dropped the rename under a 200, which is the same hole the agent route had
+  // one floor up, on the access-control surface. It is refused by name now, either way.
+  if (b.name !== undefined) {
+    return c.json({ error: notHere('name', 'it addresses the person in the URL. To change their display name send "rename"') }, 400);
   }
+  if (!['slackUserId', 'role', 'rename'].some((k) => b[k] !== undefined)) {
+    return c.json({ error: 'nothing to update (slackUserId, role, rename)' }, 400);
+  }
+  const dropped = granularDrops(b, p, ['name']);
+  if (dropped) return c.json({ error: dropped }, 400);
   const rename = b.rename === undefined ? undefined : str(b.rename)?.trim();
   if (b.rename !== undefined && !rename) return c.json({ error: 'rename must be a non-empty string' }, 400);
   if (rename && rename.toLowerCase() !== name.toLowerCase() && current.some((s) => s.name.trim().toLowerCase() === rename.toLowerCase())) {
@@ -1088,6 +1284,10 @@ api.post('/projects/:ref/agents', async (c) => {
   if (!p) return c.json({ error: 'project not found' }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const renameHere = renameOnCreate(b, 'an agent', 'PATCH /api/projects/:ref/agents/:name with {"rename": …}');
+  if (renameHere) return c.json({ error: renameHere }, 400);
+  const dropped = granularDrops(b, p, ['name']); // `name` here is the AGENT
+  if (dropped) return c.json({ error: dropped }, 400);
   const name = str(b.name)?.trim();
   if (!name) return c.json({ error: 'name (non-empty string) required' }, 400);
   const current = p.agents ?? [];
@@ -1116,7 +1316,15 @@ api.patch('/projects/:ref/agents/:name', async (c) => {
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
   const fields = ['kind', 'brief', 'trigger', 'rename'];
+  // `name` addresses the agent in the URL and is never read from the body, so {"name":"x","brief":…}
+  // used to change the brief, report 200, and drop the rename silently — the same hole the
+  // stakeholder route below already names. (DAR-208 sweep)
+  if (b.name !== undefined) {
+    return c.json({ error: notHere('name', 'it addresses the agent in the URL. To change the registry name send "rename", which also rewrites the pipeline manager and reports the tasks still assigned to the old one') }, 400);
+  }
   if (!fields.some((k) => b[k] !== undefined)) return c.json({ error: 'nothing to update (kind, brief, trigger, rename)' }, 400);
+  const dropped = granularDrops(b, p, ['name']);
+  if (dropped) return c.json({ error: dropped }, 400);
   const rename = b.rename === undefined ? undefined : str(b.rename)?.trim();
   if (b.rename !== undefined && !rename) return c.json({ error: 'rename must be a non-empty string' }, 400);
   if (rename && keyOf(rename) !== keyOf(name) && current.some((a) => keyOf(a.name) === keyOf(rename))) {
@@ -1171,6 +1379,10 @@ api.post('/projects/:ref/pipeline/lanes', async (c) => {
   if (!p) return c.json({ error: 'project not found' }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const renameHere = renameOnCreate(b, 'a lane', 'PATCH /api/projects/:ref/pipeline/lanes/:lane with {"rename": …}');
+  if (renameHere) return c.json({ error: renameHere }, 400);
+  const dropped = granularDrops(b, p, []);
+  if (dropped) return c.json({ error: dropped }, 400);
   const lane = str(b.lane)?.trim();
   if (!lane) return c.json({ error: 'lane (non-empty string) required' }, 400);
   const reviews = p.pipeline?.reviews ?? [];
@@ -1198,7 +1410,14 @@ api.patch('/projects/:ref/pipeline/lanes/:lane', async (c) => {
   if (i < 0) return c.json({ error: `lane "${lane}" is not configured — pipeline holds: ${cur.reviews.map((r) => r.lane).join(', ') || '(no lanes)'}` }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  // same shape as the agent route: `lane` addresses the lane in the URL and the body never reads it,
+  // so {"lane":"qa","manager":…} silently kept the old key (DAR-208 sweep)
+  if (b.lane !== undefined) {
+    return c.json({ error: notHere('lane', 'it addresses the lane in the URL. To change the lane KEY send "rename", which checks what it strands first') }, 400);
+  }
   if (!['label', 'manager', 'rename'].some((k) => b[k] !== undefined)) return c.json({ error: 'nothing to update (label, manager, rename)' }, 400);
+  const dropped = granularDrops(b, p, []);
+  if (dropped) return c.json({ error: dropped }, 400);
   const rename = b.rename === undefined ? undefined : str(b.rename)?.trim();
   if (b.rename !== undefined && !rename) return c.json({ error: 'rename must be a non-empty string' }, 400);
   if (rename && keyOf(rename) !== keyOf(lane) && cur.reviews.some((r) => keyOf(r.lane) === keyOf(rename))) {
@@ -1264,7 +1483,16 @@ api.patch('/projects/:ref/pipeline', async (c) => {
   if (!cur) return c.json({ error: 'project has no review pipeline — add the first lane with POST /api/projects/:ref/pipeline/lanes' }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
-  if (b.autoAdvance === undefined) return c.json({ error: 'nothing to update (autoAdvance) — lanes are edited one at a time under /pipeline/lanes' }, 400);
+  // this route rewrites the lane list from `cur`, so a `reviews` in the body was applied to nothing
+  // and reported 200 (DAR-208 sweep)
+  if (b.reviews !== undefined) {
+    return c.json({ error: notHere('reviews', 'lanes are edited one at a time under /pipeline/lanes (POST to add, PATCH /pipeline/lanes/:lane to change, DELETE to remove), so a partial edit cannot wipe the list. PATCH /api/projects/:ref {"pipeline":{…}} replaces it wholesale if that is really what you want') }, 400);
+  }
+  if (b.autoAdvance === undefined) return c.json({ error: 'nothing to update (autoAdvance). Lanes are edited one at a time under /pipeline/lanes' }, 400);
+  // `pipeline` is NOT applied here: this route reads autoAdvance and rebuilds the rest from `cur`,
+  // so a pipeline object in the body would have been dropped exactly like `reviews` above
+  const dropped = granularDrops(b, p, []);
+  if (dropped) return c.json({ error: dropped }, 400);
   const r = await applyConfig(p, { pipeline: { autoAdvance: b.autoAdvance, reviews: cur.reviews } });
   if (failed(r)) return c.json({ error: r.error }, r.status);
   return c.json({ pipeline: r.doc.pipeline, warnings: r.warnings });
@@ -1279,6 +1507,13 @@ api.post('/projects/:ref/charter/append', async (c) => {
   if (!p) return c.json({ error: 'project not found' }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  // `charter` here means the caller wanted the wholesale door: it was dropped under a 200, so the
+  // append landed and the replacement they also sent did not (DAR-208 sweep)
+  if (b.charter !== undefined) {
+    return c.json({ error: notHere('charter', 'this route appends the one line in "text" to what is already there. PATCH /api/projects/:ref {"charter": …} replaces the whole thing') }, 400);
+  }
+  const dropped = granularDrops(b, p, ['charter']); // refused just above, with a better sentence
+  if (dropped) return c.json({ error: dropped }, 400);
   const text = str(b.text)?.trim();
   if (!text) return c.json({ error: 'text (non-empty string) required — this appends one rule or note to the existing charter, it does not replace it (PATCH /api/projects/:ref {charter} replaces)' }, 400);
   const existing = (p.charter ?? '').trimEnd();
@@ -1302,6 +1537,8 @@ api.patch('/projects/:ref/proxy', async (c) => {
     return c.json({ error: 'enabled is not editable here — use PATCH /api/projects/:ref/proxy/enabled, which states what becomes reachable and requires the prefix as confirmation' }, 400);
   }
   if (!['prefix', 'target', 'public'].some((k) => b[k] !== undefined)) return c.json({ error: 'nothing to update (prefix, target, public)' }, 400);
+  const dropped = granularDrops(b, p, ['prefix']); // `prefix` here addresses the SHARE, not the project
+  if (dropped) return c.json({ error: dropped }, 400);
   const merged: Record<string, unknown> = { ...cur };
   for (const k of ['prefix', 'target', 'public']) if (b[k] !== undefined) merged[k] = b[k];
   // readProxy has to run before the escalation check can be trusted, since a widened allowlist is
@@ -1333,9 +1570,18 @@ api.patch('/projects/:ref/proxy/enabled', async (c) => {
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
   if (typeof b.enabled !== 'boolean') return c.json({ error: 'enabled (boolean) required: true publishes the route, false withdraws it and keeps the config' }, 400);
+  // the mirror of the guard on PATCH /proxy: that route refuses `enabled`, this one refused nothing,
+  // so a prefix or an allowlist sent alongside the flip was dropped while the share went live on the
+  // OLD one. An exposure change must never ride along unapplied (DAR-208 sweep)
+  const alongside = ['prefix', 'target', 'public'].filter((k) => b[k] !== undefined);
+  if (alongside.length) {
+    return c.json({ error: notHere(alongside.join(', '), 'this route only publishes or withdraws what is already configured, so those would have been dropped while the share went live on the current config. Edit them with PATCH /api/projects/:ref/proxy first, then flip this') }, 400);
+  }
   if (b.enabled && str(b.confirm) !== cur.prefix) {
     return c.json({ error: `enabling this share needs confirmation. ${exposureLines(cur).join(' | ')}. Repeat with "confirm":"${cur.prefix}" once whoever owns that decision has said yes` }, 400);
   }
+  const dropped = granularDrops(b, p, ['prefix']); // prefix/target/public are refused just above
+  if (dropped) return c.json({ error: dropped }, 400);
   const pre = cur.enabled === b.enabled ? [`the share was already ${b.enabled ? 'enabled' : 'disabled'}; the route table was reconciled again anyway`] : [];
   const r = await applyConfig(p, { proxy: { ...cur, enabled: b.enabled } });
   if (failed(r)) return c.json({ error: r.error }, r.status);
@@ -1365,6 +1611,32 @@ const redactProxy = (x: ProjectProxy | null | undefined) =>
 const redactPublished = (rs: PublishedRoute[] | undefined) =>
   (rs ?? []).filter((r) => r && typeof r.prefix === 'string')
     .map((r) => ({ prefix: r.prefix, public: Array.isArray(r.public) ? r.public : [], targetRedacted: true }));
+
+// The read that PATCH /api/projects/:ref accepts back, unchanged. (DAR-FB-121)
+//
+// READ THE WHOLE THING, CHANGE ONE PART, SEND IT BACK is the documented way to restructure a charter
+// or replace a stakeholder list in bulk, and until this existed there was no read whose output was a
+// legal input: /context and the project list both carry fields the write path cannot apply, and
+// there was no GET /api/projects/:ref at all. Tolerating an unchanged echo (notApplied) keeps those
+// two working; this endpoint is the one that is actually round-trippable by construction, so the
+// procedure has a door that is right rather than merely forgiven.
+//
+// `proxy` IS DELIBERATELY ABSENT, and its absence is what makes the round trip safe. A field left
+// out of a PATCH is untouched, so echoing this body back can never repoint, widen or withdraw a live
+// share by accident, and the internal target never lands on a new payload for a model to read
+// (FB-89). The share has two doors of its own and they ask for confirmation, which is the point.
+api.get('/projects/:ref', async (c) => {
+  const p = await resolveProject(c.req.param('ref'));
+  if (!p) return c.json({ error: 'project not found' }, 404);
+  return c.json({
+    charter: p.charter ?? '',
+    slackChannel: p.slackChannel ?? null,
+    repos: p.repos ?? [],
+    stakeholders: p.stakeholders ?? [],
+    ...(p.pipeline ? { pipeline: p.pipeline } : {}),
+    ...(p.agents ? { agents: p.agents } : {}),
+  });
+});
 
 api.get('/projects/:ref/context', async (c) => {
   const p = await resolveProject(c.req.param('ref'));
@@ -1469,13 +1741,19 @@ api.post('/tasks', async (c) => {
   if (!TASK_TYPES.includes(type)) return c.json({ error: `bad type; use ${TASK_TYPES.join('|')}` }, 400);
   const badTypes = typeErrors(b, {
     description: 'string', notes: 'string', parentTaskRef: 'string',
-    lane: 'string|null', assignee: 'string|null', origin: 'string|null',
+    lane: 'string|null', assignee: 'string|null', origin: 'string|null', blocker: 'string|null',
   });
   if (b.assigneeType !== undefined && b.assigneeType !== 'agent' && b.assigneeType !== 'human') {
     // silently defaulting to 'agent' meant a task filed for a person was filed as agent work
     badTypes.push(`assigneeType must be "agent" or "human" (got ${JSON.stringify(b.assigneeType)})`);
   }
   if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
+  // DAR-208 sweep. `blocker` was the one field here with the reported property and a real use: a task
+  // can be CREATED at status blocked, and the reason was dropped under a 200, so the board got a
+  // blocked card with no why. It is applied now. `parentTaskRef`, `project`, `origin` and `lane` are
+  // create-time fields, so they are excluded from the refusal; the server-owned rest is refused.
+  const badFields = notApplied(b, TASK_VOCAB, ['parentTaskRef', 'project', 'origin', 'lane']);
+  if (badFields) return c.json({ error: badFields }, 400);
   const p = await resolveProject(str(b.project) ?? '');
   if (!p) return c.json({ error: 'project not found' }, 404);
   let parentTaskId: ObjectId | null = null;
@@ -1504,7 +1782,7 @@ api.post('/tasks', async (c) => {
     assigneeType: b.assigneeType === 'human' ? 'human' : 'agent',
     origin: strOrNull(b.origin) ?? null,
     commits: [],
-    blocker: null,
+    blocker: strOrNull(b.blocker) ?? null,
     notes: str(b.notes) ?? '',
     dispatchedAt: null, // filing a task is not dispatching it; only the dispatch PATCH stamps this
     createdAt: new Date(),
@@ -1606,18 +1884,10 @@ api.patch('/tasks/:ref', async (c) => {
   // Fields this route has never applied. They used to be accepted and dropped under a 200, so
   // "correct the origin" or "fix the parent" read as done and changed nothing. A field that cannot
   // be set after creation has to SAY it cannot, and point at whatever does the job (DAR-187 item 4).
-  const frozen = Object.entries({
-    origin: 'set at create only (POST /tasks {"origin": …})',
-    commits: 'append-only: one hash per call via {"addCommit": "<sha>"}',
-    shortId: 'assigned by the server at create and never changes',
-    parentTaskRef: 'parentage is set at create only (POST /tasks {"parentTaskRef": …})',
-    parentTaskId: 'parentage is set at create only (POST /tasks {"parentTaskRef": …})',
-    project: 'a task cannot move between projects; file it on the other project and cancel this row',
-    projectId: 'a task cannot move between projects; file it on the other project and cancel this row',
-  }).filter(([k]) => b[k] !== undefined);
-  if (frozen.length) {
-    return c.json({ error: `not settable on an existing task: ${frozen.map(([k, why]) => `${k} — ${why}`).join('; ')}` }, 400);
-  }
+  // The list moved into TASK_VOCAB so the CREATE route is held to the same standard by the same
+  // sentences — `dispatchedAt` and the timestamps were the two this hand-written copy had missed.
+  const frozen = notApplied(b, TASK_VOCAB, ['dispatched', 'addCommit'], t as unknown as Record<string, unknown>);
+  if (frozen) return c.json({ error: frozen }, 400);
   const badTypes = typeErrors(b, {
     title: 'string', description: 'string', notes: 'string', addCommit: 'string',
     assignee: 'string|null', blocker: 'string|null', lane: 'string|null',
@@ -1698,6 +1968,10 @@ api.patch('/tasks/:ref', async (c) => {
 api.post('/feedback', async (c) => {
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  // DAR-208 sweep: a `status` or a `resolution` sent at filing time was dropped under a 200, so a
+  // caller who thought they were filing something already triaged filed a pending row instead
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['taskRef', 'project', 'type', 'body', 'author', 'authorType', 'attachments', 'slack']);
+  if (badFields) return c.json({ error: badFields }, 400);
   const task = str(b.taskRef) ? await resolveTaskRef(str(b.taskRef)!) : null;
   const p = task
     ? await Projects.findOne({ _id: task.projectId })
@@ -1766,6 +2040,12 @@ api.patch('/feedback/:shortId', async (c) => {
   }
   const badTypes = typeErrors(b, { resolution: 'string|null', resolvedTaskRef: 'string' });
   if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
+  // DAR-182/DAR-208. `body` and `attachments` were the two live drops here: this route writes only
+  // status, resolution, type and resolvedTaskRef, so an image or a corrected body sent with a status
+  // change vanished under a 200. The body stays UNREPLACEABLE, deliberately, and the append route
+  // named in FEEDBACK_VOCAB is how a row grows without anyone's words being rewritten under them.
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['status', 'resolution', 'resolvedTaskRef', 'type'], fb as unknown as Record<string, unknown>);
+  if (badFields) return c.json({ error: badFields }, 400);
   // an unrecognised type was dropped here under a 200, like the status one line up is not
   const type = str(b.type);
   if (b.type !== undefined && !(type && FEEDBACK_TYPES.includes(type))) {
@@ -1816,6 +2096,181 @@ api.patch('/feedback/:shortId', async (c) => {
   return c.json(await Feedback.findOne({ _id: fb._id }));
 });
 
+// ---------- adding to a filed row, instead of filing a second one ----------
+//
+// DAR-182. Raj sent an image to add to an existing finding and Gabbar filed MRF-FB-24, linked as a
+// follow-up to MRF-FB-23. One defect then occupied two rows in the triage queue and the orchestrator
+// had to dedupe something that was never two things. Adding evidence to a finding has to MUTATE that
+// finding, so this is the route that does it, and Gabbar's add_to_feedback tool is the caller.
+//
+// Two judgments, both visible in what this writes:
+//
+// 1. WHERE THE EVIDENCE LIVES. FeedbackDoc already had `attachments`, so no new field was invented
+//    for the urls; they go on the row's own array, which is what the board renders and what a
+//    promotion carries. A second bucket would have been a second place to look for one kind of
+//    thing. The NOTE goes in the body, because the body is the only text surface any reader of a
+//    feedback row has: the board renders it, Gabbar's get_feedback returns it, the pending queue
+//    slices it. A note held anywhere else would be a fact nobody is shown.
+//
+// 2. AN APPEND IS AN EDIT, AND IT SAYS SO. The body is never rewritten — not one byte of what is
+//    already there changes — and the new text arrives under a line naming who added it and when.
+//    Someone else's words appearing changed under their name is its own kind of dishonesty, and it
+//    is also what makes a wrong append recoverable: the original report is still readable above it.
+//    `additions` carries the same fact structurally so a reader does not have to parse prose.
+//
+// The body therefore stays UNREPLACEABLE, which is what it always was in practice: PATCH
+// /feedback/:shortId ignored a `body` under a 200. That silence is the part that changed. The PATCH
+// now refuses `body` and `attachments` by name (FEEDBACK_VOCAB) and points here.
+//
+// What this route deliberately does NOT do: change status, and reply in the reporter's slack thread.
+// An append is not a state change, so it does not fire the reply machinery, and a row that is
+// already resolved says so in a warning rather than being silently reopened — reopening is a
+// decision with a slack message attached, and it stays one act made on purpose.
+
+// The one line of prose an append writes, kept pure so the exact wording is pinned by a test rather
+// than by whoever reads the route next. Plain sentence, no em dashes: a feedback body is quoted back
+// to slack-facing models by Gabbar's get_feedback.
+//
+// It does NOT trim the body it is given. "Not one byte of what is already there changes" has to be
+// literally true or it is not the property it claims to be, and a row whose body ends in whitespace
+// was still losing those bytes.
+export function additionLine(add: { author: string; at: Date; note: string; attachments: string[] }): string {
+  const n = add.attachments.length;
+  const head = `[${add.author} added this on ${add.at.toISOString()}${n ? `, with ${n} attachment${n > 1 ? 's' : ''}` : ''}]`;
+  return add.note ? `${head} ${add.note}` : head;
+}
+export function appendedBody(body: string, add: { author: string; at: Date; note: string; attachments: string[] }): string {
+  const line = additionLine(add);
+  return body ? `${body}\n\n${line}` : line;
+}
+
+api.post('/feedback/:shortId/append', async (c) => {
+  const fb = await Feedback.findOne({ shortId: c.req.param('shortId').toUpperCase() });
+  if (!fb) return c.json({ error: 'feedback not found' }, 404);
+  const b = await readBody(c);
+  if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const badTypes = typeErrors(b, { note: 'string', author: 'string', attachments: 'string[]' });
+  if (b.authorType !== undefined && b.authorType !== 'human' && b.authorType !== 'agent') {
+    badTypes.push(`authorType must be "human" or "agent" (got ${JSON.stringify(b.authorType)})`);
+  }
+  if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
+  // `body` is NOT on this list, and listing it was the whole of DAR-FB-120: this route reads `note`,
+  // so a caller who sent {body} got a 200 with their sentence gone, which is the exact class the
+  // vocabulary exists to end, inside the route that ends it. It is refused here, and FEEDBACK_VOCAB
+  // now names `note` in the sentence that sent them here in the first place.
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['attachments', 'author', 'authorType'], fb as unknown as Record<string, unknown>);
+  if (badFields) return c.json({ error: badFields }, 400);
+  // Required, not defaulted to 'unknown' like the author of a filing. The entire point of this route
+  // over a body rewrite is that the row records who added what, and an addition attributed to
+  // "unknown" is the silent rewrite wearing a label.
+  const author = str(b.author)?.trim();
+  if (!author) {
+    return c.json({ error: 'author (non-empty string) required: an append is only honest if the row says who made it. Send whoever is adding this, not the person who filed the row' }, 400);
+  }
+  const note = (str(b.note) ?? '').trim();
+  const sent = strArr(b.attachments).map((s) => s.trim()).filter(Boolean);
+  if (!note && !sent.length) {
+    return c.json({ error: `nothing to append to ${fb.shortId}: send "note" (the words being added), "attachments" (urls), or both. To change its status or write a resolution use PATCH /api/feedback/${fb.shortId} instead` }, 400);
+  }
+  const at = new Date();
+  const addition = {
+    author,
+    authorType: b.authorType === 'agent' ? ('agent' as const) : ('human' as const),
+    at,
+    note,
+    // WHAT THEY ATTACHED, not what turned out to be new. The row's own `attachments` is the deduped
+    // union and is computed at WRITE time (below), so a url a concurrent append got in first is
+    // still recorded here as something this person sent, and is still stored exactly once. Two
+    // different questions, two honest answers, and neither depends on who won a race.
+    attachments: sent,
+  };
+  const line = additionLine(addition);
+
+  // ---------- one document operation, because two appends overlap (DAR-FB-119) ----------
+  // This used to read fb.body at the top of the handler and $set the whole recomputed string back.
+  // Two overlapping requests computed from the same base and the second erased the first one's
+  // line: a note lost in 8 of 8 trials at two concurrent, and at thirty concurrent, 30 additions
+  // recorded against 2 surviving lines. Every one of them answered 200 with appended:true.
+  //
+  // It is not a theoretical race. bot.ts handles slack events concurrently (which is exactly why
+  // the message budget next door needs AsyncLocalStorage rather than a module variable), and the
+  // orchestrator appends by curl, so two writers on one row is the ordinary case, not the storm.
+  //
+  // The whole write is now an aggregation pipeline, so the concat happens INSIDE the update against
+  // whatever the document holds at that instant. There is no window to lose: mongo applies each
+  // update to one document serially, so the second append concatenates onto the first one's result.
+  // The body branch is byte-identical to appendedBody() above (empty stays bare, non-empty gets
+  // "\n\n" and is otherwise untouched), and $literal wraps every caller-supplied string so a note or
+  // a name beginning with "$" is text rather than a field path.
+  // returnDocument 'before' gives the exact pre-image THIS write landed on, which is what the
+  // warnings below have to be measured against. Measuring them from the snapshot read at the top of
+  // the handler would make them wrong under precisely the concurrency this rewrite exists to handle.
+  const prior = await Feedback.findOneAndUpdate({ _id: fb._id }, [
+    {
+      $set: {
+        body: {
+          $cond: [
+            { $eq: [{ $ifNull: ['$body', ''] }, ''] },
+            { $literal: line },
+            { $concat: [{ $ifNull: ['$body', ''] }, '\n\n', { $literal: line }] },
+          ],
+        },
+        additions: {
+          $concatArrays: [
+            { $ifNull: ['$additions', []] },
+            [{
+              author: { $literal: addition.author },
+              authorType: { $literal: addition.authorType },
+              at,
+              note: { $literal: addition.note },
+              attachments: { $literal: addition.attachments },
+            }],
+          ],
+        },
+        // deduped against the array as it stands at write time, not against the snapshot read above
+        attachments: {
+          $concatArrays: [
+            { $ifNull: ['$attachments', []] },
+            {
+              $filter: {
+                input: { $literal: sent },
+                as: 'u',
+                cond: { $not: [{ $in: ['$$u', { $ifNull: ['$attachments', []] }] }] },
+              },
+            },
+          ],
+        },
+        updatedAt: at,
+      },
+    },
+  ] as never, { returnDocument: 'before' });
+  // the row existed at the top of the handler; if it is gone now it was deleted mid-flight, and
+  // saying so beats reporting an append onto nothing
+  if (!prior) return c.json({ error: `${fb.shortId} no longer exists; nothing was appended` }, 404);
+  const after = await Feedback.findOne({ _id: fb._id });
+
+  const warnings: string[] = [];
+  // same posture as POST /charter/append: not idempotent, and it says so rather than guessing that a
+  // repeat was a mistake. A retried call adds a second attributed line, which is visible and
+  // removable; a swallowed one would be neither.
+  if (note && (prior.body ?? '').includes(note)) {
+    warnings.push('that note is already on this row verbatim; appended anyway (this route is not idempotent, check before repeating a call you are unsure landed)');
+  }
+  const already = sent.filter((u) => (prior.attachments ?? []).includes(u)).length;
+  if (already) {
+    warnings.push(`${already} of the ${sent.length} attachment(s) you sent were already on ${fb.shortId} and are stored once, not twice; the note was appended either way`);
+  }
+  // Status is NOT touched: a resolved row that gains evidence is not automatically open again, and
+  // the reporter's thread does not get a message nobody decided to send. But a closed row is not in
+  // any triage queue, so an append onto one is invisible work unless somebody is told.
+  if (['resolved', 'rejected'].includes(prior.status)) {
+    warnings.push(`${fb.shortId} is ${prior.status}, so this addition is not in any triage queue and nothing here changed that. If it should be looked at again, reopen the row on purpose (PATCH /api/feedback/${fb.shortId} {"status":"pending"})`);
+  }
+  const what = [note ? 'a note' : '', sent.length ? `${sent.length} attachment(s)` : ''].filter(Boolean).join(' and ');
+  await logEvent(fb.projectId, `${fb.shortId}: ${author} appended ${what}${note ? `: ${note.slice(0, 80)}` : ''}`, fb.taskId);
+  return c.json({ appended: true, feedback: after, warnings });
+});
+
 // ---------- parked reports: held by Gabbar's gate, and NOT feedback ----------
 //
 // WHERE THE DATA COMES FROM, and what it costs.
@@ -1839,7 +2294,12 @@ api.patch('/feedback/:shortId', async (c) => {
 //    in the database, which is the one thing that must not exist, and needs a Gabbar change besides.
 //  · a separate Mongo collection rather than `feedback`. Same objection one indirection later: the
 //    invariant a human actually checks is "there is no row for a refused report", and a row is a row.
-const PARKED_DIR = path.resolve(config.parkedDir);
+// Resolved per read rather than once at import. It is the same string either way in a running
+// server, and at import it made this module's directory depend on WHICH FILE IMPORTED IT FIRST:
+// parked.test.ts had to be the first importer of api.ts in the process for its rig to take, so any
+// later test file that imported api.ts earlier silently pointed the parser at the wrong directory.
+// A path read where it is used cannot be captured by an import order nobody can see.
+const parkedDir = () => path.resolve(config.parkedDir);
 // A directory grown past this IS the headline, so the count says so instead of the response quietly
 // getting bigger every sweep. Same reasoning as the digest cap in Gabbar's escalation.
 const PARKED_READ_CAP = 500;
@@ -1884,7 +2344,7 @@ function parkedSummary(parkId: string, raw: Record<string, unknown>, mtime: Date
 }
 
 type ParkedDirRead = { items: ParkedSummary[]; dirPresent: boolean; error: string | null; unreadable: number; ignored: number; files: number; scanned: number };
-function readParkedDir(): ParkedDirRead {
+function readParkedDir(dir: string): ParkedDirRead {
   let names: string[];
   let ignored = 0;
   try {
@@ -1893,7 +2353,7 @@ function readParkedDir(): ParkedDirRead {
     // else's file. Counting a stray notes.json as unreadable made the band announce a lost report
     // and there was none. They are counted apart, and nothing that fails isParkId is ever joined
     // onto a path — the id guard is still the path guard, one step earlier.
-    const all = fs.readdirSync(PARKED_DIR).filter((n) => n.endsWith('.json'));
+    const all = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
     names = all.filter((n) => isParkId(n.slice(0, -'.json'.length))).sort();
     ignored = all.length - names.length;
   } catch (e) {
@@ -1901,7 +2361,7 @@ function readParkedDir(): ParkedDirRead {
     // nothing held, no alarm. Anything else means held reports we cannot see, which must not render
     // as "none held" — it is reported verbatim instead.
     if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { items: [], dirPresent: false, error: null, unreadable: 0, ignored: 0, files: 0, scanned: 0 };
-    console.error(`parked: cannot read ${PARKED_DIR}: ${String(e)}`);
+    console.error(`parked: cannot read ${dir}: ${String(e)}`);
     return { items: [], dirPresent: true, error: `the held-report directory could not be read (${String(e)})`, unreadable: 0, ignored: 0, files: 0, scanned: 0 };
   }
   const items: ParkedSummary[] = [];
@@ -1915,7 +2375,7 @@ function readParkedDir(): ParkedDirRead {
   for (const name of scan) {
     const parkId = name.slice(0, -'.json'.length); // already through isParkId above: no '/', '.' or '..'
     try {
-      const file = path.join(PARKED_DIR, name);
+      const file = path.join(dir, name);
       const mtime = fs.statSync(file).mtime;
       const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as unknown;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { unreadable++; continue; }
@@ -1967,19 +2427,20 @@ api.get('/parked', async (c) => {
   // 'parked' is the default because held-and-waiting is the pending work; promoted and superseded
   // rows are history and stay one query away rather than padding the lane.
   const status = (c.req.query('status') ?? 'parked').trim().toLowerCase();
-  const read = readParkedDir();
+  const dir = parkedDir();
+  const read = readParkedDir(dir);
   const scoped = p ? read.items.filter((i) => parkedFor(i, p!)) : read.items;
   const items = status === 'all' ? scoped : scoped.filter((i) => i.status === status);
   const truncated = read.scanned < read.files;
   const body: ParkedRead = {
-    dir: PARKED_DIR,
+    dir,
     dirPresent: read.dirPresent,
     error: read.error,
     files: read.files,
     scanned: read.scanned,
     truncated,
     ...(truncated
-      ? { note: `PARTIAL ANSWER: ${read.scanned} of ${read.files} files in ${PARKED_DIR} were read, in filename order. The rest are still held on disk and are NOT represented in any count below.` }
+      ? { note: `PARTIAL ANSWER: ${read.scanned} of ${read.files} files in ${dir} were read, in filename order. The rest are still held on disk and are NOT represented in any count below.` }
       : {}),
     unreadable: read.unreadable,
     ignored: read.ignored,
@@ -1996,6 +2457,11 @@ api.get('/parked', async (c) => {
 api.post('/events', async (c) => {
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
+  // an `at` was dropped under a 200, so a backfilled event landed stamped now and read as fresh
+  // activity on the resume trail (DAR-208 sweep)
+  if (b.at !== undefined) {
+    return c.json({ error: notHere('at', 'the server stamps an event when it is written, so a backdated one would read as something that just happened. Say the real time in the text') }, 400);
+  }
   const p = await resolveProject(str(b.project) ?? '');
   if (!p) return c.json({ error: 'project not found' }, 404);
   const task = str(b.taskRef) ? await resolveTaskRef(str(b.taskRef)!) : null;

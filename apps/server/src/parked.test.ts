@@ -18,7 +18,13 @@
 // bug — no clipboard payload, no command anywhere in the band, and untrusted bytes only ever in a
 // text node or a tooltip, never in an attribute that does something.
 //
-// Isolation: api.ts resolves PARKED_DIR at import, so the rig sets it before the dynamic import.
+// Isolation: the rig is set two ways, because the env var alone was not enough. bun runs every test
+// file in ONE process, so @darbar/core builds config from the environment as it stood when the FIRST
+// file imported it, and api.ts used to resolve the directory once at its own import. This file
+// therefore only worked while it happened to be the first importer of api.ts in the run, and a new
+// test file sorting ahead of it silently pointed the parser at a different directory. api.ts now
+// resolves the path per read, and the rig is written onto config as well as into the environment, so
+// neither this file's position in the run nor anyone else's matters.
 // data/parked/ on this machine is never read and never created. Nothing here touches Mongo: the
 // project-scoped read does, so the tests use the unscoped one, which is the same parser.
 import { afterAll, beforeEach, expect, test } from 'bun:test';
@@ -28,6 +34,8 @@ import path from 'node:path';
 
 const RIG = mkdtempSync(path.join(tmpdir(), 'darbar-parked-api-'));
 process.env.PARKED_DIR = RIG;
+const { config } = await import('@darbar/core');
+config.parkedDir = RIG;
 const { api } = await import('./api');
 
 afterAll(() => rmSync(RIG, { recursive: true, force: true }));

@@ -197,6 +197,33 @@ export type Task = {
 
 export type SlackRef = { channel: string; ts: string; user: string };
 
+// Evidence added to a row AFTER it was filed, and the reason this is a record rather than an edit.
+//
+// The row already has `attachments`, so nothing new was needed to hold the urls, and appending to
+// that array is what puts an image where a human already looks. What was missing is the second
+// half: WHO added it and WHEN. A body silently rewritten still carries its original author's name,
+// so a later reader is shown somebody else's words under that name with no seam. So an append never
+// touches a byte of what is already in the body — it adds an attributed line after it — and this
+// array carries the same fact structurally, so a reader does not have to parse prose to know which
+// part of a row is the original report and which part arrived later.
+//
+// Absent on every row filed before this existed, and that is the honest reading: no additions
+// recorded, not "we lost them". Nothing is backfilled.
+export type FeedbackAddition = {
+  author: string;
+  authorType: 'human' | 'agent';
+  at: Date;
+  /** what they said when they added it; may be empty when the evidence is the whole point */
+  note: string;
+  /**
+   * the urls THIS PERSON ATTACHED, all of them. The row's own `attachments` is the deduped union,
+   * so a url that was already there (or that a simultaneous append got in first) is listed here as
+   * something they sent and is still stored exactly once up there. Two different questions: what
+   * did this person add, and what evidence is on this row.
+   */
+  attachments: string[];
+};
+
 export type FeedbackDoc = {
   _id?: ObjectId;
   projectId: ObjectId;
@@ -208,6 +235,7 @@ export type FeedbackDoc = {
   type: 'bug' | 'design' | 'idea' | 'approval';
   body: string;
   attachments: string[];
+  additions?: FeedbackAddition[];
   slack: SlackRef | null;
   status: FeedbackStatus;
   resolution: string | null;
