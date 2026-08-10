@@ -222,6 +222,18 @@ export type FeedbackAddition = {
    * did this person add, and what evidence is on this row.
    */
   attachments: string[];
+  /**
+   * DAR-229. The caller's own name for THIS append, so a retry of a write whose answer never came
+   * back cannot add the same words a second time. Matched within the row, which is why the key
+   * itself does not have to name one: the same held addition sent to a DIFFERENT row is a different
+   * scope and lands there properly.
+   *
+   * Absent on every addition made before this existed and on every caller that does not send one,
+   * and an absent key never matches anything, so an unkeyed append behaves exactly as it always did.
+   * That is the honest default: this route is not idempotent by nature, it is idempotent for callers
+   * that say which write they are making.
+   */
+  idempotencyKey?: string;
 };
 
 export type FeedbackDoc = {
@@ -236,6 +248,22 @@ export type FeedbackDoc = {
   body: string;
   attachments: string[];
   additions?: FeedbackAddition[];
+  /**
+   * DAR-229. The caller's own name for the write that CREATED this row, unique per project.
+   *
+   * A POST that times out or dies mid flight may have created the row anyway, so a client that
+   * retries has no way to tell "it never landed" from "it landed and I never heard". Gabbar hit
+   * exactly that: the api restarts several times a day to pick up shipped code, and each restart is
+   * a few seconds in which every write fails, so the report of whoever was talking to Gabbar at that
+   * moment was lost. It can be held and retried now, and this field is what makes retrying safe.
+   *
+   * Scoped to the project rather than global, deliberately. A model that files against one project
+   * and then corrects itself to another is making two different writes and must still get two rows;
+   * a retry of the same write against the same project is one write and must get one row.
+   *
+   * Absent on every row filed before this existed and on every caller that does not send one.
+   */
+  idempotencyKey?: string;
   slack: SlackRef | null;
   status: FeedbackStatus;
   resolution: string | null;

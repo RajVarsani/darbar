@@ -4,7 +4,8 @@
 import { App } from '@slack/bolt';
 import path from 'node:path';
 import { config } from '@darbar/core';
-import { escalateStaleParked, runAgent, type AgentContext } from './agent';
+import { escalateStaleParked, runAgent, runWithMessageBudget, type AgentContext } from './agent';
+import { existingFeedback, senderName } from './lookups';
 import { NO_ATTACHMENTS, prepareAttachments, safeName, type Attachments, type Upload } from './media';
 
 if (!config.slackBotToken || !config.slackAppToken) {
@@ -65,19 +66,6 @@ async function pullFiles(files: any[]): Promise<Attachments> {
   }
 }
 
-async function senderName(client: any, userId: string): Promise<string> {
-  try {
-    const r = await fetch(`${config.apiUrl}/projects`);
-    const projects = (await r.json()) as Array<{ stakeholders?: Array<{ slackUserId?: string; name: string }> }>;
-    for (const p of Array.isArray(projects) ? projects : []) {
-      const s = (p.stakeholders || []).find((s) => s.slackUserId === userId);
-      if (s) return s.name;
-    }
-  } catch { /* fall through to slack profile */ }
-  const info = await client.users.info({ user: userId }).catch(() => null);
-  return info?.user?.profile?.display_name || info?.user?.real_name || userId;
-}
-
 // conversation history for the agent: thread replies if threaded, else recent channel
 // messages. Our messages become assistant turns; everyone else's become user turns.
 async function buildHistory(client: any, channel: string, threadTs: string | null, uptoTs: string) {
@@ -100,20 +88,6 @@ async function buildHistory(client: any, channel: string, threadTs: string | nul
     }
   } catch { /* no history is fine */ }
   return history;
-}
-
-async function existingFeedback(channel: string, threadTs: string | null) {
-  if (!threadTs) return null;
-  try {
-    const r = await fetch(
-      `${config.apiUrl}/feedback/by-slack?channel=${encodeURIComponent(channel)}&ts=${encodeURIComponent(threadTs)}`,
-    );
-    if (!r.ok) return null;
-    const fb = (await r.json()) as { shortId?: string; status?: string };
-    return fb.shortId ? { shortId: fb.shortId, status: fb.status ?? 'unknown' } : null;
-  } catch {
-    return null;
-  }
 }
 
 // immediate feedback: 👀 on intake, ✅/❌ on outcome — best-effort, never blocks the reply
@@ -204,7 +178,29 @@ function eyesOff(client: any, channel: string, ts: string, finalEmoji?: string) 
     .then(() => { if (finalEmoji) void react(client, 'add', channel, ts, finalEmoji); });
 }
 
-async function handle({ message, event, client, say }: any) {
+// DAR-235. The message budget opens HERE, around the whole message, and no longer inside runAgent.
+//
+// It was opened by the thing that runs the model, so the two darbar reads the transport makes first
+// (senderName, existingFeedback) sat outside it. They are also the calls that stood to gain most
+// from it: they run in a Promise.all before anything else, so a darbar that never answers stopped
+// the message before it had a reply path at all. Opening the scope here makes the budget cover a
+// MESSAGE rather than a model turn, which is the claim anyone reading DAR-210 already believed.
+//
+// WHAT ELSE THIS MOVES, since a scope that exists earlier is a scope that covers more:
+//  · runAgent still calls runWithMessageBudget, and that call now JOINS this scope instead of
+//    opening a second one, so a message pays one budget and the notice on the way out reflects
+//    everything spent, transport reads included. Any other caller of runAgent (there is none in
+//    this repo today, and a test is the obvious next one) still gets its own scope.
+//  · the escalation tick and the channel-filter lookup below stay OUTSIDE any scope on purpose.
+//    Neither has a human waiting on a reply, and an unscoped call keeps the old behaviour exactly:
+//    unlimited message budget, 10s per request.
+//  · slack calls are not charged and never were. The budget measures time spent waiting on darbar,
+//    which is what DAR-233 established and what makes 20s a large allowance rather than a tight one.
+async function handle(args: any) {
+  return runWithMessageBudget(() => handleMessage(args));
+}
+
+async function handleMessage({ message, event, client, say }: any) {
   const m = message ?? event;
   if (m.subtype || m.user === SELF_USER || (!m.user && m.bot_id)) return; // edits, joins, our own replies
   const text: string = (m.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();

@@ -199,6 +199,11 @@ const FEEDBACK_VOCAB: FieldVocab = {
   resolvedTaskShortId: 'send resolvedTaskRef (a short id like DAR-12); the server resolves it and stores both',
   status: 'a status change is its own act (a newly filed row is always pending, and an append never moves one): PATCH /feedback/:shortId',
   resolution: 'a resolution is the text posted back to the reporter when a row is resolved or rejected: PATCH /feedback/:shortId',
+  // DAR-229. It is APPLIED by POST /feedback and by POST /feedback/:shortId/append, and by nothing
+  // else, so anywhere else it is a caller believing a retry is protected when it is not. That is the
+  // worst possible field to drop under a 200: the caller's whole reason for sending it is not to
+  // duplicate somebody's report.
+  idempotencyKey: 'an idempotency key names ONE write, so it is sent with the write itself: POST /api/feedback to file a row once, or POST /api/feedback/:shortId/append to add a note once. There is nothing to make idempotent about editing a row that already exists',
   createdAt: 'stamped by the server at create',
   updatedAt: 'stamped by the server on every write',
 };
@@ -1970,13 +1975,64 @@ api.post('/feedback', async (c) => {
   if (!b) return c.json({ error: 'invalid json body' }, 400);
   // DAR-208 sweep: a `status` or a `resolution` sent at filing time was dropped under a 200, so a
   // caller who thought they were filing something already triaged filed a pending row instead
-  const badFields = notApplied(b, FEEDBACK_VOCAB, ['taskRef', 'project', 'type', 'body', 'author', 'authorType', 'attachments', 'slack']);
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['taskRef', 'project', 'type', 'body', 'author', 'authorType', 'attachments', 'slack', 'idempotencyKey']);
   if (badFields) return c.json({ error: badFields }, 400);
+  const badTypes = typeErrors(b, { idempotencyKey: 'string' });
+  if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   const task = str(b.taskRef) ? await resolveTaskRef(str(b.taskRef)!) : null;
   const p = task
     ? await Projects.findOne({ _id: task.projectId })
     : await resolveProject(str(b.project) ?? '');
   if (!p) return c.json({ error: 'need taskRef or project' }, 404);
+  // ---------- DAR-229: file this row at most once ----------
+  // A POST that never answered may have inserted anyway. Gabbar holds the report and retries it
+  // later (a restart of this very process is the ordinary cause), and without a key the retry files
+  // the same report a second time. With one, the retry finds the row its own earlier attempt made.
+  //
+  // Scoped per PROJECT, because the key names the slack message and a message can legitimately
+  // produce a row on two projects: a model that files against the wrong one and corrects itself is
+  // making a second write, not repeating the first. Scoped globally, that correction would silently
+  // return the wrong row.
+  //
+  // THE READ BELOW IS THE FAST PATH, NOT THE DECISION. The index is (DAR-241).
+  //
+  // Read-then-insert on its own has a window, and the caller reaches it, which corrects what this
+  // comment first claimed. The first version argued that a retry only ever follows a failure and
+  // that two slack messages carry different keys, so nobody could present one key twice at once.
+  // True of live filings and FALSE of sweep retries: Gabbar's sweep builds the key from the HELD
+  // ITEM's original message rather than from the message being handled, so two messages from one
+  // sender in flight together both sweep the same held item and both arrive here with one key.
+  // Gabbar handles slack events concurrently by design, which is why its message budget needs
+  // AsyncLocalStorage, so the premise is its own, and nothing locks between its list, its post and
+  // its mark. Measured in that shape rather than argued about: eight concurrent sweeps of ONE held
+  // report produced SIX rows, all carrying the same key. The ten-concurrent-POST probe that "did not
+  // reproduce" was measuring the wrong thing.
+  //
+  // So a partial unique index on {projectId, idempotencyKey} decides it (packages/core/src/db.ts),
+  // and the catch below turns the loser of that race into the same answer the read gives. BOTH HALVES
+  // OR NEITHER: with the index and no catch the same eight sweeps gave one row and seven 500s, and
+  // Gabbar told the sender "STILL HELD, filing it just failed" seven times about a report that had
+  // just landed. A visible duplicate traded for a confident false negative is the worse trade, and
+  // this thread exists to stop the system saying things that are not so.
+  //
+  // The append route next door has NO index and needs none: its check is a clause in the
+  // findOneAndUpdate rather than a read in front of one, so it has no window (thirty concurrent keyed
+  // appends onto one row produced one addition). A unique index there would also be wrong rather than
+  // merely unnecessary, because additions.idempotencyKey is inside an array, so the index would be
+  // multikey and therefore global across rows, which would break the one semantic this design paid
+  // for: the same held addition retargeted at a different row has to land on it.
+  const idempotencyKey = str(b.idempotencyKey)?.trim();
+  if (idempotencyKey) {
+    const already = await Feedback.findOne({ projectId: p._id!, idempotencyKey });
+    if (already) {
+      // No write of any kind, so a repeat cannot edit the row it matched either: whatever the first
+      // attempt stored is what stands, and a body that arrives with a repeat is ignored rather than
+      // applied. That is the right way round here. The caller retrying is the one holding the LESS
+      // authoritative copy: Gabbar's retry body is a provenance wrapper written after the fact,
+      // while the row already carries the words the sender's own attempt put there.
+      return c.json({ ...already, boardUrl: `${config.baseUrl}/p/${p.capId}`, idempotent: true });
+    }
+  }
   const slack = b.slack && typeof b.slack === 'object' ? (b.slack as Record<string, unknown>) : null;
   const type = str(b.type) ?? 'bug';
   const doc: FeedbackDoc = {
@@ -1989,6 +2045,7 @@ api.post('/feedback', async (c) => {
     type: (FEEDBACK_TYPES.includes(type) ? type : 'bug') as FeedbackDoc['type'],
     body: str(b.body) ?? '',
     attachments: strArr(b.attachments),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
     slack: slack && str(slack.channel) && str(slack.ts)
       ? { channel: slack.channel as string, ts: slack.ts as string, user: str(slack.user) ?? '' }
       : null,
@@ -1998,7 +2055,19 @@ api.post('/feedback', async (c) => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  await Feedback.insertOne(doc);
+  // The other end of the read above, and the half that actually holds. A concurrent writer that got
+  // past the read is stopped by the unique index here, and E11000 means precisely one thing: a row
+  // with this key exists on this project, which is the same fact the read looks for and deserves the
+  // same answer. Anything else rethrows, so a genuine write failure still fails.
+  try {
+    await Feedback.insertOne(doc);
+  } catch (e) {
+    if (idempotencyKey && (e as { code?: number }).code === 11000) {
+      const already = await Feedback.findOne({ projectId: p._id!, idempotencyKey });
+      if (already) return c.json({ ...already, boardUrl: `${config.baseUrl}/p/${p.capId}`, idempotent: true });
+    }
+    throw e;
+  }
   await logEvent(p._id!, `${doc.shortId} filed by ${doc.author}${doc.taskShortId ? ` on ${doc.taskShortId}` : ''}: ${doc.body.slice(0, 80)}`, doc.taskId);
   return c.json({ ...doc, boardUrl: `${config.baseUrl}/p/${p.capId}` });
 });
@@ -2149,7 +2218,7 @@ api.post('/feedback/:shortId/append', async (c) => {
   if (!fb) return c.json({ error: 'feedback not found' }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
-  const badTypes = typeErrors(b, { note: 'string', author: 'string', attachments: 'string[]' });
+  const badTypes = typeErrors(b, { note: 'string', author: 'string', attachments: 'string[]', idempotencyKey: 'string' });
   if (b.authorType !== undefined && b.authorType !== 'human' && b.authorType !== 'agent') {
     badTypes.push(`authorType must be "human" or "agent" (got ${JSON.stringify(b.authorType)})`);
   }
@@ -2158,7 +2227,7 @@ api.post('/feedback/:shortId/append', async (c) => {
   // so a caller who sent {body} got a 200 with their sentence gone, which is the exact class the
   // vocabulary exists to end, inside the route that ends it. It is refused here, and FEEDBACK_VOCAB
   // now names `note` in the sentence that sent them here in the first place.
-  const badFields = notApplied(b, FEEDBACK_VOCAB, ['attachments', 'author', 'authorType'], fb as unknown as Record<string, unknown>);
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['attachments', 'author', 'authorType', 'idempotencyKey'], fb as unknown as Record<string, unknown>);
   if (badFields) return c.json({ error: badFields }, 400);
   // Required, not defaulted to 'unknown' like the author of a filing. The entire point of this route
   // over a body rewrite is that the row records who added what, and an addition attributed to
@@ -2173,6 +2242,21 @@ api.post('/feedback/:shortId/append', async (c) => {
     return c.json({ error: `nothing to append to ${fb.shortId}: send "note" (the words being added), "attachments" (urls), or both. To change its status or write a resolution use PATCH /api/feedback/${fb.shortId} instead` }, 400);
   }
   const at = new Date();
+  // ---------- DAR-229: add these words at most once ----------
+  // The route says out loud that it is not idempotent, and it warns when a note it has already seen
+  // comes round again. That warning is the honest answer for a human repeating themselves and the
+  // wrong one for a RETRY, where a duplicate is not visible at all: an append writes one more
+  // attributed line inside a body nobody diffs, so the same screenshot arriving twice from a write
+  // that timed out and was re-sent leaves no obvious trace. Of the two writes Gabbar holds and
+  // retries, this is the dangerous one for exactly that reason.
+  //
+  // Scoped to THIS ROW, which is what the key not naming a row buys: the same held addition pointed
+  // at a different row is a different scope and lands there properly, while a repeat onto the row
+  // its own earlier attempt already reached does nothing.
+  //
+  // Unlike the filing route this needs no separate read, and so has no race at all: the check is a
+  // clause in the same single findOneAndUpdate the concurrency rewrite below already made atomic.
+  const idempotencyKey = str(b.idempotencyKey)?.trim();
   const addition = {
     author,
     authorType: b.authorType === 'agent' ? ('agent' as const) : ('human' as const),
@@ -2205,7 +2289,12 @@ api.post('/feedback/:shortId/append', async (c) => {
   // returnDocument 'before' gives the exact pre-image THIS write landed on, which is what the
   // warnings below have to be measured against. Measuring them from the snapshot read at the top of
   // the handler would make them wrong under precisely the concurrency this rewrite exists to handle.
-  const prior = await Feedback.findOneAndUpdate({ _id: fb._id }, [
+  const prior = await Feedback.findOneAndUpdate({
+    _id: fb._id,
+    // the idempotency clause, in the filter rather than in a read before it: no match means this
+    // exact write is already on the row, and no write of any kind happens
+    ...(idempotencyKey ? { 'additions.idempotencyKey': { $ne: idempotencyKey } } : {}),
+  }, [
     {
       $set: {
         body: {
@@ -2224,6 +2313,7 @@ api.post('/feedback/:shortId/append', async (c) => {
               at,
               note: { $literal: addition.note },
               attachments: { $literal: addition.attachments },
+              ...(idempotencyKey ? { idempotencyKey: { $literal: idempotencyKey } } : {}),
             }],
           ],
         },
@@ -2244,9 +2334,21 @@ api.post('/feedback/:shortId/append', async (c) => {
       },
     },
   ] as never, { returnDocument: 'before' });
-  // the row existed at the top of the handler; if it is gone now it was deleted mid-flight, and
-  // saying so beats reporting an append onto nothing
-  if (!prior) return c.json({ error: `${fb.shortId} no longer exists; nothing was appended` }, 404);
+  // Two ways to match nothing now, and they are opposite facts. The row was deleted mid-flight, or
+  // this exact write is already on it, so the row is checked before either is reported.
+  if (!prior) {
+    const still = idempotencyKey ? await Feedback.findOne({ _id: fb._id }) : null;
+    if (!still) return c.json({ error: `${fb.shortId} no longer exists; nothing was appended` }, 404);
+    // appended:true because the words ARE on the row, which is what the caller was asking for and
+    // what every caller of this route branches on. idempotent:true is how it learns nothing happened
+    // just now, which matters to anyone about to tell a human their note was "just added".
+    return c.json({
+      appended: true,
+      idempotent: true,
+      feedback: still,
+      warnings: [`this exact append (idempotencyKey ${idempotencyKey}) was already on ${fb.shortId}, so nothing was written and nothing was duplicated. it is on the row from the earlier call, not from this one`],
+    });
+  }
   const after = await Feedback.findOne({ _id: fb._id });
 
   const warnings: string[] = [];

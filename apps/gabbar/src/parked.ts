@@ -345,11 +345,22 @@ export function summarize(item: ParkedItem) {
  * silently dropping the report, pointing the other way, so the id is appended here unless the
  * reply already carries it.
  */
-export function withFilingNotice(reply: string, filedNow: string[], addedNow: string[] = []): string {
+export function withFilingNotice(reply: string, filedNow: string[], addedNow: string[] = [], confirmedNow: string[] = []): string {
   const missingFiled = filedNow.filter((id) => !reply.includes(id));
   // An addition that landed is NOT a filing and must not be announced as one: nothing new exists,
   // an existing row gained their words. Said in its own clause for that reason.
   const missingAdded = addedNow.filter((id) => !reply.includes(id));
+  // DAR-241. THE THIRD CASE, and it exists because this function and the sweep notice are two
+  // sentences generated from ONE TURN and were able to contradict each other. The sweep told the
+  // model a row already carried this write; this tail then appended "is now filed as", flatly
+  // asserting the opposite about the same id, and whichever the model repeated, half of what the
+  // sender heard was untrue. It is the same defect as a digest that hedges in one sentence and
+  // asserts in the next, one layer out.
+  //
+  // It says WHERE the words are and not WHEN they got there, because when is not known: a row under
+  // this write's key may have been created by a concurrent sweep of the same held item rather than
+  // by the sender's original attempt.
+  const missingConfirmed = confirmedNow.filter((id) => !reply.includes(id));
   const tails: string[] = [];
   if (missingFiled.length) {
     tails.push(missingFiled.length > 1
@@ -360,6 +371,11 @@ export function withFilingNotice(reply: string, filedNow: string[], addedNow: st
     tails.push(missingAdded.length > 1
       ? `what you were adding earlier was being held and is now on ${missingAdded.join(' and ')}`
       : `what you were adding earlier was being held and is now on ${missingAdded[0]}`);
+  }
+  if (missingConfirmed.length) {
+    tails.push(missingConfirmed.length > 1
+      ? `what you sent earlier is on the board as ${missingConfirmed.join(' and ')}, so it did not need sending again`
+      : `what you sent earlier is on the board as ${missingConfirmed[0]}, so it did not need sending again`);
   }
   if (!tails.length) return reply;
   return `${reply.trim()}\n\nalso: ${tails.join('; ')}.`;
@@ -445,16 +461,35 @@ export function markEscalated(parkId: string, at: Date = new Date()): void {
  * item was given, and the owner cannot do anything about a held addition without knowing which row
  * it belongs on. The clause that carries it says NEVER added, so the id reads as a destination.
  */
+/** a held item whose gate PASSED and whose write then failed (DAR-229), so it may already exist */
+export function isWriteFailure(item: ParkedItem): boolean {
+  return item.gate.kind === 'write_failed';
+}
+
 export function escalationLine(item: ParkedItem, now: number = Date.now()): string {
   const hours = Math.max(1, Math.round((now - Date.parse(item.createdAt)) / 3_600_000));
-  const why = item.cause === 'stakeholder_gap'
-    ? `${item.author.name} is not a stakeholder on ${item.target.projectName ?? item.target.projectRef ?? 'that project'}`
-    : item.cause === 'outage'
-      ? 'darbar could not be reached when they sent it, so it was never checked'
-      : 'no project could be resolved for it';
-  const what = item.kind === 'addition'
-    ? `, an addition to ${item.appendTo ?? 'a row it no longer names'} that was NEVER added to it`
-    : '';
+  const why = isWriteFailure(item)
+    // DAR-229. Recorded as an outage because that is what it behaves like, but "never checked" is
+    // the one thing it is not: the check passed and the WRITE is what failed.
+    ? 'the stakeholder check passed and the write itself failed, so it may or may not have gone through'
+    : item.cause === 'stakeholder_gap'
+      ? `${item.author.name} is not a stakeholder on ${item.target.projectName ?? item.target.projectRef ?? 'that project'}`
+      : item.cause === 'outage'
+        ? 'darbar could not be reached when they sent it, so it was never checked'
+        // DAR-232: a mistyped row id is the one bad reference that never clears by itself, and the
+        // remedy for it is not the remedy for a report with no project, so it says which it is
+        : item.kind === 'addition' && item.appendTo
+          ? `${item.appendTo} could not be resolved, so the sweep re-asks and is refused every time`
+          : 'no project could be resolved for it';
+  // DAR-239/B1. "NEVER added to it" is the one thing a write-failure hold cannot say. The write went
+  // out and darbar stopped answering, so the row may well carry these words already, and this clause
+  // used to assert otherwise in the same sentence as the `why` above that hedges it.
+  const row = item.appendTo ?? 'a row it no longer names';
+  const what = item.kind !== 'addition'
+    ? ''
+    : isWriteFailure(item)
+      ? `, an addition to ${row} that MAY OR MAY NOT have reached it`
+      : `, an addition to ${row} that was NEVER added to it`;
   return `\`${item.parkId}\` held ${hours}h, from ${item.author.name}${what}: "${item.rawMessage.slice(0, 140)}" (${why})`;
 }
 
@@ -497,29 +532,89 @@ export function buildEscalationDigest(due: ParkedItem[], now: number = Date.now(
   // "N reports are still held and NOT filed" is false of an addition twice over: it is not a report
   // and NOT FILED is not the thing that went wrong with it. A backlog of both says both, and the
   // reports-only wording is left exactly as it was rather than generalised into something vaguer.
-  const adds = oldest.filter((i) => i.kind === 'addition').length;
-  const reports = oldest.length - adds;
+  //
+  // DAR-239/B1. AND EVERY ONE OF THOSE CERTAINTIES HAS TO BE GATED, not just the closing sentence.
+  // Gating only the ending produced one message that asserted a write-failure hold was never added,
+  // said the row shows no sign anything was sent, and then admitted at the bottom that nobody knows
+  // whether it landed. Three claims and a contradiction of them, in the one message whose entire
+  // reason for existing is that the outcome is unknown. So the counts the head and the trailing
+  // addition sentence are built from EXCLUDE write failures, and those are described separately.
+  //
+  // When nothing here is a write failure, which is the ordinary digest, every string below is
+  // byte-identical to what it was.
+  const unsureItems = oldest.filter(isWriteFailure);
+  const certain = oldest.filter((i) => !isWriteFailure(i));
+  const unsure = unsureItems.length;
+  const adds = certain.filter((i) => i.kind === 'addition').length;
+  const reports = certain.length - adds;
   const s = (n: number) => (n > 1 ? 's' : '');
-  const head = adds === 0
-    ? (due.length > 1 ? `${due.length} reports are still held and NOT filed:` : 'a report is still held and NOT filed:')
-    : reports === 0
-      ? (adds > 1
-        ? `${adds} additions are still held and were NEVER added to the rows they name:`
-        : 'an addition is still held and was NEVER added to the row it names:')
-      : `${due.length} items are still held: ${reports} report${s(reports)} never filed, and ${adds} addition${s(adds)} never added to the row${s(adds)} they name:`;
+  const certainHead = certain.length === 0
+    ? ''
+    : adds === 0
+      ? (certain.length > 1 ? `${certain.length} reports are still held and NOT filed` : 'a report is still held and NOT filed')
+      : reports === 0
+        ? (adds > 1
+          ? `${adds} additions are still held and were NEVER added to the rows they name`
+          : 'an addition is still held and was NEVER added to the row it names')
+        : `${certain.length} items are still held: ${reports} report${s(reports)} never filed, and ${adds} addition${s(adds)} never added to the row${s(adds)} they name`;
+  const unsureHead = unsure === 0
+    ? ''
+    : certain.length === 0
+      ? (unsure > 1
+        ? `${unsure} items are still held, and whether any of them landed is not known`
+        : 'an item is still held, and whether it landed is not known')
+      : (unsure > 1
+        ? `${unsure} more are held whose writes never came back, so whether they landed is not known`
+        : 'one more is held whose write never came back, so whether it landed is not known');
+  const head = `${[certainHead, unsureHead].filter(Boolean).join('. ')}:`;
   const lines = [head, ...shown.map((i) => escalationLine(i, now))];
   if (omitted > 0) {
-    const noun = adds === 0 ? 'held report' : 'held item';
+    // read off EVERY held item, not off the certain ones: an unlisted addition is still an addition,
+    // and "held reports" would be the wrong noun for a backlog that has one
+    const noun = oldest.some((i) => i.kind === 'addition') ? 'held item' : 'held report';
     lines.push(`...and ${omitted} more ${noun}${omitted > 1 ? 's' : ''} not listed here. ask me to list_parked for the full set.`);
   }
   // "none of this is on a board" was true when it was written and is not any more: the board's
   // Feedback view carries a held band now. What has not changed is that nothing here is filed and
   // nobody is working it, which is the part that matters, so the claim narrows to that instead of
   // being dropped. Still no feedback id and still no link, because a held report has neither.
-  lines.push('', 'nothing here is filed. no feedback id, no triage queue, no orchestrator working it. add the person as a stakeholder, or ask me to promote it.');
+  // DAR-229. "nothing here is filed" is the sentence this digest has always closed on, and it is the
+  // one claim a write-failure hold cannot make: the gate passed, the write went out, and darbar
+  // stopped answering before it said whether the row was created. So the blanket claim is only made
+  // when it is true of everything listed, and the write failures get their own sentence saying what
+  // is genuinely unknown and why acting on it is still safe.
+  lines.push('', unsure === 0
+    ? 'nothing here is filed. no feedback id, no triage queue, no orchestrator working it. add the person as a stakeholder, or ask me to promote it.'
+    : unsure === oldest.length
+      ? 'none of this is known to be filed, and none of it is known not to be: these are writes that went out and never came back. no feedback id was ever returned for any of them, so nothing here is in a triage queue that anybody can point to.'
+      : `${certain.length} of these ${certain.length > 1 ? 'are' : 'is'} definitely not filed: no feedback id, no triage queue, no orchestrator working ${certain.length > 1 ? 'them' : 'it'}. add the person as a stakeholder, or ask me to promote it.`);
+  if (unsure > 0) {
+    // one sentence covering BOTH shapes, rather than a fourth line for held additions. A write
+    // failure lands as a row that was created or as words added to a row that already existed, and
+    // the row an addition names looks untouched in either case, so there is nothing on any surface
+    // that answers the question for you.
+    lines.push(`${unsure} of the${unsure === oldest.length ? 'se' : 'm'} got past the stakeholder check and failed on the WRITE, which is what an api restart looks like from here. ${unsure > 1 ? 'those may already have landed' : 'that one may already have landed'}, either as a row that was created or as words added to a row that already existed, and nothing came back to say which. promoting ${unsure > 1 ? 'them' : 'it'} is safe either way: the retry carries the same key as the attempt that failed, so it finds what that attempt made and makes it only if it was never made, and it cannot produce a second copy.`);
+  }
+  // DAR-232. A mistyped row id parks an addition FOREVER: the sweep re-asks the same unresolvable
+  // row on every message and is refused every time, and adding the sender as a stakeholder does not
+  // touch it. The only thing that clears it is the owner naming the right row, and a digest that
+  // does not say so leaves the remedy to be worked out by whoever reads it.
+  const stuckAdds = oldest.filter((i) => i.kind === 'addition' && i.cause === 'bad_reference').length;
+  if (stuckAdds > 0) {
+    lines.push(`${stuckAdds > 1 ? `${stuckAdds} of the additions name a row that does not resolve` : 'one of the additions names a row that does not resolve'}, usually a typo. that never clears on its own and registering the sender does not help: ask me to promote it with the right row (promote_parked with feedbackRef), or it sits here for good.`);
+  }
   // and the row an addition names is not carrying it either, which the sentence above does not say:
   // that row exists, is on the board, and looks untouched because it IS untouched.
-  if (adds > 0) lines.push(`the ${adds > 1 ? 'additions' : 'addition'} above never reached the row${s(adds)} named: ${adds > 1 ? 'those rows are' : 'that row is'} unchanged and ${adds > 1 ? 'show' : 'shows'} no sign anything was sent. promoting ${adds > 1 ? 'one' : 'it'} adds it to that row, it never becomes a second row.`);
+  // "the addition above" is unambiguous only while every addition listed is one this sentence is
+  // true of. Once a write-failure addition is listed too, both are "above" and this would read as
+  // covering it, which is the certainty being gated everywhere else in this function. When that
+  // happens the clause says WHICH ones it means, in the same words their own lines use.
+  if (adds > 0) {
+    const which = unsure === 0
+      ? `the ${adds > 1 ? 'additions' : 'addition'} above`
+      : `the ${adds > 1 ? `${adds} additions` : 'addition'} above marked NEVER added`;
+    lines.push(`${which} never reached the row${s(adds)} named: ${adds > 1 ? 'those rows are' : 'that row is'} unchanged and ${adds > 1 ? 'show' : 'shows'} no sign anything was sent. promoting ${adds > 1 ? 'one' : 'it'} adds it to that row, it never becomes a second row.`);
+  }
   let text = lines.join('\n');
   if (text.length > MAX_DIGEST_CHARS) text = `${text.slice(0, MAX_DIGEST_CHARS - 80)}\n...truncated. ask me to list_parked for the full set.`;
   return { text, listed: shown.length, omitted };
@@ -600,18 +695,29 @@ export function planSweep(held: ParkedItem[], maxTargets: number): Attempt[] {
   for (const item of [...held].sort(rotationOrder)) {
     const target = parkedTarget(item);
     if (!target) continue; // structurally unpromotable; the escalation clock owns these
-    const key = target.taskRef
-      ? `task:${target.taskRef.toUpperCase()}`
+    // DAR-232. The KEY was uppercased and the TARGET was not, so a group took the casing of whichever
+    // item happened to be first in the rotation and two spellings of one row read as two targets in
+    // a log. The server uppercases a short id on the way in, so the uppercased form is the one thing
+    // being addressed either way, and normalising the target rather than only the key means the
+    // grouping and the thing actually sent agree. `project` is deliberately left alone: it can be a
+    // mongo id, where case is not decoration.
+    const norm: SweepTarget = target.taskRef
+      ? { taskRef: target.taskRef.toUpperCase() }
       : target.feedbackRef
-        ? `feedback:${target.feedbackRef.toUpperCase()}`
-        : `project:${target.project}`;
+        ? { feedbackRef: target.feedbackRef.toUpperCase() }
+        : target;
+    const key = norm.taskRef
+      ? `task:${norm.taskRef}`
+      : norm.feedbackRef
+        ? `feedback:${norm.feedbackRef}`
+        : `project:${norm.project}`;
     const existing = groups.get(key);
     if (existing) {
       existing.items.push(item); // free: same target, same answer, no extra call
       continue;
     }
     if (groups.size >= maxTargets) continue; // its turn comes on a later message
-    groups.set(key, { target, items: [item] });
+    groups.set(key, { target: norm, items: [item] });
   }
   return [...groups.values()];
 }

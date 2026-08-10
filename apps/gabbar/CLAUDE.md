@@ -17,6 +17,10 @@ Anthropic SDK's beta tool runner, with server-side refusal fallbacks enabled.
   score, never a fixed threshold — a popover moving inside a 3024px capture scores
   ~0.005, two orders under the usual 0.3 cut). No ffmpeg, or a file that will not
   open, degrades to a NOT READABLE note and the prompt makes the model say so.
+- `src/lookups.ts` — the two darbar reads the transport makes before the agent gets a turn
+  (who is this person, does this thread already have a row). They live outside bot.ts for one
+  reason: bot.ts opens a slack socket at import, so nothing in bot.ts can be exercised by a test,
+  and DAR-235 was a bug in exactly these two calls that survived a fix and a review because of it.
 - `src/parked.ts` — the parking lot for reports the gate refused (see below).
 
 ## Tools (intake-only invariant)
@@ -36,6 +40,23 @@ the attachment urls and any extracted frames.
 
 A parked item is not feedback and must never read as feedback: `PARK-*` ids, never in
 mongo, so never in `/feedback/pending` or on a board, and `filed:false` on every read.
+
+**A WRITE THAT FAILS AFTER THE GATE PASSED ALSO PARKS (DAR-229).** Every parking rule below is
+about a REFUSAL; this is the other half. The api restarts several times a day to pick up shipped
+code, and each restart is a few seconds in which every write fails, so the report of whoever is
+talking to Gabbar at that moment used to be dropped with nothing held. It is held now, with
+`cause: outage` (it behaves like one in every respect) and `gate.kind: write_failed` (it is not
+one: the check passed, the WRITE failed).
+
+Holding it is only safe because of the second half, which is the reason this sat in the backlog:
+**a failed write may have succeeded.** Every write Gabbar makes for a slack message carries an
+`idempotencyKey` built from the verified payload (`writeKey` in agent.ts), and the retry the sweep
+issues later presents the same one. The server keeps the first result and returns it: a filing key
+is unique per PROJECT, an append key per ROW. So a retry finds the row its own earlier attempt
+made rather than making a second, a model correcting itself onto a different project still files
+properly, and a held addition retargeted at a different row still lands. Of the two, `append` is
+the one this really protects: a duplicated filing is a visible second row somebody deletes, a
+duplicated append is one more attributed line inside a body nobody diffs.
 
 **Only a filing parks. A refused REOPEN never parks.** A reopen is a status change on a row
 that already exists and was written by someone else, so there is nothing of the sender's to
@@ -61,6 +82,13 @@ identical at the point of refusal and need opposite handling:
 | `stakeholder_gap` | project resolved, sender is not on the list | yes, once | on their next message | 24h |
 | `outage` | darbar could not answer, so nothing was ever checked | **no** | on their next message | 1h |
 | `bad_reference` | no project resolves for it | no | never (cannot) | 1h |
+
+`gate.kind: write_failed` rides on `outage` and is the one held item that cannot claim "nothing was
+filed": the write went out and never came back. The digest says so, and says promoting it is safe
+anyway because of the key. A mistyped `feedbackRef` is the one `bad_reference` that parks FOREVER
+(the sweep re-asks the same unresolvable row every message and is refused every time, and
+registering the sender does nothing), so the digest names `promote_parked` with `feedbackRef` as
+the only thing that clears it.
 
 Telling those apart needed a transport fix, not a parking fix: `mc()` never checked `r.ok`, so a
 503 from a restarting server came back looking exactly like a legitimate 404. `fetchDarbar`

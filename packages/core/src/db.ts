@@ -30,6 +30,19 @@ export async function initDb() {
   await Feedback.createIndex({ projectId: 1, status: 1 });
   await Feedback.createIndex({ status: 1, createdAt: 1 });
   await Feedback.createIndex({ shortId: 1 }, { unique: true });
+  // DAR-241. POST /feedback's idempotency check is read-then-insert, so two callers presenting one
+  // key can both miss it and both file. Reachable, not theoretical: the sweep builds the key from
+  // the HELD item's original message, so two messages from the same sender in flight at once sweep
+  // the same held item and present the identical key. Uniqueness is backed here; the route's read
+  // stays as the fast path that answers without an error.
+  // Partial for the same reason as proxy.prefix above: almost every row has no key at all, and a
+  // plain unique index would collide them all on a missing value.
+  // A pre-existing duplicate must not brick boot: log it, the read-then-insert check still applies.
+  try {
+    await Feedback.createIndex({ projectId: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
+  } catch (e) {
+    console.error(`unique index on {projectId, idempotencyKey} NOT created (${String(e)}) — feedback idempotency is advisory only until this is resolved`);
+  }
   await Feedback.createIndex({ 'slack.channel': 1, 'slack.ts': 1 });
   await Events.createIndex({ projectId: 1, at: -1 });
 }
