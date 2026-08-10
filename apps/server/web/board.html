@@ -633,7 +633,6 @@ const state = {
   lane: null,              // active lane key when view === 'lane'
   fbFilter: 'open',        // open | all | closed
   taskFilter: 'all',       // all | active | done
-  q: '',
   sel: null,               // {kind:'task'|'fb', id: shortId}
   stack: [],               // drawer back stack of sel objects
   collapsed: new Set(),    // task shortIds with hidden children
@@ -1359,7 +1358,8 @@ function renderStats(){
       <div class="hint">${per[6]} today · ${humans.size} human${humans.size===1?'':'s'}, ${agents.size} agent${agents.size===1?'':'s'} active</div></div>`;
 }
 
-const matches = (txt) => !state.q || txt.toLowerCase().includes(state.q);
+// No per-view text filter by design: ⌘K is the whole of search (Raj on DAR-FB-16, shipped in DAR-41).
+// Do not add a filter box back without asking him first.
 
 // ---------- dispatched (handed out, not yet self-reported) ----------
 // The orchestrator knows a task was dispatched; only the agent knows it started. So the board says
@@ -1481,7 +1481,7 @@ function railCol(col, cards){
 }
 
 function renderKanban(){
-  const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled' && matches(t.title+' '+t.shortId+' '+(t.assignee||'')));
+  const visible = tasks().filter(t=>t.type!=='review' && t.status!=='cancelled');
   const k = $('kanban');
   // a folded column gets its own width, not a share of the board's
   const rails = KANBAN_COLS.filter(isFolded).length;
@@ -1735,19 +1735,16 @@ function heldRowHtml(i){
 function heldBandHtml(){
   const d = state.parked;
   if (!d) return ''; // unavailable (a share-link viewer): no lane, exactly as before this existed
-  const all = parked();
-  // appendTo joins the searchable fields for consistency with the rest of them, not because anything
-  // sets state.q today (nothing does; the palette replaced that box). Worth stating so nobody reads
-  // this as a shipped feature: the palette is a SEPARATE index and held items are deliberately not
-  // in it, which is one of the invariants keeping a held item out of every filed-feedback affordance.
-  const list = all.filter(i => matches([i.parkId,i.theirWords,i.body,i.author,i.project,i.onTask,i.appendTo].join(' ')));
+  // held items are the one thing with no search at all: the palette is a SEPARATE index and they are
+  // deliberately kept out of it, which is an invariant, not an omission. HELD_ROW_CAP plus the
+  // overflow line below is what stands in for one.
+  const list = parked();
   const notes = [];
   if (d.error) notes.push(d.error);
   if (d.unreadable) notes.push(`${d.unreadable} file${d.unreadable>1?'s':''} in that directory could not be read`);
   if (d.truncated) notes.push(`only ${d.scanned} of ${d.files} files in that directory were read, so this lane is not the whole parking lot`);
   if (!list.length && !notes.length) return '';
   const n = list.length;
-  const hidden = all.length - n;
   const shown = list.slice(0, HELD_ROW_CAP);
   const overflow = n - shown.length;
   // The band's headline and its own label have to survive a lot of additions. "Held · not filed" is
@@ -1764,8 +1761,7 @@ function heldBandHtml(){
   return `<div class="held">
     <div class="heldbar">
       <span class="h">Held · ${adds&&!reports?'never added':adds?'nothing landed':'not filed'}</span>
-      <span class="why">${n?why
-        :state.q?'nothing held matches this search':'nothing held could be listed'}${hidden?` · ${hidden} hidden by search`:''}</span>
+      <span class="why">${n?why:'nothing held could be listed'}</span>
       ${notes.length?`<span class="why" style="flex-basis:100%"><b>${esc(notes.join(' · '))}</b></span>`:''}
     </div>
     ${shown.map(heldRowHtml).join('')}
@@ -1787,18 +1783,15 @@ function renderContent(){
     if (state.taskFilter==='done') roots = roots.filter(t=>t.status==='done');
     const rows = [];
     for (const t of roots){
-      const kids = childrenOf(t).filter(k=>matches(k.title+' '+k.shortId));
-      const hit = matches(t.title+' '+t.shortId) || kids.length;
-      if (!hit) continue;
       rows.push(taskRowHtml(t,false));
-      if (!state.collapsed.has(t.shortId)) rows.push(...kids.map(k=>taskRowHtml(k,true)));
+      if (!state.collapsed.has(t.shortId)) rows.push(...childrenOf(t).map(k=>taskRowHtml(k,true)));
     }
-    el.innerHTML = rows.join('') || `<div class="empty">${state.q?`nothing matches “<b>${esc(state.q)}</b>”`:'no tasks yet. the orchestrator will seed them'}</div>`;
+    el.innerHTML = rows.join('') || '<div class="empty">no tasks yet. the orchestrator will seed them</div>';
   }
   else if (state.view==='lane'){
     const lanes = pipeLanes();
     const lane = lanes.find(l=>l.lane===state.lane);
-    const list = tasks().filter(t=>t.type==='review'&&t.lane===state.lane&&matches(t.title+' '+t.shortId));
+    const list = tasks().filter(t=>t.type==='review'&&t.lane===state.lane);
     const openN = list.filter(t=>!isClosed(t)).length;
     vb.innerHTML = `<span class="vtitle">${esc(lane?.label ?? state.lane)} lane</span><span class="vn">${openN} open · manager ${esc(lane?.manager ?? '?')}</span>`;
     el.innerHTML = list.map(t=>taskRowHtml(t,false)).join('') || '<div class="empty">no reviews spawned in this lane yet</div>';
@@ -1807,7 +1800,6 @@ function renderContent(){
     let list = fbs();
     if (state.fbFilter==='open') list = list.filter(openFb);
     if (state.fbFilter==='closed') list = list.filter(f=>!openFb(f));
-    list = list.filter(f=>matches([f.body,f.shortId,f.author,f.taskShortId].join(' ')));
     // the held count is stated apart from the feedback count, in different words, for the same
     // reason the tab keeps them apart: one of these numbers is rows, the other is not. "not filed" is
     // only said when nothing held is an addition, since an addition was never going to be filed and
@@ -1831,11 +1823,11 @@ function renderContent(){
         <span style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
           <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span></span>
-      </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}${heldN()&&!state.q?`<br>${heldCount()} held above, ${heldEmptyTail()}`:''}</div>`);
+      </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}${heldN()?`<br>${heldCount()} held above, ${heldEmptyTail()}`:''}</div>`);
   }
   else {
     vb.innerHTML = `<span class="vtitle">Activity</span>`;
-    const evs = (state.data?.events||[]).filter(e=>matches(e.text));
+    const evs = state.data?.events||[];
     const groups = {};
     for (const e of evs){
       const d = new Date(e.at); const today = new Date();
@@ -2242,7 +2234,7 @@ async function loadParked(){
     if (r.ok) next = await r.json();
   } catch {}
   const raw = JSON.stringify(next);
-  if (raw === state.parkedRaw) return; // a poll that changed nothing must not stomp scroll or search
+  if (raw === state.parkedRaw) return; // a poll that changed nothing must not stomp scroll or an open card
   state.parkedRaw = raw;
   state.parked = next;
   renderTopNav();
