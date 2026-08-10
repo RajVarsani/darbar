@@ -42,6 +42,23 @@ row; dedupe it (skill, B3).
 curl -s 'localhost:4899/api/feedback/pending?project=DAR'
 ```
 
+Held reports are the other half of the inbox and are NOT in that queue: Gabbar's
+stakeholder gate refused them, so they sit on disk, never reached Mongo, and carry `PARK-*`
+ids that every feedback route answers 404. Read them each round; the route is local-only
+and 403s through the share tunnel.
+
+```bash
+curl -s 'localhost:4899/api/parked?project=DAR'   # default status=parked; &status=all for history
+```
+
+`held` is the count that means pending work. `items` is a sample of a DIRECTORY READ, so
+`truncated`, `unreadable` and a non-null `error` each make every count a floor rather than
+the answer. `kind` splits the two things held: a `report` promotes into a NEW feedback row,
+an `addition` names an existing row in `appendTo` and promotes by appending to it, with
+`addedToRow: false` saying nothing has reached that row yet. Promotion runs back through
+the gate and is Gabbar's, not yours; for `cause: "stakeholder_gap"` the fix is usually
+adding that person (why, and what each cause means: skill, Part D. The door: section 7b).
+
 Self-paced: pace with ScheduleWakeup-style waits rather than spinning. Active board =
 every few minutes; quiet board (empty result, no open dispatches) = back off to 20 to 30
 minutes. Each wake is one round: drain the queue to empty, dispatch, audit (section 8),
@@ -97,7 +114,8 @@ curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-6 -H 'content-type: applicat
 
 Same defect from two authors is ONE task and two rows pointing at it, so each author gets
 their own thread reply. Scan for an existing card before creating anything:
-`GET /api/tasks?project=DAR&open=true`.
+`GET /api/tasks?project=DAR&open=true`. More of a row already filed goes ONTO that row with
+`POST /feedback/:shortId/append` (section 7) rather than becoming a second row here.
 
 ```bash
 curl -s -X PATCH localhost:4899/api/feedback/DAR-FB-8 -H 'content-type: application/json' \
@@ -195,6 +213,12 @@ gated.
 | a granular proxy or pipeline route on a project that has neither configured | 404 `project has no shared surface configured — declare one with PATCH /api/projects/:ref {proxy} (it starts disabled), then edit it here` / `project has no review pipeline — add the first lane with POST /api/projects/:ref/pipeline/lanes` |
 | `resolvedTaskRef` naming a task that does not exist | 404 `task DAR-999 not found — resolvedTaskRef is the link the ship sweep follows ... so an unknown id would leave DAR-FB-3 promoted in name only` |
 | `resolved`/`rejected`/`needs_clarification` with no `resolution` in the body and none on the row | 400 `DAR-FB-3 → rejected replies to <author> in their own thread and that reply IS the resolution text, so "resolution" is required: ...` |
+| `body` (or `attachments`) on `POST /feedback/:shortId/append` or on `PATCH /feedback/:shortId`, differing from what is stored | 400 `not settable here, and what you sent differs from what is stored: body (a feedback body is append-only: POST /api/feedback/:shortId/append with {"note": "…"} adds an attributed note without rewriting what its author wrote)`, and the `attachments` clause names the same route. The append route reads **`note`**; a value identical to what is stored is a 200 no-op |
+| `POST /feedback/:shortId/append` with no `author` | 400 `author (non-empty string) required: an append is only honest if the row says who made it. Send whoever is adding this, not the person who filed the row` |
+| `POST /feedback/:shortId/append` with neither `note` nor `attachments` | 400 `nothing to append to DAR-FB-3: send "note" (the words being added), "attachments" (urls), or both. To change its status or write a resolution use PATCH /api/feedback/DAR-FB-3 instead` |
+| an append whose `note` is already in that row's body verbatim | 200, warning `that note is already on this row verbatim; appended anyway (this route is not idempotent, check before repeating a call you are unsure landed)` |
+| an append re-sending an attachment the row already has | 200, warning `1 of the 1 attachment(s) you sent were already on DAR-FB-3 and are stored once, not twice; the note was appended either way` |
+| an append onto a `resolved` or `rejected` row | 200, warning `DAR-FB-3 is resolved, so this addition is not in any triage queue and nothing here changed that. If it should be looked at again, reopen the row on purpose (PATCH /api/feedback/DAR-FB-3 {"status":"pending"})`. The status is untouched; that PATCH, or `resolve_feedback {pending}`, is the reopen |
 | `limit` outside 1 to 1000, or a non-integer `limit`/`offset`, on `GET /tasks` | 400 `limit must be a whole number between 1 and 1000 (got "1001")`. Never clamped |
 
 Last review child closes and then, in order: open reviews? hold. Blocking feedback?
@@ -225,7 +249,23 @@ rejected field looks like a success. Read back what you wrote.
 - `POST /feedback`: `taskRef` or `project`, `author`, `authorType`, `type`, `body`,
   `attachments`, `slack`. Always lands at `pending`.
 - `PATCH /feedback/:shortId`: `status`, `resolution`, `type`, `resolvedTaskRef`.
-  Promotion from `pending` with no explicit status auto-sets `triaged`.
+  Promotion from `pending` with no explicit status auto-sets `triaged`. `body` and
+  `attachments` are refused BY NAME here and point at the append route below (section 6).
+- `POST /feedback/:shortId/append`: `note`, `attachments`, `author` (required),
+  `authorType` (`human`|`agent`, default `human`). The field is **`note`, not `body`**, and
+  `body` is a 400 on this route, which is the whole reason it is safe to fire:
+
+  ```bash
+  curl -s -X POST localhost:4899/api/feedback/DAR-FB-3/append -H 'content-type: application/json' \
+    -d '{"author":"staff-engineer","authorType":"agent","note":"also on the settings page","attachments":["https://…/shot.png"]}'
+  ```
+
+  This is what keeps one defect on one row instead of two in the triage queue. Nothing
+  rewrites the reporter's words: the note lands at the END of `body` under a line naming
+  who added it and when, `additions[]` carries the same fact structurally, and
+  `attachments` union into the row's array deduped at write time. Status is NOT changed and
+  no Slack thread is replied to. Answers `{appended, feedback, warnings}`; all three ways
+  this route surprises you are 200s in `warnings`, so read them (section 6).
 - `PATCH /projects/:ref`: `charter`, `slackChannel`, `stakeholders`, `pipeline`, `agents`,
   `proxy`. Each replaces its value wholesale; read, edit, send whole. Use it to DECLARE a
   surface, never to change one entry: a one-element `agents` array deletes the rest and
