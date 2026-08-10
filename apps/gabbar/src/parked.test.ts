@@ -495,6 +495,56 @@ test('every held item gets a turn rather than the same ones every message', () =
   expect([...seen].sort()).toEqual(targets);
 });
 
+// ---------- DAR-225: the addition that does not know its project yet ----------
+// A refusal that landed before the row could be resolved knows the row and nothing else. It must
+// still take its turn, and it must take exactly ONE turn, or the ceil(distinct targets / budget)
+// bound stops covering every held item.
+const halfKnown = (row: string, ts = `1754${Math.random().toString().slice(2, 12)}`) =>
+  addition({ ts, projectRef: null, projectName: null, appendTo: row, cause: 'outage' });
+
+test('a half-known addition is addressed by its row instead of sitting out the rotation', () => {
+  const plan = P.planSweep([halfKnown('MRF-FB-23')], BUDGET);
+  expect(plan).toHaveLength(1);
+  expect(plan[0]!.target).toEqual({ feedbackRef: 'MRF-FB-23' });
+});
+
+test('two half-known additions to the same row share ONE turn and one resolve', () => {
+  const plan = P.planSweep([halfKnown('MRF-FB-23'), halfKnown('MRF-FB-23')], BUDGET);
+  expect(plan).toHaveLength(1);
+  expect(plan[0]!.items).toHaveLength(2);
+});
+
+test('a half-known addition costs one budget slot, exactly like every other target', () => {
+  // seven targets, five of them rows nobody could resolve. Two sweeps is ceil(7 / 5) rounded up,
+  // and everything has to have been reached by then, which is the bound stated on planSweep.
+  const rows = ['MRF-FB-1', 'MRF-FB-2', 'MRF-FB-3', 'MRF-FB-4', 'MRF-FB-5'];
+  let held: ParkedItem[] = [...rows.map((r) => halfKnown(r)), parkOn('A'), parkOn('B')];
+  const seen = new Set<string>();
+  for (let round = 0; round < 2; round++) {
+    const plan = P.planSweep(held, BUDGET);
+    expect(plan.length).toBeLessThanOrEqual(BUDGET); // never more calls than the budget allows
+    held = held.map((item) => {
+      const attempted = plan.some((g) => g.items.some((i) => i.parkId === item.parkId));
+      if (attempted) seen.add(item.appendTo ?? item.target.projectRef!);
+      return attempted ? attemptedAgo(item, -(round * 1000)) : item;
+    });
+  }
+  expect([...seen].sort()).toEqual([...rows, 'A', 'B'].sort());
+});
+
+test('a row target and a project target stay separate, since merging needs the answer', () => {
+  const plan = P.planSweep([halfKnown('MRF-FB-23'), parkOn('ALPHA')], BUDGET);
+  expect(plan).toHaveLength(2);
+  expect(plan.map((g) => g.target)).toContainEqual({ feedbackRef: 'MRF-FB-23' });
+});
+
+test('a REPORT with no project is still structurally unpromotable', () => {
+  // the fallback is addition-only on purpose: a report has no row to learn a project from, and the
+  // one relabelling that could give it one is the DAR-182 duplicate
+  expect(P.planSweep([parkOn(null)], BUDGET)).toHaveLength(0);
+  expect(P.parkedTarget(addition({ appendTo: 'MRF-FB-23', projectRef: null, projectName: null }))).toEqual({ feedbackRef: 'MRF-FB-23' });
+});
+
 test('an item with no resolvable target never enters the plan', () => {
   const plan = P.planSweep([parkOn(null), parkOn(null), parkOn('REAL')], BUDGET);
   expect(plan).toHaveLength(1);

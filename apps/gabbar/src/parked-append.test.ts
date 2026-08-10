@@ -81,7 +81,7 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: stri
 }) as typeof globalThis.fetch;
 
 const P = await import('./parked');
-const { stakeholderGate, promoteAddition } = await import('./agent');
+const { stakeholderGate, promoteAddition, addToFeedback, reopenFeedback, verifyStakeholder } = await import('./agent');
 
 afterAll(() => {
   globalThis.fetch = realFetch;
@@ -234,6 +234,101 @@ test('a darbar that cannot be reached leaves the addition held rather than half 
   expect(r.ok).toBe(false);
   expect(!r.ok && r.gone).toBe(false); // 503 is not "the row is gone", and must not read as one
   expect(P.readParked(item.parkId)?.status).toBe('parked');
+});
+
+// ---------- DAR-225: the gate has to be the step that refuses ----------
+//
+// add_to_feedback resolved the target row BEFORE the gate ran, so a darbar that could not answer
+// failed one step too early: no verdict, no refusal, no park, and the sender's screenshot gone.
+// Every earlier instance had its cause destroyed by a transport bug and was fixed by turning
+// unreachability into a REFUSAL the gate could classify; this one never reached the gate at all, so
+// what it needed was ORDERING. These pin the order rather than the symptom, which is why they drive
+// the tool body instead of the gate: from outside, a lost report and a held one look the same until
+// you ask the parking lot.
+
+test('an unreachable darbar HOLDS the addition rather than losing it', async () => {
+  const ts = '1754771101.000001';
+  routes['GET /feedback/MRF-FB-23'] = { status: 503, body: { error: 'restarting' } };
+  const res = JSON.parse(await addToFeedback(mkCtx(ts), 'MRF-FB-23', 'it also happens on the settings screen'));
+  expect(res.added).toBe(false);
+  expect(res.filed).toBe(false);
+  expect(res.parked).toBe(true);
+
+  const item = P.readParked(P.parkIdFor('D0AH8292D7Y', ts, 'MRF-FB-23'))!;
+  expect(item.kind).toBe('addition');
+  expect(item.appendTo).toBe('MRF-FB-23');
+  expect(item.cause).toBe('outage'); // resolves by itself, so the sweep retries it and nobody is pinged
+  expect(item.rawMessage).toBe(MSG); // their own words, which is the thing that was being lost
+  expect(item.attachments).toEqual(['http://127.0.0.1:9/files/shot.png']);
+  // HALF KNOWN on purpose: darbar never said which project that row belongs to, and guessing one
+  // would be how somebody's evidence lands on a stranger's finding
+  expect(item.target.projectRef).toBeNull();
+  expect(item.target.projectName).toBeNull();
+  // and nothing was written to any row on the way past
+  expect(asked.some((a) => a.method === 'POST')).toBe(false);
+});
+
+test('a row darbar says does not exist still holds what the sender wrote', async () => {
+  const ts = '1754771102.000001';
+  // unrouted in the stub, which answers 404 with a body: darbar is up and the row is not there
+  const res = JSON.parse(await addToFeedback(mkCtx(ts), 'MRF-FB-404', 'the same thing on the settings screen'));
+  expect(res.added).toBe(false);
+  expect(res.parked).toBe(true);
+  const item = P.readParked(P.parkIdFor('D0AH8292D7Y', ts, 'MRF-FB-404'))!;
+  expect(item.kind).toBe('addition'); // never a report: filing it would be the DAR-182 duplicate
+  expect(item.cause).toBe('bad_reference');
+  expect(item.body).toBe('the same thing on the settings screen');
+  expect(item.appendTo).toBe('MRF-FB-404');
+});
+
+test('the project the gate checks comes from the ROW, never from the sender', async () => {
+  // this is what stops a half-known addition being promoted onto a stranger's finding: the verdict
+  // is always computed on the project of the row the words are about to land on
+  const onRoster = { ...mkCtx('1754771103.000001'), senderId: 'U000000RAJ' } as Parameters<typeof verifyStakeholder>[0];
+  const v = await verifyStakeholder(onRoster, { feedbackRef: 'MRF-FB-23' });
+  expect(v.ok).toBe(true);
+  expect(v.ok && v.projectRef).toBe('STUBPROJECT');
+  expect(asked.map((a) => a.url)).toEqual([`${STUB_API}/feedback/MRF-FB-23`, `${STUB_API}/projects/STUBPROJECT/context`]);
+});
+
+test('the sweep gives a half-known addition a turn and completes it from its row', async () => {
+  const ts = '1754771104.000001';
+  routes['GET /feedback/MRF-FB-23'] = { status: 503, body: { error: 'restarting' } };
+  await addToFeedback(mkCtx(ts), 'MRF-FB-23', 'held while darbar was down');
+  const item = P.readParked(P.parkIdFor('D0AH8292D7Y', ts, 'MRF-FB-23'))!;
+
+  // it enters the rotation instead of sitting it out forever, addressed by the only thing known
+  // about it. Costing it a budget slot is what keeps the ceil(distinct targets / budget) bound true.
+  const plan = P.planSweep([item], 5);
+  expect(plan).toHaveLength(1);
+  expect(plan[0]!.target).toEqual({ feedbackRef: 'MRF-FB-23' });
+
+  // darbar is back. The gate answer is computed for the project THAT ROW belongs to,
+  routes['GET /feedback/MRF-FB-23'] = { status: 200, body: { shortId: 'MRF-FB-23', projectId: 'STUBPROJECT' } };
+  const onRoster = { ...mkCtx(ts), senderId: 'U000000RAJ' } as Parameters<typeof verifyStakeholder>[0];
+  const v = await verifyStakeholder(onRoster, plan[0]!.target);
+  expect(v.ok).toBe(true);
+  asked.length = 0;
+
+  // and the words then go onto that same row and nowhere else
+  const a = await promoteAddition(item, 'gabbar');
+  expect(a.ok).toBe(true);
+  expect(a.ok && a.appendedTo).toBe('MRF-FB-23');
+  expect(asked.some((x) => x.url === `${STUB_API}/feedback` && x.method === 'POST')).toBe(false);
+});
+
+test('a reopen the gate never got to still holds nothing, and never says anything is waiting', async () => {
+  const ts = '1754771105.000001';
+  routes['GET /feedback/MRF-FB-23'] = { status: 503, body: { error: 'restarting' } };
+  const ctx = { ...mkCtx(ts), existingFeedback: { shortId: 'MRF-FB-23', status: 'resolved' } } as Parameters<typeof reopenFeedback>[0];
+  const r = JSON.parse(await reopenFeedback(ctx, undefined));
+  expect(r.reopened).toBe(false);
+  expect(r.parked).toBe(false); // a reopen carries none of the sender's own words
+  expect(P.readParked(P.parkIdFor('D0AH8292D7Y', ts))).toBeNull();
+  expect(P.readParked(P.parkIdFor('D0AH8292D7Y', ts, 'MRF-FB-23'))).toBeNull();
+  // and the refusal is the gate's, so it still carries the do-not-claim-it-is-held instruction
+  expect(String(r.instruction)).toContain('do not tell them it is waiting');
+  expect(asked.some((a) => a.method === 'PATCH')).toBe(false);
 });
 
 test('the same message refused twice holds the report and the addition separately', async () => {

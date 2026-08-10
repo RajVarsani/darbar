@@ -526,7 +526,12 @@ export function buildEscalationDigest(due: ParkedItem[], now: number = Date.now(
 }
 
 // ---------- which held items get a gate check this message ----------
-export type SweepTarget = { taskRef?: string; project?: string };
+/**
+ * How the sweep addresses a held item when it re-asks the gate. `feedbackRef` is the HALF KNOWN
+ * case (DAR-225): a refusal that landed before the target row could be resolved knows the row the
+ * sender named and nothing else, so the project has to be looked up from that row at sweep time.
+ */
+export type SweepTarget = { taskRef?: string; project?: string; feedbackRef?: string };
 export type Attempt = { target: SweepTarget; items: ParkedItem[] };
 
 export function parkedTarget(item: ParkedItem, override?: { taskRef?: string; project?: string }): SweepTarget | null {
@@ -534,6 +539,12 @@ export function parkedTarget(item: ParkedItem, override?: { taskRef?: string; pr
   if (override?.project) return { project: override.project };
   if (item.target.taskRef) return { taskRef: item.target.taskRef };
   if (item.target.projectRef) return { project: item.target.projectRef };
+  // An addition parked before its row could be resolved: darbar was down, so nobody ever learned
+  // which project the row belongs to. The row id is the ONLY thing known about where these words
+  // go, and it is enough, because the project is a property of that row rather than of anything
+  // the sender said. Without this the item is structurally unpromotable and only the escalation
+  // clock ever mentions it again, which is a slower version of losing it.
+  if (item.kind === 'addition' && item.appendTo) return { feedbackRef: item.appendTo };
   return null;
 }
 
@@ -571,13 +582,29 @@ function rotationOrder(a: ParkedItem, b: ParkedItem): number {
  * separate queue for additions would have been a second fairness guarantee to keep in step with
  * this one, and the stated bound of a turn within ceil(distinct targets / budget) messages would
  * have quietly stopped covering every held item.
+ *
+ * A HALF KNOWN addition (`feedbackRef`, DAR-225) is one more target in that same rotation and costs
+ * one budget slot like any other, so the bound is untouched: it is stated in DISTINCT TARGETS per
+ * message, not in http calls. What it does cost is the calls inside its slot. Resolving one is two
+ * round trips rather than one, the row then the project, so a message whose whole budget is half
+ * known additions makes 10 calls instead of 5, still under the same 20s message budget that bounds
+ * every other shape of turn. That is the price of not guessing a project, and guessing one is how
+ * somebody's evidence lands on a stranger's finding.
+ *
+ * Its key is the ROW, so it cannot merge with a `project:` group even when it turns out to be the
+ * same project: merging them would need the answer the resolve is there to find. Two additions to
+ * the same row do share one slot and one resolve.
  */
 export function planSweep(held: ParkedItem[], maxTargets: number): Attempt[] {
   const groups = new Map<string, Attempt>();
   for (const item of [...held].sort(rotationOrder)) {
     const target = parkedTarget(item);
     if (!target) continue; // structurally unpromotable; the escalation clock owns these
-    const key = target.taskRef ? `task:${target.taskRef.toUpperCase()}` : `project:${target.project}`;
+    const key = target.taskRef
+      ? `task:${target.taskRef.toUpperCase()}`
+      : target.feedbackRef
+        ? `feedback:${target.feedbackRef.toUpperCase()}`
+        : `project:${target.project}`;
     const existing = groups.get(key);
     if (existing) {
       existing.items.push(item); // free: same target, same answer, no extra call
