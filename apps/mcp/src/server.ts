@@ -24,6 +24,44 @@ server.tool('get_project_context', 'Fetch a project charter: protocols, repos, s
 
 server.tool('list_projects', 'List registered projects with board URLs.', {}, () => call('/projects'));
 
+server.tool('get_project_config', 'The project fields you are allowed to WRITE, and only those: charter, slackChannel, repos, stakeholders, and pipeline/agents where they exist. This is the READ half of read-then-write, which is the documented way to restructure a charter or replace a stakeholder list in bulk, and until this route existed there was no read whose output the write path accepted back (DAR-FB-121). It matters because every wholesale door on a project REPLACES the list it is handed — one stakeholder sent as the whole `stakeholders` array deletes everybody else and returns 200. So read here, edit the array you meant to edit, send the whole thing back. The output is a legal PATCH /api/projects/:ref body BY CONSTRUCTION rather than by anyone remembering to keep two shapes in step, which is the reason to read it from this tool and not from a payload that merely looks similar. `proxy` IS DELIBERATELY ABSENT, and its absence is what makes the round trip safe: a field omitted from a PATCH is left untouched, so echoing this body back can never repoint, widen or withdraw a live share by accident, and the internal target never lands on a fresh payload for a model to read (FB-89). The share has two doors of its own, patch_proxy_route and set_proxy_enabled, and they ask for confirmation on purpose. get_project_context is NOT interchangeable with this, and the difference is not cosmetic: that payload CARRIES a `proxy`, redacted, and the write path reads `proxy` as an instruction — `null` means clear the share and withdraw the route, and the redacted object is a 400 because the target it exists to hide is required. So a context payload echoed back is wrong in one of two directions, and only one of them tells you. Unknown project is a 404.',
+  { project: z.string().describe('project prefix, name, or capId') },
+  ({ project }) => call(`/projects/${encodeURIComponent(project)}`));
+
+server.tool('get_project_events', 'The project event log, newest first: the resume trail a fresh session reads instead of asking somebody what happened. Every status move, promotion, config edit, feedback append, review spawn, auto-advance and auto-resolution writes a line here, so this is where you learn that a task closed itself while you were not looking, or that a proxy push failed rather than quietly not happening. It is a RECENT WINDOW and never the whole history: limit is clamped to 1..50 (default 20) and there is no offset, so an older event is not reachable by paging — get_board returns a whole project in one payload (tasks, feedback, its own events slice) when you need more than the last few moves. Unknown project is a 404.',
+  {
+    project: z.string(),
+    limit: z.number().optional().describe('how many of the most recent events, 1-50, default 20. Anything outside that range is CLAMPED rather than refused, so asking for 500 quietly returns 50'),
+  },
+  ({ project, limit }) => call(`/projects/${encodeURIComponent(project)}/events${limit !== undefined ? `?limit=${limit}` : ''}`));
+
+server.tool('create_project', 'Register a NEW project: board, capability URL, id namespace, counters, and its ENTIRE configuration in ONE call. pipeline, agents and proxy belong in THIS body — registration used to be a POST followed by three PATCHes because those three were dropped here under a 200, and a project left half-configured is one whose first task reaches in_review and spawns no review at all. They run through the same readers and the same write path as every later edit, and they are validated BEFORE the insert, so a malformed pipeline is a 400 with nothing created rather than a board somebody now has to repair. `prefix` is 2 to 6 letters and becomes the namespace every task and feedback row is named in (DAR-1, DAR-FB-1); it is upper-cased, it cannot be changed afterwards, this API has no delete for anything, and a prefix already registered is a 409. `stakeholders` is validated here rather than stored raw because that list is ACCESS CONTROL: Gabbar matches the verified slack sender against it, so a slackUserId that is not U or W followed by uppercase alphanumerics is a 400 naming the index, instead of a real person being refused in silence forever. A proxy prefix another project already claims is a 409 too. READ the `warnings` on the response: that is where the server puts what it declines to fail on, such as a review lane whose manager is not in the agent registry, and nothing else surfaces it except the event log.',
+  {
+    name: z.string().describe('human name, e.g. "Darbar Platform"'),
+    prefix: z.string().describe('2-6 letters. Permanent, and the id namespace for every task and feedback row on this board'),
+    charter: z.string().optional().describe('the prose every agent on this project reads before working: protocols, doctrine, what must never be touched. append_to_charter adds to it afterwards'),
+    repos: z.array(z.string()).optional().describe('the checkouts this project is worked in, in the terms the charter uses'),
+    slackChannel: z.string().nullable().optional().describe('channel id bound for feedback intake, e.g. C0AB1CD2EFG'),
+    stakeholders: z.array(z.object({
+      name: z.string(),
+      slackUserId: z.string().optional().describe('slack USER id (U/W + uppercase alphanumerics). This exact string is what the feedback gate matches; without one the person cannot file anything'),
+      role: z.string().optional(),
+    })).optional(),
+    pipeline: z.object({
+      autoAdvance: z.boolean().optional().describe('default true'),
+      reviews: z.array(z.object({ lane: z.string(), label: z.string().optional(), manager: z.string() })),
+    }).optional().describe('the review lanes, declared at init; add_review_lane / update_review_lane edit one later'),
+    agents: z.array(z.object({
+      name: z.string(), kind: z.enum(['lane-manager', 'helper', 'orchestrator']),
+      brief: z.string(), trigger: z.string().optional(),
+    })).optional().describe('the agent registry; add_agent / update_agent edit one later'),
+    proxy: z.object({
+      prefix: z.string(), target: z.string(),
+      public: z.array(z.string()).optional(), enabled: z.boolean().optional(),
+    }).optional().describe('shared surface, same validators as set_proxy: loopback target only, literal path patterns, enabled defaults false'),
+  },
+  (args) => call('/projects', 'POST', args));
+
 server.tool('get_board', 'Full board for a project: tasks, feedback, recent events.',
   { capId: z.string().describe('project capability id') },
   ({ capId }) => call(`/p/${capId}`));
@@ -68,6 +106,10 @@ server.tool('my_tasks', 'Open tasks for an assignee (lane managers and builders 
     if (offset !== undefined) qs.set('offset', String(offset));
     return call(`/tasks?${qs}`);
   });
+
+server.tool('get_task', 'ONE task row exactly as the server holds it, which is not the same thing as the row you remember writing. Read it before you PATCH: `status` says whether the update you are about to send is even legal (done is a 409 while a review child is open, and open feedback filed against the task holds it in in_review too), `lanes` is frozen the moment the task enters in_review so a re-pick after that is refused, `commits` is append-only and grows one hash per update_task call, and `dispatchedAt` (stamped by update_task {dispatched}) tells you whether somebody is already working this card. It is also how a builder confirms its own status write landed instead of assuming it did. The row carries what create-time-only means in practice: origin, parentTaskId and shortId are here to read and are 400s on update_task. An unknown ref is a 404, never an empty row, so a typo cannot read as a task with nothing on it. Read-only.',
+  { taskRef: z.string().describe('short id like DAR-12, case-insensitive. This is the only way to address a task; there is no lookup by title') },
+  ({ taskRef }) => call(`/tasks/${encodeURIComponent(taskRef)}`));
 
 server.tool('set_pipeline', 'DECLARE the whole review pipeline for a project (project init): lanes spawned as subtasks when a dev task hits in_review, each assigned to its lane manager. autoAdvance moves the parent to done when the last lane closes. `reviews` REPLACES the whole lane list, so to change one thing mid-session use add_review_lane / update_review_lane / remove_review_lane / set_auto_advance instead — they merge server-side and refuse to strand tasks that already selected a lane.',
   {
@@ -197,6 +239,13 @@ server.tool('set_repos', 'Set the repos a project is worked in. The charter tell
   { project: z.string(), repos: z.array(z.string()).describe('the full repo list after this edit, in the terms the charter uses (a name like "darbar", or a path); it replaces whatever is stored') },
   ({ project, repos }) => call(`/projects/${px(project)}`, 'PATCH', { repos }));
 
+server.tool('set_slack_channel', 'Bind, rebind or unbind the Slack channel a project takes feedback in. Same shape of gap set_repos closed: the field is applied by PATCH /api/projects and had no door of its own, so the only way to set it mid-session was curl, and a project registered without one had no recorded intake channel that any later session could find. Send a channel ID (C…/D…/G…), not a #name — nothing resolves a name here and nothing validates the shape, so "#darbar" is stored exactly as typed and is then a channel id that names no channel. null unbinds and leaves the rest of the project untouched. This is NOT access control and grants nobody anything: Gabbar\'s feedback gate matches the SENDER\'s slack user id against the stakeholder list (add_stakeholder), so a person writing in a bound channel is still refused and still parked until they are a stakeholder. Read it back on get_project_context, which is the payload a Gabbar-facing session reads.',
+  {
+    project: z.string(),
+    slackChannel: z.string().nullable().describe('slack CHANNEL id, e.g. C0AB1CD2EFG (a DM channel id like D0AH8292D7Y is equally valid), or null to unbind. Not a user id, not a #name'),
+  },
+  ({ project, slackChannel }) => call(`/projects/${px(project)}`, 'PATCH', { slackChannel }));
+
 server.tool('append_to_charter', 'Append one rule, decision or note to a project charter without resending it. The charter is prose every agent reads before working, so this is how a protocol locked mid-session gets recorded. Appends on its own line at the end; PATCH /api/projects/:ref {charter} is still the way to rewrite or restructure the whole thing.',
   { project: z.string(), text: z.string().describe('the line(s) to append, written as they should read in the charter') },
   ({ project, text }) => call(`/projects/${px(project)}/charter/append`, 'POST', { text }));
@@ -242,14 +291,31 @@ server.tool('next_pending_feedback', 'The manager inbox: oldest-first pending + 
   { project: z.string().optional() },
   ({ project }) => call(`/feedback/pending${project ? `?project=${encodeURIComponent(project)}` : ''}`));
 
-server.tool('resolve_feedback', 'Move feedback to a terminal or intermediate state. resolved, rejected and needs_clarification auto-reply IN THE REPORTER\'S OWN SLACK THREAD, with no orchestrator between you and them, and the reply body is your resolution text — so for those three it is REQUIRED (400 without it) and must read as something a stakeholder understands, not a note to a developer. triaged/accepted/in_progress do not reply and do not need one.',
+server.tool('get_feedback', 'ONE feedback row in ANY status, which is what next_pending_feedback cannot give you: that tool is the inbox and shows only pending and needs_clarification, so a row you triaged, resolved or rejected is invisible there and is here. Three things you can only learn by reading the row. First, whether an append actually landed: append_to_feedback is NOT idempotent, a repeat adds a second attributed line, so read `additions[]` before re-sending a call you are unsure about rather than paying for the guess. Second, what the current `resolution` text is, since resolve_feedback treats already-stored text as satisfying the requirement and that text is what gets posted into the reporter\'s own Slack thread. Third, `slack.channel` / `slack.ts`, which is where a needs_clarification answer will be, because a thread reply reopens the row to pending WITHOUT changing its body: the answer is in Slack and never on the row. `body` is the reporter\'s own words plus every append under its attribution line and is not rewritable anywhere in this API, so what you read here is the whole trail. Unknown short id is a 404. Read-only: nothing here changes a status or replies to anybody.',
+  { feedbackRef: z.string().describe('short id like DAR-FB-7, case-insensitive. NOT a PARK-* id: a held report is not a feedback row and has no row to read (list_parked)') },
+  ({ feedbackRef }) => call(`/feedback/${encodeURIComponent(feedbackRef)}`));
+
+server.tool('resolve_feedback', 'Move feedback to a terminal or intermediate state. resolved, rejected and needs_clarification auto-reply IN THE REPORTER\'S OWN SLACK THREAD, with no orchestrator between you and them, and the reply body is your resolution text — so for those three it is REQUIRED (400 without it) and must read as something a stakeholder understands, not a note to a developer. triaged/accepted/in_progress/pending do not reply and do not need one. `pending` is REOPENING, and it is here because the append route\'s own closed-row warning names it ("if it should be looked at again, reopen the row on purpose") and this surface could not do what that sentence asked: an addition onto a resolved or rejected row sits in no triage queue until somebody puts the row back in one. It replies to nobody, and it does NOT erase the stored resolution — send a new one in the same call if the old text should not stand. Reopening a row filed on a task also puts that task back under the done gate, which is the point rather than a side effect.',
   {
     feedbackRef: z.string().describe('short id like TST-FB-1'),
-    status: z.enum(['triaged', 'accepted', 'in_progress', 'resolved', 'rejected', 'needs_clarification']),
+    status: z.enum(['pending', 'triaged', 'accepted', 'in_progress', 'resolved', 'rejected', 'needs_clarification']),
     resolution: z.string().optional().describe('REQUIRED for resolved/rejected/needs_clarification: this exact text is posted to the reporter. What changed for them, why it is not being actioned, or what you need from them. Already-stored text counts, so a status flip after writing the reason is fine'),
     resolvedTaskRef: z.string().optional().describe('task this feedback became/was fixed by; the link the ship sweep follows to auto-resolve this row. An id that does not exist is a 404, not a silent unlink'),
   },
   ({ feedbackRef, ...rest }) => call(`/feedback/${feedbackRef}`, 'PATCH', rest));
+
+server.tool('list_parked', 'What Gabbar is HOLDING and has not filed: somebody wrote to it about a project, the stakeholder gate refused them, and instead of dropping their words the bot parked them on disk. Held items were made visible so the ORCHESTRATOR could see them, and an orchestrator\'s whole surface is MCP, so without this tool that visibility reaches nobody it was built for.\n\nNOTHING HERE IS FEEDBACK, and that is engineered rather than incidental. A held item never touches Mongo, so it cannot appear on get_board or next_pending_feedback; its id lives in the PARK-* namespace, which cannot collide with a <PREFIX>-FB-<n>; and every row carries filed:false and parked:true in every direction. A parkId is therefore NOT a feedbackRef: PARK-D0AH8292D7Y_1723... handed to get_feedback, resolve_feedback or append_to_feedback is a 404, and that 404 is four layers of defence working, not a lookup to retry another way. Nothing here is in a triage queue, has a feedback id, or has anybody working it. The only route to the board is PROMOTION, which runs back through the same gate and is Gabbar\'s job, not this tool\'s: for cause=stakeholder_gap the fix is a human decision, usually add_stakeholder for that person, after which the sweep promotes what was being held for them; cause=outage means darbar could not answer the gate at all, so it resolves itself on retry and needs nobody.\n\nTWO KINDS ARE HELD AND THEY PROMOTE IN OPPOSITE DIRECTIONS. A report is words nobody has filed, so promoting it CREATES a feedback row. An addition is evidence or a correction for a row that ALREADY EXISTS, so promoting it appends to that row and creates nothing — filing a fresh row for evidence about an existing finding is the exact duplicate that had to be removed once already, so promoting an addition down the report path fixes a loss by rebuilding a bug. Where a row carries `kind`, that is the field that tells them apart, with `appendTo` naming the row an addition belongs on and `addedToRow:false` beside it saying nothing has reached that row yet; an id here is a DESTINATION, never evidence of arrival. Where it does not (older held files, and this reader degrades a missing kind to "report" because that is what every file written before the distinction actually is), read `theirWords` and decide. Never infer "new finding" from the shape of this response.\n\nIT IS A DIRECTORY READ, NOT A QUERY, so the counts are the answer and `items` is a sample of it. `held` is the number that means pending work. Check `truncated` (more PARK-* files on disk than were opened; the cap applies in filename order, which drops the NEWEST) and `unreadable` (files that could not be parsed, counted rather than skipped, because a held report we cannot show is worse than one we know we cannot show) before treating items as everything. A non-null `error` means the directory could not be read AT ALL and must never be read as nothing held; dirPresent:false genuinely is nothing held, and is the ordinary state of a machine where nobody has ever been refused. `ignored` counts .json files that are not PARK-*, which are somebody else\'s files rather than reports we lost.\n\nLocal only, by an explicit check in the route rather than by a config file staying narrow: held words come from somebody the project has not vouched for and carry their slack id, so any request arriving through the share tunnel is refused 403.',
+  {
+    project: z.string().optional().describe('prefix, name or capId. Matched against what the reporter typed OR what Gabbar resolved; an item with NO project reference at all is returned on every project\'s read, flagged project:null, rather than filed somewhere nobody looks. Omit for every held item on this machine'),
+    status: z.string().optional().describe('default "parked", which is the held-and-waiting work. "promoted" and "superseded" are history and stay one query away instead of padding the lane; "all" returns every status'),
+  },
+  ({ project, status }) => {
+    const qs = new URLSearchParams();
+    if (project) qs.set('project', project);
+    if (status) qs.set('status', status);
+    const q = qs.toString();
+    return call(`/parked${q ? `?${q}` : ''}`);
+  });
 
 server.tool('log_event', 'Append to the project event log (the resume trail).',
   { project: z.string(), taskRef: z.string().optional(), text: z.string() },

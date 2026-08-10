@@ -238,12 +238,29 @@ rejected field looks like a success. Read back what you wrote.
   with nothing created; the response carries `boardUrl` plus `warnings` (the things the
   server declines to fail on, such as a pipeline manager missing from the registry).
 
-MCP tools cover most of this but not all: `update_task` has no `title`, `description`,
-`lane` or `assigneeType`; `create_task` has no `notes` or `lane`; there is no
-create-project tool; `resolve_feedback` cannot set `pending` (only Gabbar's thread reopen
-does); no tool rewrites a charter (`append_to_charter` only adds a line) and there is no
-`set_stakeholders`, so a bulk stakeholder list is the POST at init or this PATCH. Use curl
-for those.
+MCP tools cover every intent in this section but two, stated as SHAPES rather than as a
+list of what is missing: a list of absences goes stale on every tool that lands, and this
+one went stale twice in one day.
+
+- **A wholesale replace of a project list that already has a per-entry door.** No tool
+  rewrites a charter (`append_to_charter` only adds a line) and there is no
+  `set_stakeholders`. Both are the `PATCH /projects/:ref` above: read with
+  `get_project_config`, edit, send the whole thing back. `repos`, `pipeline`, `agents`
+  and `proxy` are the exceptions that do have a wholesale tool each.
+- **Task fields the write tools do not carry**, enumerated because there is no principle
+  behind which field landed on which door and a caller about to fire one needs the exact
+  word: `update_task` has no `title`, `description`, `lane` or `assigneeType`;
+  `create_task` has no `notes` or `lane`. Curl for those.
+
+Reads are not a gap any more: `get_task`, `get_feedback`, `get_project_config`,
+`get_project_events` and `list_parked` (held reports, which are NOT feedback and never
+reach the board) all have tools, as do `create_project`, `set_repos`,
+`set_slack_channel`, `append_to_feedback`, `create_task {blocker}` and
+`resolve_feedback {pending}`, which is the deliberate reopen that an append onto a
+resolved or rejected row warns you it has not done.
+
+Adding an MCP tool or argument is not done until this paragraph is edited in the same
+commit.
 
 ## 7b. Editing config one entry at a time
 
