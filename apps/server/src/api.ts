@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import { streamSSE } from 'hono/streaming';
+import { streamSSE, streamText } from 'hono/streaming';
 import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
+import { nudge, waitForNudge } from './inbox';
 import { config, pathPatternError, PATH_PATTERN_FORM, isParkId } from '@darbar/core';
 import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
 
@@ -2069,6 +2070,11 @@ api.post('/feedback', async (c) => {
     throw e;
   }
   await logEvent(p._id!, `${doc.shortId} filed by ${doc.author}${doc.taskShortId ? ` on ${doc.taskShortId}` : ''}: ${doc.body.slice(0, 80)}`, doc.taskId);
+  // DAR-245: ring the orchestrator's doorbell. AFTER the insert and the event, so an armed waiter
+  // that re-reads the queue on this signal cannot read it before the row is in it. The idempotent
+  // returns above deliberately do NOT ring: a retry of a write that already landed rang when it
+  // landed, and ringing again would wake a session over a row it has possibly already triaged.
+  nudge(p._id!.toHexString());
   return c.json({ ...doc, boardUrl: `${config.baseUrl}/p/${p.capId}` });
 });
 
@@ -2162,6 +2168,11 @@ api.patch('/feedback/:shortId', async (c) => {
 
   // a parent held in_review only by this feedback closes itself once the last blocking row resolves
   if ((next === 'resolved' || next === 'rejected') && fb.taskId) await maybeAdvanceParent(fb.taskId);
+  // DAR-245: only a REOPEN rings. Everything else this route writes moves a row out of `pending`,
+  // which is what the inbox is, so it cannot add work; ringing on it would mean the orchestrator
+  // wakes itself every time it triages something. A reopen is a person coming back in their own
+  // thread, and that is the case the doorbell exists for.
+  if (set.status === 'pending' && fb.status !== 'pending') nudge(fb.projectId.toHexString());
   return c.json(await Feedback.findOne({ _id: fb._id }));
 });
 
@@ -2570,6 +2581,255 @@ api.get('/parked', async (c) => {
     items,
   };
   return c.json(body);
+});
+
+// ---------- the orchestrator inbox, and the doorbell on it ----------
+//
+// DAR-245. The pending queue is the orchestrator's inbox and, until this, nothing rang it: Gabbar
+// filed a row and the row waited for somebody to think of it. Two real cases in one day. Abhishek's
+// idea sat until Raj typed "process the feedbacks". A held report promoted only because Raj happened
+// to add him as a stakeholder, which ran the sweep by luck.
+//
+// WHY A STREAM AND NOT A PLAIN LONG-POLL. See apps/server/src/inbox.ts for the harness side: the
+// only thing that wakes an idle Claude session is a task-notification, and the one an orchestrator
+// can arm for itself is a background command EXITING. So the wake carrier is a process exit, which
+// makes the contract "hold the connection open until there is something, then close it" — the client
+// is one `curl` and needs no parser. A silent held-open connection dies on Bun's idleTimeout
+// (config.serverIdleTimeout, 120s), so this writes a single space every config.sseKeepaliveMs, the
+// same trick and the same clock the board's SSE stream already uses. The keepalives are whitespace
+// precisely so the caller can read the last line as the answer.
+//
+// LEVEL-TRIGGERED ON STATE, NOT ON EVENTS. What fires is not "a POST happened", it is "this project
+// has inbox work whose watermark is newer than the cursor you handed me". Three things follow, and
+// they are the reason this design is worth having over a queue:
+//  · A wake that nobody was armed to receive is not lost. The next arm re-reads the queue.
+//  · A server restart, which happens several times a day here, costs one wake: curl's connection
+//    drops, the process exits, the session re-arms with the same cursor and gets whatever landed.
+//  · THE ORCHESTRATOR CANNOT WAKE ITSELF ON ITS OWN WRITES. The inbox is feedback at `pending` plus
+//    reports still held at `parked`, and every act the orchestrator performs on a pending row moves
+//    it OUT of pending (triaged, accepted, rejected, resolved). needs_clarification is deliberately
+//    NOT in the inbox for the same reason the done-gate skips it: that row is with the reporter, not
+//    with us. The only writer that can put something INTO this inbox is a human, via Gabbar or via a
+//    thread reply reopening a row, which is exactly the set of events worth a wake.
+//
+// THE CURSOR NAMES WHAT YOU HAVE ALREADY BEEN TOLD, and nothing else. It decides whether to FIRE; it
+// never decides what to SEND. A wake always carries the whole current inbox, with `newSince` naming
+// the part that is new to you, so a wake can never hand over a partial queue and no item can slip
+// between two adjacent watermarks. Re-arming with the `nextCursor` you were given is what stops a
+// wake you chose to ignore from ringing again in a loop; re-arming with the cursor you sent replays
+// it. Both are legitimate and neither loses anything, because the board is the record and this is
+// only the doorbell.
+//
+// A WAKE THAT ARRIVES MID-TURN cannot interrupt one: the harness queues a task-notification behind
+// the running turn. The session re-arms at the end of that turn and, being level-triggered, is
+// immediately handed anything that landed while it was busy.
+const INBOX_SUMMARY_CAP = 240;
+
+// One shape for both halves of the inbox, because the orchestrator's question is the same either
+// way: who is waiting on me and since when. What differs (a feedback row can be triaged, a held
+// report has to be promoted first) is carried by `kind` rather than by two payload shapes.
+type InboxItem = {
+  kind: 'feedback' | 'parked';
+  id: string;
+  /** watermark: the moment this became, or became again, something waiting on the orchestrator */
+  at: string;
+  author: string;
+  type: string;
+  onTask: string | null;
+  summary: string;
+};
+
+// max(createdAt, updatedAt), not createdAt. A row reopened by a thread reply keeps its original
+// createdAt, so a createdAt-only watermark would put a reopened row permanently behind every cursor
+// and it would never ring again — the exact silence this route exists to end.
+const feedbackWatermark = (fb: FeedbackDoc): string => {
+  const c = new Date(fb.createdAt).getTime(), u = new Date(fb.updatedAt ?? fb.createdAt).getTime();
+  return new Date(Math.max(c, Number.isFinite(u) ? u : c)).toISOString();
+};
+
+// Cheap "did a file appear here" probe for the parked directory. A directory's mtime moves when an
+// entry is created or removed, which is the only parked change that can add inbox work: a file
+// EDITED in place (escalation stamping escalatedAt, a promotion writing its status) does not move it,
+// and neither of those is a new report. A missing directory is the ordinary state of a machine where
+// nothing has ever been refused, so it stamps as absent rather than as an error.
+function dirStamp(dir: string): string {
+  try { return String(fs.statSync(dir).mtimeMs); } catch { return 'absent'; }
+}
+
+type InboxRead = {
+  items: InboxItem[];
+  newSince: string[];
+  nextCursor: string;
+  pendingCount: number;
+  heldCount: number;
+  /** a parked directory we could not read: "none held" and "cannot look" must never read the same */
+  parkedError: string | null;
+  parkedTruncated: boolean;
+};
+
+// The parked half, kept apart from the feedback half because they are refreshed on different
+// clocks: a feedback row is one indexed query and is re-read on every tick, while this opens up to
+// PARKED_READ_CAP files and is only re-read when the directory's mtime says one appeared.
+type ParkedPart = { stamp: string; items: InboxItem[]; error: string | null; truncated: boolean };
+function readParkedPart(p: Project): ParkedPart {
+  const dir = parkedDir();
+  // stamped BEFORE the read, deliberately: a file that lands mid-read is then still newer than the
+  // stamp and gets picked up on the next tick, where stamping after would record it as already seen
+  const stamp = dirStamp(dir);
+  const park = readParkedDir(dir);
+  const held = park.items.filter((i) => i.status === 'parked' && parkedFor(i, p));
+  return {
+    stamp,
+    error: park.error,
+    truncated: park.scanned < park.files,
+    items: held.map((i) => ({
+      kind: 'parked' as const,
+      id: i.parkId,
+      at: i.heldSince,
+      author: i.author,
+      type: i.type,
+      onTask: i.onTask,
+      summary: (i.body || i.theirWords).slice(0, INBOX_SUMMARY_CAP),
+    })),
+  };
+}
+
+async function readInbox(p: Project, cursor: string | null, park?: ParkedPart): Promise<InboxRead> {
+  const pending = await Feedback.find({ projectId: p._id!, status: 'pending' }).sort({ createdAt: 1 }).toArray();
+  const items: InboxItem[] = pending.map((fb) => ({
+    kind: 'feedback' as const,
+    id: fb.shortId,
+    at: feedbackWatermark(fb),
+    author: fb.author,
+    type: fb.type,
+    onTask: fb.taskShortId,
+    summary: fb.body.slice(0, INBOX_SUMMARY_CAP),
+  }));
+  const held = park ?? readParkedPart(p);
+  items.push(...held.items);
+  items.sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
+  const cut = cursor ? Date.parse(cursor) : Number.NEGATIVE_INFINITY;
+  const newSince = items.filter((i) => Date.parse(i.at) > cut).map((i) => i.id);
+  // never moves backwards: an empty inbox leaves the caller's own cursor standing rather than
+  // stamping now, so a re-arm cannot step over something filed in the same breath
+  const maxAt = items.reduce((m, i) => (i.at > m ? i.at : m), cursor ?? '');
+  return {
+    items,
+    newSince,
+    nextCursor: maxAt || new Date(0).toISOString(),
+    pendingCount: pending.length,
+    heldCount: held.items.length,
+    parkedError: held.error,
+    parkedTruncated: held.truncated,
+  };
+}
+
+// Same boundary as /parked next door, for the same reason and stated in code rather than left to a
+// routes file staying narrow: this payload is pending feedback bodies plus verbatim words from
+// people the project has NOT vouched for, and it is an orchestrator surface. It must never be
+// reachable through a share link.
+const inboxIsRemote = (c: Context) => !!c.req.header('x-forwarded-host');
+const INBOX_REMOTE_ERROR =
+  'the orchestrator inbox is local-only: it carries unfiled words from people this project has not vouched for, and it does not travel through a share link';
+
+// Query params get the DAR-208 treatment the bodies get: a cursor or a timeout the caller sent and
+// this route cannot use is a 400 naming the problem, never a silent fall back to the default. A
+// cursor misread as "no cursor" would replay the whole queue on every wake, and a caller would have
+// no way to see why.
+function inboxArgs(c: Context): { cursor: string | null; waitMs: number } | string {
+  const rawCursor = c.req.query('cursor');
+  let cursor: string | null = null;
+  if (rawCursor !== undefined && rawCursor !== '') {
+    const t = Date.parse(rawCursor);
+    if (!Number.isFinite(t)) {
+      return `cursor must be an ISO timestamp, e.g. 2026-08-11T09:15:00.000Z (got ${JSON.stringify(rawCursor)}). It is the nextCursor from your previous read, and it decides only whether this rings, never what it sends`;
+    }
+    cursor = new Date(t).toISOString();
+  }
+  const rawWait = c.req.query('waitMs');
+  let waitMs = config.inboxWaitMsDefault;
+  if (rawWait !== undefined && rawWait !== '') {
+    const n = Number(rawWait);
+    if (!Number.isFinite(n) || n <= 0) return `waitMs must be a positive number of milliseconds (got ${JSON.stringify(rawWait)})`;
+    waitMs = Math.min(n, config.inboxWaitMsMax);
+  }
+  return { cursor, waitMs };
+}
+
+// The non-blocking read. This is the first call of a drain: take the snapshot, work the items, then
+// arm the wait below with the nextCursor it hands back. Doing it in that order is also what keeps a
+// row the orchestrator files itself (a chat item filed as feedback, per the charter) from ringing
+// its own doorbell a moment later.
+api.get('/projects/:ref/inbox', async (c) => {
+  if (inboxIsRemote(c)) return c.json({ error: INBOX_REMOTE_ERROR }, 403);
+  const p = await resolveProject(c.req.param('ref'));
+  if (!p) return c.json({ error: 'project not found' }, 404);
+  const args = inboxArgs(c);
+  if (typeof args === 'string') return c.json({ error: args }, 400);
+  const read = await readInbox(p, args.cursor);
+  return c.json({ woke: read.newSince.length > 0, project: p.prefix, at: new Date().toISOString(), cursor: args.cursor, ...read });
+});
+
+// The doorbell itself. Holds until this project's inbox has something newer than `cursor`, then
+// writes one JSON line and closes, which is what makes the caller's process exit.
+//
+// The intended caller is a background shell in the orchestrator session, and it is one line:
+//   curl -sN "http://localhost:4899/api/projects/DAR/inbox/wait?cursor=<nextCursor>"
+// Everything before the payload is whitespace, so the last line of that output is the answer.
+api.get('/projects/:ref/inbox/wait', async (c) => {
+  if (inboxIsRemote(c)) return c.json({ error: INBOX_REMOTE_ERROR }, 403);
+  const p = await resolveProject(c.req.param('ref'));
+  if (!p) return c.json({ error: 'project not found' }, 404);
+  const args = inboxArgs(c);
+  if (typeof args === 'string') return c.json({ error: args }, 400);
+  const { cursor, waitMs } = args;
+  const key = p._id!.toHexString();
+  const deadline = Date.now() + waitMs;
+
+  return streamText(c, async (s) => {
+    let open = true;
+    s.onAbort(() => { open = false; });
+    const say = async (line: string) => { await s.write(line).catch(() => { open = false; }); };
+
+    // Held reports are files another process writes, so there is no in-process signal for them at
+    // all. Their half of the inbox is therefore cached and only re-parsed when the directory's mtime
+    // says a file appeared, which costs one stat per tick instead of opening every held report.
+    let park = readParkedPart(p);
+    let read = await readInbox(p, cursor, park);
+    let lastKeepalive = Date.now();
+
+    while (open && read.newSince.length === 0 && Date.now() < deadline) {
+      const slice = Math.min(config.inboxParkedTickMs, deadline - Date.now());
+      if (slice <= 0) break;
+      // A nudge cuts the tick short, so a filed row rings in milliseconds. The tick itself is the
+      // safety net under it: THE QUEUE IS RE-READ EITHER WAY. There is a real (sub-millisecond)
+      // window between the read above and this waiter arming in which a nudge reaches nobody, and
+      // there will be future write paths whose author forgets to ring at all. Re-reading on the
+      // tick regardless turns both of those from a wake lost until the deadline into a wake late by
+      // one tick, and it costs one indexed query on a local database every inboxParkedTickMs.
+      await waitForNudge(key, slice);
+      if (!open) break;
+      if (dirStamp(parkedDir()) !== park.stamp) park = readParkedPart(p);
+      read = await readInbox(p, cursor, park);
+      if (read.newSince.length === 0 && Date.now() - lastKeepalive >= config.sseKeepaliveMs) {
+        await say(' ');
+        lastKeepalive = Date.now();
+      }
+    }
+    if (!open) return;
+
+    const woke = read.newSince.length > 0;
+    await say(`\n${JSON.stringify({
+      woke,
+      project: p.prefix,
+      at: new Date().toISOString(),
+      cursor,
+      ...read,
+      note: woke
+        ? `${read.newSince.length} new in the ${p.prefix} inbox (${read.pendingCount} pending feedback, ${read.heldCount} held). Triage them, then re-arm this wait with cursor=${read.nextCursor}.`
+        : `nothing new in ${waitMs}ms (${read.pendingCount} pending feedback, ${read.heldCount} held, none newer than your cursor). Re-arm with cursor=${read.nextCursor}.`,
+    })}\n`);
+  });
 });
 
 // ---------- events ----------

@@ -29,6 +29,18 @@ export const config = {
   proxyAdminToken: env.PROXY_ADMIN_TOKEN || '',
   ngrokDomain: env.NGROK_DOMAIN || '',
   sseKeepaliveMs: 25_000,
+  // ---------- orchestrator inbox long-poll (DAR-245) ----------
+  // How long an armed waiter holds the connection before it gives up and lets the caller re-arm.
+  // Long on purpose: every expiry costs the orchestrator session one wake and therefore one turn, so
+  // a short ceiling here turns a push into a poll with extra steps. It is a ceiling, not a heartbeat
+  // — the keepalive below is what keeps the socket alive.
+  inboxWaitMsDefault: 6 * 60 * 60_000,
+  inboxWaitMsMax: 24 * 60 * 60_000,
+  // Held reports are FILES written by another process (gabbar), so there is no in-process nudge for
+  // them the way there is for a feedback row. This is how often an armed waiter stats the parked
+  // directory to notice a new one. One stat, not a read: the full parse only happens when the
+  // directory's mtime actually moved.
+  inboxParkedTickMs: 10_000,
   eventsBoardLimit: 50,
   capIdLen: 21,
   serverIdleTimeout: 120,

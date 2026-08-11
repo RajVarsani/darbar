@@ -64,6 +64,47 @@ every few minutes; quiet board (empty result, no open dispatches) = back off to 
 minutes. Each wake is one round: drain the queue to empty, dispatch, audit (section 8),
 then sleep.
 
+## 1a. The tick, on a timer
+
+The round above run automatically. The `darbar-tick` skill is what a tick DOES; the
+existing `/loop` skill is the scheduler. Do not build a second scheduler.
+
+```
+/loop /darbar-tick            # self-paced, the tick picks its own next delay
+/loop 30m /darbar-tick        # fixed cadence
+```
+
+The sweep underneath it is one read-only call that prints only findings:
+
+```bash
+PROJ=DAR LIVE=DAR,MRF,ONCALL python3 ~/fafo/skills/darbar-tick/sweep.py
+```
+
+`LIVE` names the real projects, so anything else on the server is reported as throwaway
+litter; unset, it falls back to matching probe-ish project names. `STATE` (default
+`~/.darbar-tick.state`) holds the clean streak and a fingerprint of the last findings.
+
+| Exit | Means | Do |
+|---|---|---|
+| `0` | clean, prints one line `CLEAN DAR \| ... \| clean streak N` | stop the tick, say nothing more |
+| `1` | findings, one ` - LINE` each | act within the tick budget (skill) |
+| `2` | `DOWN api 4899 (...)` or `NO PROJECT X` | stop the loop; never restart 4899 to fix it |
+
+Finding prefixes, in print order: `DOWN gabbar`, `DOWN proxy 4800`, `FEEDBACK pending`,
+`PARKED held`, `TODO undispatched`, `LANES open`, `STALE DISPATCH`, `HELD IN REVIEW`,
+`NO LANES EVER`, `BLOCKED NO REASON`, `FEEDBACK PARKED NO TASK`, `DUPLICATE ROUND`,
+`UNVOUCHED FEEDBACK AUTHORS`, `THROWAWAY PROJECTS LEFT ON THE SERVER`. The header carries
+`N in flight` and, when the findings are byte-identical to the previous tick,
+`SAME AS LAST TICK, nothing you did cleared it`.
+
+Three bare imperatives, because the commands above are easy to fire with the wrong
+expectation. Reasoning is in the skill.
+
+- A tick never sends `resolved`, `rejected` or `needs_clarification`. Those post into a
+  human's Slack thread and the loop is running with nobody in the room.
+- A tick does not dispatch while the header says anything is in flight.
+- `clean streak 6` or `SAME AS LAST TICK` stops the loop. Say why.
+
 ## 2. Triage verbs
 
 Every drained item gets exactly one verb, applied via `PATCH /api/feedback/:shortId`.
@@ -232,22 +273,42 @@ cascade is what closes a one-round BLOCK with no manual status moves.
 `lanes: []` self-closes only when `autoAdvance` is true. With it false the row waits for
 an explicit push like any other.
 
+### What is NOT gated, verified 2026-08-11
+
+Three writes that look like the gated ones and are not. Each answers 200 with no warning,
+each was reproduced against the running server on a throwaway project, and until the
+engine refuses them they are on the caller. Why each matters is Part 0 of the skill.
+
+| Attempt | What actually happens |
+|---|---|
+| `lanes` on a task in `in_progress` | 200, applied. The frozen set is `in_review`/`qa`/`done`/`cancelled` only, so you can clear `lanes` under a live builder. `lanes: []` then self-advances that row to DONE UNREVIEWED when the builder reports `in_review`. **Do not send `lanes` on a row that is not `backlog`, `todo` or `blocked`.** `dispatchedAt` is not the liveness signal here: the builder's own status PATCH cleared it |
+| `{"status":"in_review"}` on a parent whose review round has CLOSED | 200, and a whole fresh round spawns. The no-double-spawn guard only covers a round that is still OPEN. **Leave a parent in `in_review` through rework;** resolving the feedback filed on it is what closes it |
+| `POST /feedback` with any `author`, or none | 200, filed at `pending`, and a missing author is stored as the literal string `unknown`. The stakeholder list is not consulted. This is the exact shape of the 43 probe rows purged from DAR. The append route (section 7) requires an author and 400s without one; the create route does not |
+
+One reply to distrust, same date, same method: **`PATCH /tasks/:ref` answers with the row
+as it stood BEFORE the pipeline hooks ran.** A PATCH that self-advances the row reports
+`in_review` while the row is already `done`. The create route re-reads for this exact
+reason and the patch route does not, so "read back what you wrote" means a separate
+`GET /api/tasks/:ref`, not the PATCH response.
+
 ## 7. Field allowlists
 
 Anything not listed here and not named as a 400 in section 6 is ignored with a 200, so a
 rejected field looks like a success. Read back what you wrote.
 
 - `POST /tasks`: `project`, `title`, `description`, `status`, `type`, `parentTaskRef`,
-  `lane`, `lanes`, `assignee`, `assigneeType`, `origin`, `notes`. No status gate: any
-  status, including `done`, is accepted at create, and a row filed at `in_review` spawns
-  its lanes there and then (section 5).
+  `lane`, `lanes`, `assignee`, `assigneeType`, `origin`, `notes`, `blocker`. No status
+  gate: any status, including `done`, is accepted at create, and a row filed at
+  `in_review` spawns its lanes there and then (section 5). `blocker` is applied here, not
+  only on the PATCH: a row filed at `blocked` keeps its reason.
 - `PATCH /tasks/:ref`: `title`, `description`, `status`, `notes`, `type`, `assignee`,
   `blocker`, `lane`, `assigneeType`, `dispatched`, `lanes`, `addCommit` (append-only,
   one hash per call). `origin`, `commits`, `shortId`, `parentTaskRef`/`parentTaskId` and
   `project`/`projectId` 400 here and name what does the job instead: origin and parentage
   are create-time only.
 - `POST /feedback`: `taskRef` or `project`, `author`, `authorType`, `type`, `body`,
-  `attachments`, `slack`. Always lands at `pending`.
+  `attachments`, `slack`. Always lands at `pending`. `author` is NOT validated against the
+  project's stakeholders and a missing one is stored as `unknown`, so send a real name.
 - `PATCH /feedback/:shortId`: `status`, `resolution`, `type`, `resolvedTaskRef`.
   Promotion from `pending` with no explicit status auto-sets `triaged`. `body` and
   `attachments` are refused BY NAME here and point at the append route below (section 6).
