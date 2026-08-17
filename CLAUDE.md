@@ -85,3 +85,22 @@ Socket Mode on, bot user `U0AGUK6D207`. (Old TST/TODO test projects were wiped
   stay token-free.
 - The Claude skills for this system (`gabbar` persona, `darbar-project-init`)
   live in the separate public repo `RajVarsani/skills`, NOT here.
+
+## Compact instructions
+
+Run `/darbar-handoff` BEFORE compacting: it moves conversation-only facts onto the board,
+which is the only thing compaction cannot reach. After compaction the `SessionStart` hook
+reprints live board state automatically.
+
+When compacting this project, keep, in this order of priority:
+
+1. **Anything not yet on the board** — work discussed but unfiled, decisions and the
+   options rejected, what a blocked thing waits on. Say the shortId if it has one.
+2. **Gotchas bought with time**: a command whose obvious form is wrong, env that must be
+   sourced rather than passed, a flag that does not mean what it reads, a check that
+   passes for the wrong reason. These cost the same hour twice when they are dropped.
+3. **State that no file records**: what is running, migrated, deployed, killed, exposed.
+4. **Exact identifiers**: shortIds, ports, container names, branch names, commit shas.
+
+Drop freely: tool output already acted on, superseded plans, file contents still on disk,
+narration of work whose result is committed, and any status the board can be re-asked for.
