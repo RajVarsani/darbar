@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 
 API = os.environ.get('DARBAR_API', 'http://127.0.0.1:4899/api')
 ROOT = os.path.expanduser(os.environ.get('DARBAR_ROOT', '~/fafo/darbar'))
-LIVE = [p for p in os.environ.get('LIVE', 'DAR,MRF,ONCALL').split(',') if p]
+# Projects are DISCOVERED, never listed. A hardcoded LIVE list makes a project created by
+# another session invisible to the handoff, which is the exact blind-spot class DAR-250 is
+# about — and it happened here: MRFIII existed for an hour while this script reported on
+# three projects. LIVE= still overrides, for narrowing on purpose.
+LIVE = [p for p in os.environ.get('LIVE', '').split(',') if p]
 OPEN = ('todo', 'in_progress', 'in_review', 'qa', 'blocked')
 MAX_ROWS = 40  # a ceiling, and it SAYS when it truncates rather than quietly cutting
 
@@ -42,8 +46,20 @@ def main():
     out = [f'# darbar handoff · {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}', '']
 
     # ---- board ----
+    live = LIVE
+    if not live:
+        projects = get('/projects')
+        if projects is None:
+            live = []
+        else:
+            items = projects if isinstance(projects, list) else projects.get('projects', [])
+            live = [p.get('prefix') for p in items if p.get('prefix')]
+    if not live:
+        out.append('BOARD: could not list projects on 4899')
+        live = []
+
     total_open, rows, unreachable = 0, [], False
-    for proj in LIVE:
+    for proj in live:
         d = get(f'/tasks?project={proj}&limit=1000')
         if d is None:
             unreachable = True
@@ -58,7 +74,7 @@ def main():
     else:
         fb = get('/feedback?status=pending') or {}
         pending = fb.get('total', fb.get('returned', 0)) if isinstance(fb, dict) else 0
-        out.append(f'BOARD: {total_open} open across {",".join(LIVE)} · {pending} pending feedback')
+        out.append(f"BOARD: {total_open} open across {','.join(live)} · {pending} pending feedback")
         out.extend(rows[:MAX_ROWS])
         if len(rows) > MAX_ROWS:
             out.append(f'  … and {len(rows) - MAX_ROWS} more open rows not listed here (ceiling is {MAX_ROWS})')
