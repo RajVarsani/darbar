@@ -70,7 +70,7 @@ task".
 **Hover a project row** reveals two actions in a slot that is reserved whether they are showing or
 not, so hover reveals and never shoves: open the board in a browser, or drill in here. The browser
 link is the loopback board, not the `boardUrl` on the payload, because that one is built from
-`BASE_URL` and dies whenever the ngrok tunnel is down; the payload URL is the fallback.
+`BASE_URL` and dies whenever the tunnel is down; the payload URL is the fallback.
 
 **No layout jump between levels.** One width, one header height, and one fixed body height that both
 levels reserve (`Metrics.bodyH`, computed from the caps so it cannot silently start clipping). The

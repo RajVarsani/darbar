@@ -27,7 +27,7 @@ export const config = {
   bindHost: env.BIND_HOST || '127.0.0.1', // loopback only; a tunnel fronts anything public
   proxyPort: Number(env.PROXY_PORT || 4800),
   proxyAdminToken: env.PROXY_ADMIN_TOKEN || '',
-  ngrokDomain: env.NGROK_DOMAIN || '',
+  zrokName: env.ZROK_NAME || '', // reserved zrok name; the share is <name>.shares.zrok.io
   sseKeepaliveMs: 25_000,
   // ---------- orchestrator inbox long-poll (DAR-245) ----------
   // How long an armed waiter holds the connection before it gives up and lets the caller re-arm.

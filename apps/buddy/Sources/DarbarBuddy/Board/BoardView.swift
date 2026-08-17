@@ -543,7 +543,7 @@ struct ProjectRow: View {
     }
 
     /// The local board, deliberately, and not the `boardUrl` on the payload: that one is built from
-    /// BASE_URL, which is the ngrok domain when the tunnel is configured, so it dies whenever the
+    /// BASE_URL, which is the tunnel domain when one is configured, so it dies whenever the
     /// tunnel is down. This app only ever talks to loopback, where the board always answers.
     /// The payload URL is still the fallback, so a machine where the API base is not loopback gets
     /// something rather than nothing.
