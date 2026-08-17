@@ -281,9 +281,9 @@ engine refuses them they are on the caller. Why each matters is Part 0 of the sk
 
 | Attempt | What actually happens |
 |---|---|
-| `lanes` on a task in `in_progress` | 200, applied. The frozen set is `in_review`/`qa`/`done`/`cancelled` only, so you can clear `lanes` under a live builder. `lanes: []` then self-advances that row to DONE UNREVIEWED when the builder reports `in_review`. **Do not send `lanes` on a row that is not `backlog`, `todo` or `blocked`.** `dispatchedAt` is not the liveness signal here: the builder's own status PATCH cleared it |
-| `{"status":"in_review"}` on a parent whose review round has CLOSED | 200, and a whole fresh round spawns. The no-double-spawn guard only covers a round that is still OPEN. **Leave a parent in `in_review` through rework;** resolving the feedback filed on it is what closes it |
-| `POST /feedback` with any `author`, or none | 200, filed at `pending`, and a missing author is stored as the literal string `unknown`. The stakeholder list is not consulted. This is the exact shape of the 43 probe rows purged from DAR. The append route (section 7) requires an author and 400s without one; the create route does not |
+| `lanes` on a task in `in_progress` | **409 since 2026-08-17.** Frozen from `in_progress` onward, because clearing it under a live builder self-advanced a row to DONE UNREVIEWED. Echoing the stored value back unchanged still passes, so read-then-write works. `dispatchedAt` is not the liveness signal here: the builder's own status PATCH cleared it |
+| `{"status":"in_review"}` on a parent whose review round has CLOSED | **409 since 2026-08-17**, naming the closed children. Send `{"reviewAgain": true}` in the same patch if the rework genuinely needs a fresh round. **Otherwise leave a parent in `in_review` through rework;** resolving the feedback filed on it is what closes it |
+| `POST /feedback` with any `author`, or none | **400 since 2026-08-17** when the project has a stakeholder list and the author is not on it (stakeholders ∪ registered agents, case and whitespace folded). It used to store a missing author as the literal `unknown`, which is the exact shape of the 43 probe rows purged from DAR. A project with agents but NO stakeholders is still ungated |
 
 One reply to distrust, same date, same method: **`PATCH /tasks/:ref` answers with the row
 as it stood BEFORE the pipeline hooks ran.** A PATCH that self-advances the row reports

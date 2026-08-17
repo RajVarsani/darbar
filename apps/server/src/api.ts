@@ -169,6 +169,10 @@ const TASK_VOCAB: FieldVocab = {
   project: 'a task cannot move between projects; file it on the other project and cancel this row',
   projectId: 'a task cannot move between projects; file it on the other project and cancel this row',
   dispatched: 'filing a task is not dispatching it: hand it to an agent with PATCH /tasks/:ref {"dispatched": true}',
+  // applied by PATCH /tasks/:ref and by nothing else. A task being CREATED has no earlier round to
+  // duplicate, so on POST /tasks this word means nothing and is a caller believing they asked for a
+  // second round on a row that has never had one. Same reason addCommit is in this table.
+  reviewAgain: 'a SECOND review round on a task that already had one is asked for on the move itself: PATCH /tasks/:ref {"status": "in_review", "reviewAgain": true}',
   dispatchedAt: 'the server owns that clock: send {"dispatched": true} to stamp it now, false to clear it',
   createdAt: 'stamped by the server at create',
   updatedAt: 'stamped by the server on every write',
@@ -1892,7 +1896,7 @@ api.patch('/tasks/:ref', async (c) => {
   // be set after creation has to SAY it cannot, and point at whatever does the job (DAR-187 item 4).
   // The list moved into TASK_VOCAB so the CREATE route is held to the same standard by the same
   // sentences — `dispatchedAt` and the timestamps were the two this hand-written copy had missed.
-  const frozen = notApplied(b, TASK_VOCAB, ['dispatched', 'addCommit'], t as unknown as Record<string, unknown>);
+  const frozen = notApplied(b, TASK_VOCAB, ['dispatched', 'addCommit', 'reviewAgain'], t as unknown as Record<string, unknown>);
   if (frozen) return c.json({ error: frozen }, 400);
   const badTypes = typeErrors(b, {
     title: 'string', description: 'string', notes: 'string', addCommit: 'string',
@@ -1900,6 +1904,12 @@ api.patch('/tasks/:ref', async (c) => {
   });
   if (b.assigneeType !== undefined && b.assigneeType !== 'agent' && b.assigneeType !== 'human') {
     badTypes.push(`assigneeType must be "agent" or "human" (got ${JSON.stringify(b.assigneeType)})`);
+  }
+  // a boolean verb like `dispatched`, and typed here for the same reason: reviewAgain:"true" read as
+  // absent would drop the one word that distinguishes a deliberate second round from the accident
+  // the guard below exists to stop
+  if (b.reviewAgain !== undefined && typeof b.reviewAgain !== 'boolean') {
+    badTypes.push(`reviewAgain must be true (spawn a fresh review round on a task that already had one) or false (got ${JSON.stringify(b.reviewAgain)})`);
   }
   if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   const set: Record<string, unknown> = {};
@@ -1922,7 +1932,22 @@ api.patch('/tasks/:ref', async (c) => {
   // lanes freeze once the review flow starts: reviews already spawned (or closed) from the old selection
   if (lanesShapeBad(b.lanes)) return c.json({ error: LANES_SHAPE_ERROR }, 400);
   const lanes = lanesArr(b.lanes);
-  if (lanes !== undefined) {
+  // An echo is not an edit, which is the notApplied rule one floor down and it has to hold here too:
+  // read-the-row / change-one-part / send-it-back is the documented procedure, and every builder's
+  // own status PATCH now travels past a freeze that covers the status it is reporting FROM. Compared
+  // STRICTLY rather than with echoedUnchanged, because that predicate reads null and [] as the same
+  // emptiness and here they are opposite selections (all lanes vs no lanes): conflating them would
+  // wave a real change through the freeze, which is the bug rather than the exemption.
+  const lanesEchoed = lanes !== undefined && deepEqual(jsonish(b.lanes), jsonish(t.lanes));
+  if (lanes !== undefined && !lanesEchoed) {
+    // in_progress is the status a live builder holds, and it was NOT frozen: lanes cleared under a
+    // running builder, and when that builder reported in_review the row found no lanes to spawn,
+    // self-advanced through the empty selection and shipped DONE UNREVIEWED. dispatchedAt cannot
+    // stand in for this — the builder's own status PATCH clears it — so the status is the liveness
+    // signal and the freeze reads it.
+    if (t.status === 'in_progress') {
+      return c.json({ error: `${t.shortId} is in_progress; a builder is holding this row, so lanes cannot change here. Move it to todo or blocked in a separate patch first.` }, 409);
+    }
     if ((['in_review', 'qa', 'done', 'cancelled'] as TaskStatus[]).includes(t.status)) {
       return c.json({ error: `${t.shortId} is ${t.status}; lanes are frozen once the review flow starts` }, 409);
     }
@@ -1942,6 +1967,19 @@ api.patch('/tasks/:ref', async (c) => {
   if (set.status !== undefined && set.status !== t.status && t.dispatchedAt && b.dispatched === undefined) {
     set.dispatchedAt = null;
   }
+  // reviewAgain names an override for exactly one thing below: the no-double-spawn guard, which only
+  // fires on a patch that is genuinely crossing INTO in_review (a status change, off a non-in_review
+  // status, on a non-review task). Anywhere else the word has nothing to attach to, and the route used
+  // to accept it there anyway and do nothing: {reviewAgain: true} alone, or alongside an unrelated
+  // status, 200'd and spawned nothing. That is the same "answers 200 and should not" class as the rest
+  // of this file, and a caller who typo'd the status but got the override right walks away believing a
+  // second round is coming. reviewAgain:false is exempt: nothing here treats false as an instruction
+  // (the guard below already reads absent and false alike), so declining an override on an unrelated
+  // patch has not claimed anything false about what the patch does.
+  const enteringReview = set.status === 'in_review' && t.status !== 'in_review' && t.type !== 'review';
+  if (b.reviewAgain === true && !enteringReview) {
+    return c.json({ error: `${t.shortId}: reviewAgain only means something on a patch that moves this task INTO in_review (a status change, off a status other than in_review, and not on a review task itself). Send {"status": "in_review", "reviewAgain": true} together, or drop reviewAgain if that is not what this patch is doing` }, 400);
+  }
   const addCommit = str(b.addCommit);
   if (Object.keys(set).length === 0 && !addCommit) return c.json(t); // nothing to do, no noise event
 
@@ -1951,6 +1989,25 @@ api.patch('/tasks/:ref', async (c) => {
     if (open) return c.json({ error: `${t.shortId} has ${open} open review subtask(s); close them (or cancel them) first` }, 409);
     const fbIds = await openFeedbackShortIds(t._id!);
     if (fbIds.length) return c.json({ error: `${t.shortId} has ${fbIds.length} open feedback row(s) (${fbIds.join(', ')}); resolve or reject them first` }, 409);
+  }
+
+  // ---------- one entry into in_review, one review round ----------
+  // The no-double-spawn guard lives inside spawnReviews and counts only OPEN children, so a task
+  // whose round had CLOSED and was then moved back to in_review came out carrying two rounds on one
+  // row: the closed one and a fresh one. Refused here rather than swallowed in the hook, because a
+  // second round is sometimes exactly what rework wants and the server cannot tell the two apart on
+  // its own. `reviewAgain` is the caller saying which of the two this is.
+  //
+  // Scoped to a round that is fully CLOSED, which is precisely the case that duplicates. With a
+  // child still open spawnReviews already declines, the re-entry genuinely changes nothing and 200
+  // is the honest answer; a 409 there would refuse a move that is not this bug, and an override
+  // there would answer 200 having spawned nothing, which is the same silence one door along.
+  if (enteringReview && b.reviewAgain !== true) {
+    const kids = await Tasks.find({ parentTaskId: t._id, type: 'review' }).toArray();
+    if (kids.length && kids.every((k) => CLOSED.includes(k.status))) {
+      const named = kids.map((k) => `${k.shortId} (${k.lane ?? 'no lane'}, ${k.status})`).join(', ');
+      return c.json({ error: `${t.shortId} already had a review round and every lane of it is closed: ${named}. Moving it back to in_review spawns a SECOND round on top of that one. Send {"reviewAgain": true} in this same patch if a fresh round is what the rework needs, or leave the row where it is if the round it already had is the answer` }, 409);
+    }
   }
 
   set.updatedAt = new Date();
@@ -1963,10 +2020,16 @@ api.patch('/tasks/:ref', async (c) => {
   const after = await Tasks.findOne({ _id: t._id });
   // pipeline hooks fire on the transition, not the state: entering review spawns lanes,
   // closing the last review lane advances (or announces) the parent
-  if (after && set.status === 'in_review' && t.status !== 'in_review' && t.type !== 'review') await spawnReviews(after);
+  if (after && enteringReview) await spawnReviews(after);
   if (t.type === 'review' && CLOSED.includes(set.status as TaskStatus) && t.parentTaskId) await maybeAdvanceParent(t.parentTaskId);
   if (after && set.status === 'done') await resolvePromotedFeedback(after);
-  return c.json(after);
+  // RE-READ, because the hooks above write to this very row. `after` is the row as it stood BEFORE
+  // them, so a self-advancing patch (a lanes:[] selection entering in_review, which spawns nothing
+  // and ships the row inside spawnReviews) answered in_review about a row that was already done. The
+  // caller then acts on a status the server had itself just replaced, which is a shell chain printing
+  // the previous commit after a failed step. POST /tasks re-reads for exactly this reason and this
+  // route did not.
+  return c.json((await Tasks.findOne({ _id: t._id })) ?? after);
 });
 
 // ---------- feedback ----------
@@ -1978,7 +2041,12 @@ api.post('/feedback', async (c) => {
   // caller who thought they were filing something already triaged filed a pending row instead
   const badFields = notApplied(b, FEEDBACK_VOCAB, ['taskRef', 'project', 'type', 'body', 'author', 'authorType', 'attachments', 'slack', 'idempotencyKey']);
   if (badFields) return c.json({ error: badFields }, 400);
-  const badTypes = typeErrors(b, { idempotencyKey: 'string' });
+  // author gets a type check here, not just the str()-and-refuse further down: str() collapses a
+  // WRONG type and an ABSENT field into the same "nothing", so {author: 42} on a gated project fell
+  // through to the "author required" sentence (wrong: the caller sent something, it was the wrong
+  // shape) and on an ungated project fell all the way through to being stored as "unknown" under a
+  // 200, the same probe-litter signature this route exists to stop.
+  const badTypes = typeErrors(b, { idempotencyKey: 'string', author: 'string' });
   if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   const task = str(b.taskRef) ? await resolveTaskRef(str(b.taskRef)!) : null;
   const p = task
@@ -2034,6 +2102,41 @@ api.post('/feedback', async (c) => {
       return c.json({ ...already, boardUrl: `${config.baseUrl}/p/${p.capId}`, idempotent: true });
     }
   }
+  // ---------- who is allowed to be the author of a row ----------
+  // This route took ANY author and turned a missing one into the literal "unknown". That is the
+  // probe-litter signature: 43 rows attributed to nobody, on a live board, purged by hand. The
+  // APPEND route next door has required an author since it was written and 400s without one, so of
+  // the two doors onto a feedback row the CREATE door was the weak one, and it is the one the mess
+  // came through.
+  //
+  // Gated on the project having a stakeholder list, because that list is the only statement of who
+  // this project's reports come from. Without one there is nothing to check a name against and
+  // refusing would just block filing; with one, an author outside it is either a typo or a probe.
+  // Agents count too: an agent registered on the project is as real a reporter as a person, and the
+  // MCP file_feedback tool files under an agent's own name.
+  //
+  // Trimmed and case-folded through keyOf, the same normalisation the config uses for every other
+  // identity key, so " Raj" and "raj" address the person the roster already knows rather than
+  // being refused for their whitespace.
+  //
+  // Placed AFTER the idempotency return on purpose: that return is not a write, and re-judging a
+  // filing that already landed would turn a retry into a 400 about a row that exists.
+  const people = (p.stakeholders ?? []).map((s) => s.name);
+  const bots = (p.agents ?? []).map((a) => a.name);
+  const knownAuthors = [...people, ...bots];
+  if (people.length) {
+    const roster = [
+      people.length ? `stakeholders [${people.join(', ')}]` : '',
+      bots.length ? `agents [${bots.join(', ')}]` : '',
+    ].filter(Boolean).join(' and ');
+    const author = str(b.author)?.trim();
+    if (!author) {
+      return c.json({ error: `author (non-empty string) required: a filed row is only honest if the board says who reported it, and a row filed as "unknown" is what a probe looks like to everyone who reads the queue afterwards. Send whoever is reporting this. ${p.prefix} knows ${roster}` }, 400);
+    }
+    if (!knownAuthors.some((n) => keyOf(n) === keyOf(author))) {
+      return c.json({ error: `author ${JSON.stringify(author)} is not on ${p.prefix}: a feedback row is attributed to a person or an agent this project knows, so the trail leads to somebody who can be asked about it. ${p.prefix} knows ${roster}. If they belong here, add them first with POST /api/projects/${p.prefix}/stakeholders {"name": ${JSON.stringify(author)}} and file the row again` }, 400);
+    }
+  }
   const slack = b.slack && typeof b.slack === 'object' ? (b.slack as Record<string, unknown>) : null;
   const type = str(b.type) ?? 'bug';
   const doc: FeedbackDoc = {
@@ -2041,7 +2144,7 @@ api.post('/feedback', async (c) => {
     taskId: task?._id ?? null,
     taskShortId: task?.shortId ?? null,
     shortId: await nextShortId(p._id!, 'feedback'),
-    author: str(b.author) ?? 'unknown',
+    author: str(b.author)?.trim() || 'unknown',
     authorType: b.authorType === 'agent' ? 'agent' : 'human',
     type: (FEEDBACK_TYPES.includes(type) ? type : 'bug') as FeedbackDoc['type'],
     body: str(b.body) ?? '',
