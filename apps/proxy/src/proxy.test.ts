@@ -29,6 +29,14 @@ const ZROK_TUNNELED = {
   'x-proxy': 'zrok',
 };
 
+// DAR-254: a JSON body shaped like the real thing (repetitive task rows), well over the 1KB floor and
+// genuinely compressible — this is what the gzip tests below send and check for.
+const COMPRESSIBLE_JSON = JSON.stringify({
+  tasks: Array.from({ length: 50 }, (_, i) => ({
+    id: `DAR-${i}`, title: 'Board costs a megabyte per tick: no gzip', status: 'todo', type: 'chore',
+  })),
+});
+
 let proxyPort = 0;
 let upPort = 0;
 let mutePort = 0;
@@ -96,6 +104,26 @@ beforeAll(async () => {
       }
       // reports what the proxy forwarded, so the upstream's own local-only checks can be tested
       if (u.pathname === '/assets/xfh') return new Response(req.headers.get('x-forwarded-host') ?? 'ABSENT');
+      // DAR-254 fixtures, below
+      if (u.pathname === '/assets/json') return new Response(COMPRESSIBLE_JSON, { headers: { 'content-type': 'application/json' } });
+      if (u.pathname === '/assets/small') return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+      // 'identity' rather than 'gzip': see the test below for why a real gzip body here would prove
+      // the wrong thing (Bun's fetch auto-decompresses gzip transparently on the proxy's way IN).
+      if (u.pathname === '/assets/pre-encoded') {
+        return new Response(COMPRESSIBLE_JSON, { headers: { 'content-type': 'application/json', 'content-encoding': 'identity' } });
+      }
+      if (u.pathname === '/assets/sse') {
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            for (let i = 0; i < 3; i++) {
+              controller.enqueue(new TextEncoder().encode(`data: tick ${i}\n\n`));
+              await Bun.sleep(150);
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+      }
       return new Response(`served ${resolveLikeStaticServer(u.pathname)}`);
     },
     // Echoes, so a socket can be shown to be still round-tripping and not merely still open.
@@ -199,6 +227,137 @@ test('local requests are not filtered', async () => {
   expect(await get('/pub/assets/..%2fsecret')).toEqual({ status: 200, body: 'served /secret' });
   expect(await upgrades('/pub/assets/..%2fsecret')).toBe(true);
 });
+
+// ── DAR-254 (first half): gzip at the proxy ────────────────────────────────────────────────────
+// Bun's own fetch() sends "Accept-Encoding: gzip, deflate, br, zstd" by default and auto-decompresses
+// on receipt (verified empirically against a real Bun.serve response) — so the plain `get()` helper
+// above cannot exercise "a client that did not ask" or inspect real wire bytes. A raw socket is the
+// only way to control exactly what goes out and see exactly what comes back, same reasoning `rawGet`
+// above already uses for the Host-header tests.
+// Buffer.concat()'s return generic depends on its input array's element type, which node:net's own
+// 'data' event doesn't pin down — bare `Buffer` fights that inference, so everything here is typed off
+// Buffer.concat's own return type instead of naming a generic by hand.
+type Buf = ReturnType<typeof Buffer.concat>;
+type RawResponse = { status: number; headers: Record<string, string>; body: Buf };
+
+// Incremental, not "parse once at the end": this rig keeps the connection open regardless of the
+// client's `Connection: close` (same reason `rawGet` above settles on the status line rather than
+// waiting for the socket to end — confirmed by hand: a raw request here that waits for a socket 'end'
+// event times out even though the full response, headers and body, already arrived). So parsing has
+// to recognise "the response is complete" from content-length or the chunked terminator, on every
+// 'data' event, and resolve as soon as that's true — never by waiting for the connection itself to close.
+function tryDechunk(buf: Buf): { done: boolean; body: Buf } {
+  const parts: Buf[] = [];
+  let offset = 0;
+  for (;;) {
+    const lineEnd = buf.indexOf('\r\n', offset);
+    if (lineEnd === -1) return { done: false, body: Buffer.alloc(0) }; // size line not fully in yet
+    const size = parseInt(buf.slice(offset, lineEnd).toString('latin1').split(';')[0]!.trim(), 16);
+    const dataStart = lineEnd + 2;
+    if (size === 0) return { done: true, body: Buffer.concat(parts) }; // terminating chunk seen
+    if (buf.length < dataStart + size + 2) return { done: false, body: Buffer.alloc(0) }; // chunk incomplete
+    parts.push(buf.slice(dataStart, dataStart + size));
+    offset = dataStart + size + 2; // past this chunk's trailing CRLF
+  }
+}
+
+function rawRequest(path: string, headers: Record<string, string> = {}): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const sock = netConnect(proxyPort, '127.0.0.1', () => {
+      const lines = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('');
+      sock.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${proxyPort}\r\nConnection: close\r\n${lines}\r\n`);
+    });
+    let buf: Buf = Buffer.alloc(0);
+    let parsed: { status: number; headers: Record<string, string> } | null = null;
+    let headerEnd = -1;
+    const timer = setTimeout(() => { sock.destroy(); reject(new Error(`raw request to ${path} timed out`)); }, 5_000);
+    const finish = (body: Buf) => { clearTimeout(timer); sock.destroy(); resolve({ status: parsed!.status, headers: parsed!.headers, body }); };
+    sock.on('data', (d: Buf) => {
+      buf = Buffer.concat([buf, d]);
+      if (!parsed) {
+        headerEnd = buf.indexOf('\r\n\r\n');
+        if (headerEnd === -1) return; // headers not fully in yet
+        const statusAndHeaders = buf.slice(0, headerEnd).toString('latin1').split('\r\n');
+        const status = Number(/^HTTP\/1\.[01] (\d+)/.exec(statusAndHeaders[0]!)?.[1]);
+        const respHeaders: Record<string, string> = {};
+        for (const line of statusAndHeaders.slice(1)) {
+          const idx = line.indexOf(':');
+          if (idx === -1) continue;
+          respHeaders[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+        }
+        parsed = { status, headers: respHeaders };
+      }
+      const bodySoFar = buf.slice(headerEnd + 4);
+      if ((parsed.headers['transfer-encoding'] ?? '').toLowerCase().includes('chunked')) {
+        const r = tryDechunk(bodySoFar);
+        if (r.done) finish(r.body);
+      } else {
+        const len = Number(parsed.headers['content-length'] ?? '0');
+        if (bodySoFar.length >= len) finish(bodySoFar.slice(0, len));
+      }
+    });
+    sock.on('error', reject);
+  });
+}
+
+test('a compressible JSON response through the proxy is smaller and decodes to identical bytes', async () => {
+  const res = await rawRequest('/pub/assets/json', { ...TUNNELED, 'accept-encoding': 'gzip' });
+  expect(res.status).toBe(200);
+  expect(res.headers['content-encoding']).toBe('gzip');
+  expect(res.body.length).toBeLessThan(COMPRESSIBLE_JSON.length);
+  // Bun.gunzipSync returns a Uint8Array, not a node Buffer — Uint8Array#toString() prints a
+  // comma-separated numeric list rather than decoding, hence TextDecoder rather than .toString() here.
+  expect(new TextDecoder().decode(Bun.gunzipSync(res.body))).toBe(COMPRESSIBLE_JSON);
+});
+
+test('a client with no accept-encoding gets the response uncompressed (identity)', async () => {
+  const res = await rawRequest('/pub/assets/json', { ...TUNNELED }); // no accept-encoding header at all
+  expect(res.status).toBe(200);
+  expect(res.headers['content-encoding']).toBeUndefined();
+  expect(res.body.toString()).toBe(COMPRESSIBLE_JSON);
+});
+
+// The floor: below MIN_COMPRESS_BYTES the response goes out exactly as the upstream sent it, even
+// though the client asked for gzip and the content-type is compressible.
+test('a tiny compressible response is left uncompressed regardless of accept-encoding', async () => {
+  const res = await rawRequest('/pub/assets/small', { ...TUNNELED, 'accept-encoding': 'gzip' });
+  expect(res.status).toBe(200);
+  expect(res.headers['content-encoding']).toBeUndefined();
+  expect(res.body.toString()).toBe('{"ok":true}');
+});
+
+test('an upstream response that already carries a content-encoding is passed through untouched', async () => {
+  const res = await rawRequest('/pub/assets/pre-encoded', { ...TUNNELED, 'accept-encoding': 'gzip' });
+  expect(res.status).toBe(200);
+  expect(res.headers['content-encoding']).toBe('identity'); // unchanged, not overwritten to gzip
+  expect(res.body.toString()).toBe(COMPRESSIBLE_JSON); // and not gzipped on top of it either
+});
+
+// The board holds an EventSource open on /api/p/:capId/stream for the life of the tab; compression
+// must not turn that into "wait for the connection to close, then get everything at once." Proven by
+// timing real read() calls through the live proxy process, not by inspecting source.
+test('SSE is excluded from compression and still streams incrementally, not buffered whole', async () => {
+  const res = await fetch(`http://127.0.0.1:${proxyPort}/pub/assets/sse`, { headers: TUNNELED });
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-encoding')).toBeNull();
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const arrivals: number[] = [];
+  let text = '';
+  const start = Date.now();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    arrivals.push(Date.now() - start);
+    text += decoder.decode(value);
+  }
+  expect(text).toBe('data: tick 0\n\ndata: tick 1\n\ndata: tick 2\n\n');
+  // A proxy that buffered the whole SSE body before forwarding would deliver one chunk at t≈450ms
+  // instead of several roughly 150ms apart — more than one arrival, spread over real time, is what
+  // "still streaming" means here.
+  expect(arrivals.length).toBeGreaterThanOrEqual(2);
+  expect(arrivals[arrivals.length - 1]! - arrivals[0]!).toBeGreaterThan(200);
+}, 10_000);
 
 // DAR-252, measured on a live share before the fix: /api/tasks answered 200 with all 862 rows through
 // a zrok URL. isPublic() was `req.headers.has('x-forwarded-host')` — the one header ngrok happens to

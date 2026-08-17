@@ -114,6 +114,59 @@ function hasEncodedSeparator(pathname: string): boolean {
   return p.includes('%2f') || p.includes('%5c');
 }
 
+// ── response compression ────────────────────────────────────────────────────
+// gzip HERE, not upstream: fetch() auto-decompresses whatever the upstream sent (see file banner) and
+// drops the header that named it, so anything compressed before this point is silently undone before
+// this code ever sees it. This is also the exact byte boundary a metered tunnel counts against.
+// DAR-254 measured board.html at 162KB/load and the DAR task payload at ~600KB (MRF ~1045KB) with zero
+// compression anywhere in apps/.
+const MIN_COMPRESS_BYTES = 1024; // gzip's own framing (header + trailer + deflate block overhead) is
+  // roughly 20-30 bytes, so well under 1KB the "compressed" output can come out bigger than the input,
+  // and the CPU spent buys nothing back either way. Matches the floor nginx and Express's `compression`
+  // middleware ship with by default.
+// Allowlist, not a blocklist: an unrecognised or binary content-type defaults to NOT compressing. This
+// covers everything actually measured on the board (JSON, board.html, JS, CSS, inline SVG) while
+// leaving images/video/audio/zip/woff2/pdf alone without having to name every compressed format that
+// exists — gzipping bytes that are already entropy-coded only adds CPU and framing overhead for a
+// negative or negligible size win.
+const COMPRESSIBLE_TYPE = /^(text\/|application\/(json|javascript|xml|xhtml\+xml|rss\+xml|atom\+xml|manifest\+json|x-www-form-urlencoded)\b|image\/svg\+xml\b)/i;
+
+// Only the literal 'gzip' token counts as asking; a bare '*' is read as "did not ask", the
+// conservative side of "never compress for a client that did not ask" — every real browser sends
+// 'gzip' by name anyway, so this costs nothing in practice.
+function clientAcceptsGzip(acceptEncoding: string): boolean {
+  for (const raw of acceptEncoding.split(',')) {
+    const part = raw.trim().toLowerCase();
+    if (!part.startsWith('gzip')) continue;
+    const q = /;q=([0-9.]+)/.exec(part)?.[1];
+    if (q !== undefined && Number(q) === 0) continue; // explicitly refused via q=0
+    return true;
+  }
+  return false;
+}
+
+// SSE is excluded by content-type, not compressed-but-streamed: the board holds an EventSource open
+// on /api/p/:capId/stream for the life of the tab, and a compressor is free to hold bytes back for a
+// better ratio — proving that never stalls a live tick is a much bigger claim than just not touching
+// it. Buffered response types (JSON, HTML, JS, CSS) have no such liveness requirement, so those are
+// gzipped whole with Bun.gzipSync rather than piped through a CompressionStream transform: measured
+// against this same proxy, Bun.serve (1.3.14) never sends the terminating chunk for a Response body
+// that is `upstream.body.pipeThrough(new CompressionStream('gzip'))` — the connection hangs forever
+// instead of closing, reproduced with a raw socket read (a plain `fetch()` client masks it, since it
+// gives up waiting on `end` differently). Buffering first side-steps that entirely, and every
+// candidate here (board.json, board.html) is already a complete, non-live response by the time it
+// reaches this proxy, so there's no streaming behaviour to lose by materialising it once.
+function isCompressibleResponse(req: Request, upstream: Response): boolean {
+  if (!upstream.body) return false;
+  if (upstream.headers.has('content-encoding')) return false; // never double-compress
+  const type = (upstream.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
+  if (type === 'text/event-stream') return false;
+  if (!COMPRESSIBLE_TYPE.test(type)) return false;
+  const len = upstream.headers.get('content-length');
+  if (len !== null && Number(len) < MIN_COMPRESS_BYTES) return false; // known-small: skip without buffering
+  return clientAcceptsGzip(req.headers.get('accept-encoding') ?? '');
+}
+
 async function admin(req: Request, url: URL): Promise<Response> {
   if (isPublic(req)) return new Response('not found', { status: 404 }); // invisible from outside
   const auth = req.headers.get('authorization') ?? '';
@@ -448,6 +501,22 @@ async function proxy(req: Request, server: Server<WsData>): Promise<Response | u
     });
     const out = new Headers();
     upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k.toLowerCase())) out.set(k, v); });
+    if (isCompressibleResponse(req, upstream)) {
+      // Buffered (see isCompressibleResponse for why), which also means the real size is known before
+      // any header is written — content-length is SET to the true length in both branches below,
+      // never left pointing at a body that no longer matches it.
+      const buf = new Uint8Array(await upstream.arrayBuffer());
+      if (buf.byteLength >= MIN_COMPRESS_BYTES) {
+        const compressed = Bun.gzipSync(buf);
+        out.set('content-encoding', 'gzip');
+        out.set('content-length', String(compressed.byteLength));
+        const vary = out.get('vary');
+        out.set('vary', vary ? `${vary}, Accept-Encoding` : 'Accept-Encoding');
+        return new Response(compressed, { status: upstream.status, headers: out });
+      }
+      out.set('content-length', String(buf.byteLength)); // e.g. chunked upstream with no length header
+      return new Response(buf, { status: upstream.status, headers: out });
+    }
     return new Response(upstream.body, { status: upstream.status, headers: out });
   } catch {
     if (req.signal.aborted) return new Response(null, { status: 499 }); // client left; nobody to answer
