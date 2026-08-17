@@ -71,13 +71,20 @@ bun run tunnel                 # zrok share public, bound to that name
 ```
 `-n` takes `<namespaceToken>:<name>`; a bare `-n darbar` is read as a NAMESPACE and 409s.
 
-**The share does not survive its backend going away.** Restart the proxy and the zrok share
-dies with it: it logs `connection refused`, fails to re-bind its ziti service, and exits. It
-does NOT reconnect. So the order is always proxy first, then `bun run tunnel` — and after any
-proxy restart, check the tunnel rather than assuming. Everything local stays green while the
-public URL serves zrok's own 404, which is invisible from this machine and is the only thing a
-stakeholder sees. `darbar-tick`'s sweep now checks the board through the public URL for exactly
-this reason.
+**The share does not survive its backend going away**, and it fails in two different ways.
+Restart the proxy and the share either exits (`connection refused`, failed ziti re-bind) or —
+worse — stays ALIVE with a dead binding, which `pgrep` happily calls healthy. It never
+reconnects on its own. Both were observed on 18 Aug.
+
+launchd's KeepAlive now covers the first case, and `tunnel.sh` reclaims its own name on start
+so the restart cannot 409 into a respawn loop. Nothing covers the second automatically, because
+the process looks fine: `darbar-tick`'s sweep fetching the board through the PUBLIC url is what
+catches it. That is the whole argument for checking the path a stakeholder uses — everything
+local stays green throughout, and the public url is invisible from this machine.
+
+Note the sweep cannot distinguish "our tunnel is down" from "this network blocks it". On 18 Aug
+Vodafone classified `darbar.shares.zrok.io` as `[phishing]` and served a block page, which the
+sweep reported as DOWN. Check the cert issuer before believing it is ours (DAR-258).
 
 Mongo: its OWN container `darbar-mongo` on **27018** (db `mission_control`, override via
 DB_NAME). Deliberately not the saturn-v2 container — don't point it back at 27017.
