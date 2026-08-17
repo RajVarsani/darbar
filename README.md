@@ -44,6 +44,26 @@ Set BASE_URL to the tunnel domain so board links in Gabbar replies work for
 stakeholders. The free zrok plan shows visitors a one-click interstitial (adding a
 card to the account removes it, at no charge).
 
+## Running it (launchd, not a terminal)
+
+The five services run under launchd and come back on their own. Mongo is a docker container
+with `unless-stopped`; the other four are user agents:
+
+```
+launchctl kickstart -k gui/$(id -u)/com.rajvarsani.darbar-server   # restart one
+launchctl print     gui/$(id -u)/com.rajvarsani.darbar-tunnel      # why is it not running
+tail -f data/logs/{server,proxy,gabbar,tunnel}.log
+launchctl bootout   gui/$(id -u)/com.rajvarsani.darbar-gabbar      # stop for good
+```
+
+Plists live in `~/Library/LaunchAgents/com.rajvarsani.darbar-*.plist` and all exec
+`scripts/svc.sh <name>`, which sources `.env` — so no secret is ever written into a plist.
+`bun dev` still works for a foreground stack; boot the agents out first or they fight over ports.
+
+**Why:** every service started from a shell or an agent session died within hours, and gabbar
+was dead for 10h35m before its own heartbeat check caught it. A dev stack that only runs while
+somebody is watching is exactly what the health checks kept finding.
+
 The tunnel name is reserved ONCE and then reused forever:
 ```
 zrok create name darbar        # -> https://darbar.shares.zrok.io
