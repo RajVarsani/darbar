@@ -51,6 +51,14 @@ bun run tunnel                 # zrok share public, bound to that name
 ```
 `-n` takes `<namespaceToken>:<name>`; a bare `-n darbar` is read as a NAMESPACE and 409s.
 
+**The share does not survive its backend going away.** Restart the proxy and the zrok share
+dies with it: it logs `connection refused`, fails to re-bind its ziti service, and exits. It
+does NOT reconnect. So the order is always proxy first, then `bun run tunnel` — and after any
+proxy restart, check the tunnel rather than assuming. Everything local stays green while the
+public URL serves zrok's own 404, which is invisible from this machine and is the only thing a
+stakeholder sees. `darbar-tick`'s sweep now checks the board through the public URL for exactly
+this reason.
+
 Mongo: its OWN container `darbar-mongo` on **27018** (db `mission_control`, override via
 DB_NAME). Deliberately not the saturn-v2 container — don't point it back at 27017.
 
