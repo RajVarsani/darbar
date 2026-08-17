@@ -18,7 +18,7 @@
 // So what is pinned here is the FALSE side — reordered, whitespace-different and empty-vs-typed
 // values must all read as changes. field-drop.test.ts pins the true side.
 import { afterAll, beforeEach, expect, test } from 'bun:test';
-import { children, feedback, project, req, reset, task, teardown } from './test-harness';
+import { api, children, feedback, project, req, reset, task, teardown } from './test-harness';
 import { echoedUnchanged } from './api';
 
 afterAll(teardown);
@@ -305,6 +305,80 @@ test('a round still OPEN is not the duplicate case: re-entry is a no-op and stay
   expect(await children(t.shortId)).toHaveLength(2); // nothing spawned on top of the live round
 });
 
+// ---------- 2c. DAR-256: one entry into in_review, under real concurrency ----------
+//
+// A SEQUENTIAL probe proves nothing about this defect and the repo has already paid to learn that
+// (DAR-229: a read-then-insert that did not reproduce under ten sequential POSTs and did reproduce
+// under eight concurrent sweeps). Both requests below read the row, and read openReviewCount inside
+// spawnReviews, before either of them writes — so every guard that lives in a READ sees a row that
+// has not moved yet. Fired with Promise.all, against the real routes, on the real driver.
+//
+// Repeated rather than fired once: the interleaving is what is under test, so one green pass is one
+// sample. Measured before the fix — every iteration produced a doubled round (4 children, and 3 on
+// the reviewAgain shape); measured after — 100 iterations, no doubling and no serialised pair.
+const RACES = 5;
+
+test('two concurrent entries into in_review leave ONE round, and the loser is told it lost', async () => {
+  for (let i = 0; i < RACES; i++) {
+    await reset();
+    const p = await project();
+    const t = await task(p.prefix, { lanes: ['code-review', 'qa'] });
+    await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_progress' });
+
+    const [a, b] = await Promise.all([
+      req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' }),
+      req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' }),
+    ]);
+
+    // the invariant: two lanes configured, one round, two children — never two rounds on one row
+    expect(await children(t.shortId), `iteration ${i}`).toHaveLength(2);
+    expect(await statusOf(t.shortId)).toBe('in_review');
+
+    // and the loser hears about it rather than being told 200 about a write that never landed
+    const codes = [a.status, b.status].sort();
+    expect(codes, `iteration ${i}`).toEqual([200, 409]);
+    const loser = a.status === 409 ? a : b;
+    expect(loser.error).toContain('owns the review round');
+    expect(loser.error).toContain('nothing in this patch was applied');
+  }
+});
+
+test('two concurrent reviewAgain overrides spawn exactly one fresh round, not two', async () => {
+  for (let i = 0; i < RACES; i++) {
+    await reset();
+    const { t } = await afterAClosedRound(); // one closed round behind it, sitting in_progress
+
+    const [a, b] = await Promise.all([
+      req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review', reviewAgain: true }),
+      req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review', reviewAgain: true }),
+    ]);
+
+    // 1 closed child from the first round + 1 fresh one. Three is the bug.
+    expect(await children(t.shortId), `iteration ${i}`).toHaveLength(2);
+    expect([a.status, b.status].sort(), `iteration ${i}`).toEqual([200, 409]);
+  }
+});
+
+// The loser's patch is refused WHOLE, so nothing it carried was quietly dropped either. This is why
+// the loser gets a 409 and not a 200 naming the real state: the row does end up in_review, so a 200
+// would be true about the status and false about everything else in the body.
+test('the loser of the race applied nothing at all, not even the fields that had no conflict', async () => {
+  const p = await project();
+  const t = await task(p.prefix, { lanes: ['code-review'] });
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_progress' });
+
+  const [a, b] = await Promise.all([
+    req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review', notes: 'first', addCommit: 'aaaaaaa' }),
+    req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review', notes: 'second', addCommit: 'bbbbbbb' }),
+  ]);
+  expect([a.status, b.status].sort()).toEqual([200, 409]);
+  const winner = a.status === 200 ? 'first' : 'second';
+  const row = await req<{ notes: string; commits: string[] }>('GET', `/tasks/${t.shortId}`);
+  expect(row.body.notes).toBe(winner);                       // the loser's notes never landed
+  expect(row.body.commits).toEqual([winner === 'first' ? 'aaaaaaa' : 'bbbbbbb']); // nor its commit
+  expect((a.status === 409 ? a : b).error).toContain(t.shortId);
+});
+
 // ---------- 3. a feedback row is attributed to somebody the project knows ----------
 
 const ROSTERED = {
@@ -398,4 +472,243 @@ test('the emptiness rule stops at emptiness: a typed value is never an echo of n
   expect(echoedUnchanged({}, null)).toBe(false);         // an empty object is not the empty list
   expect(echoedUnchanged(0, null)).toBe(false);
   expect(echoedUnchanged(false, null)).toBe(false);
+});
+
+// ---------- DAR-254: the SSE tick carries the change, and the board patches itself ----------
+//
+// The client half of this is in board.html, which has no test rig and no DOM here — so the reducer
+// is written as a self-contained block between two markers and LIFTED VERBATIM below. What runs in
+// these tests is the same text the browser runs, driven by frames taken off the real SSE route
+// through the real Hono app. What is NOT tested here is anything that needs a browser: that render()
+// paints the patched state, that EventSource delivers, that the debounce feels right. Not observed
+// in a browser.
+const BOARD_HTML = await Bun.file(new URL('../web/board.html', import.meta.url)).text();
+const R_BEGIN = '// ---- delta reducer: extracted by engine.test.ts, keep self-contained ----';
+const R_END = '// ---- end delta reducer ----';
+// a renamed marker must be a loud failure, not a quietly empty extraction that passes everything
+if (!BOARD_HTML.includes(R_BEGIN) || !BOARD_HTML.includes(R_END)) {
+  throw new Error('board.html no longer carries the delta-reducer markers — these tests would be testing nothing');
+}
+const REDUCER = BOARD_HTML.slice(BOARD_HTML.indexOf(R_BEGIN) + R_BEGIN.length, BOARD_HTML.indexOf(R_END));
+type Client = { data: { tasks: unknown[]; feedback: unknown[]; events: unknown[]; projectSig: string } | null; epoch: string | null; rev: number };
+const { applyDelta, rowSig } = new Function(`"use strict";${REDUCER};return { applyDelta, rowSig };`)() as {
+  applyDelta: (state: Client, frame: unknown) => boolean;
+  rowSig: (rows: unknown[], stamp: (r: never) => string) => string;
+};
+
+// mirrors DELTA_SKEW_MS in api.ts: the window a delta keeps open behind itself
+const DELTA_SKEW_MS = 250;
+
+type Frame = Record<string, unknown>;
+/** a connected board: the real SSE route, so the server counts it as live and builds real deltas */
+async function watch(capId: string) {
+  const res = await api.request(`/p/${capId}/stream`);
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  const frames: Frame[] = [];
+  const dec = new TextDecoder();
+  let buf = '';
+  const pump = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const chunk = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          if (chunk.includes('event: ping')) continue; // keepalive, not a change
+          const data = chunk.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+          if (data) frames.push(JSON.parse(data) as Frame);
+        }
+      }
+    } catch { /* cancelled at the end of the test */ }
+  })();
+  // the frames are written asynchronously, so settle() is how a test waits for a burst to arrive
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5)); };
+  await settle(); // let the subscription register before the test writes anything
+  return { frames, settle, close: async () => { await reader.cancel().catch(() => {}); await pump; } };
+}
+
+const snapshot = async (capId: string) => (await req<Client['data'] & Record<string, unknown>>('GET', `/p/${capId}`)).body;
+const asClient = (payload: Record<string, unknown>): Client =>
+  ({ data: payload as Client['data'], epoch: payload.epoch as string, rev: payload.rev as number });
+
+test('a board that patches every tick ends up holding exactly what a full refetch would have given it', async () => {
+  const p = await project();
+  const t = await task(p.prefix, { lanes: ['code-review', 'qa'] });
+  const w = await watch(p.capId);
+  const client = asClient(await snapshot(p.capId));
+
+  // one of everything the board has to survive: a field edit, a status move that spawns rows,
+  // a row created out of nowhere, a feedback filing, and a child closing under its parent
+  await req('PATCH', `/tasks/${t.shortId}`, { notes: 'picked up', assignee: 'builder' });
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+  await task(p.prefix, { title: 'filed while the board was watching' });
+  const fb = await feedback({ taskRef: t.shortId, body: 'a finding' });
+  const kids = await children(t.shortId);
+  await req('PATCH', `/tasks/${kids[0]!.shortId}`, { status: 'done' });
+  await req('PATCH', `/feedback/${fb.shortId}`, { status: 'rejected', resolution: 'works as intended' });
+  await w.settle();
+
+  expect(w.frames.length).toBeGreaterThan(5);
+  for (const f of w.frames) expect(applyDelta(client, f), `frame rev ${f.rev}`).toBe(true);
+
+  const fresh = await snapshot(p.capId);
+  expect(client.data!.tasks).toEqual(fresh.tasks!);       // statuses, spawned children, edits, order
+  expect(client.data!.feedback).toEqual(fresh.feedback!);
+  // events are compared as a SET: several land in the same millisecond and their order within one
+  // millisecond is not defined on either side (mongo breaks the tie by natural order, the board by
+  // insertion). The digest on the frame is order-independent for the same reason.
+  const ids = (rows: unknown[]) => (rows as { _id: string }[]).map((e) => e._id).sort();
+  expect(ids(client.data!.events)).toEqual(ids(fresh.events as unknown[]));
+  expect(client.rev).toBe(fresh.rev as number);
+  await w.close();
+});
+
+test('a delta is a fraction of the refetch it replaces, and does not carry the whole project', async () => {
+  const p = await project();
+  for (let i = 0; i < 40; i++) await task(p.prefix, { title: `row ${i}`, description: 'x'.repeat(400) });
+  const w = await watch(p.capId);
+  const full = JSON.stringify(await snapshot(p.capId)).length;
+
+  // The FIRST delta for a project this process has not ticked yet asks for a 60s window, so on a
+  // board seeded seconds ago it legitimately carries everything just created; the tick after that
+  // still carries whatever falls inside the overlap BEHIND it. Steady state — one row moving on a
+  // board that has been sitting there — is what a board actually lives on, so the seed is left to
+  // fall out of the window first and that is what is measured.
+  await new Promise((r) => setTimeout(r, DELTA_SKEW_MS * 2));
+  await task(p.prefix, { title: 'opens the window' });
+  await w.settle();
+  const t = await task(p.prefix, { title: 'the one that moved' });
+  await w.settle();
+  const frame = w.frames[w.frames.length - 1]!;
+  const size = JSON.stringify(frame).length;
+
+  // The row that moved, plus whatever the 250ms overlap behind the previous tick re-sends — which
+  // in steady state is that previous tick's own row and nothing else. That re-send is the price of
+  // not refetching every time a stamp and an emit interleave across two concurrent writers, and it
+  // is a row or two rather than a project. What matters is the scaling: this number does not grow
+  // with the 42 rows sitting on the board, and the refetch it replaces is all of them.
+  const rows = frame.tasks as { shortId: string }[];
+  expect(rows.length).toBeLessThanOrEqual(3);
+  expect(rows.map((r) => r.shortId)).toContain(t.shortId);
+  expect(frame.project).toBeUndefined();               // fingerprinted, never sent
+  expect(size).toBeLessThan(full / 8);
+  console.log(`delta ${size}B (${rows.length} row(s)) vs full refetch ${full}B on a 42-task project`);
+  await w.close();
+});
+
+// Each of these is a way the delta can be wrong, and every one of them has to end at load(), which
+// is the behaviour that shipped before this change. false is the only safe answer to a doubt.
+test('every doubt the board can have about a frame ends in a refetch, not in a patched board', async () => {
+  const p = await project();
+  await task(p.prefix);
+  const w = await watch(p.capId);
+  const base = await snapshot(p.capId);
+  await req('POST', '/tasks', { project: p.prefix, title: 'moved the board on' });
+  await w.settle();
+  const good = w.frames[w.frames.length - 1]!;
+  const fresh = () => asClient(structuredClone(base));
+
+  expect(applyDelta(fresh(), good)).toBe(true); // the control: this frame IS applicable
+
+  expect(applyDelta(fresh(), null)).toBe(false);                                   // unparseable
+  expect(applyDelta(fresh(), { kind: 'event', text: 'an older server' })).toBe(false); // the old bell
+  expect(applyDelta(fresh(), { ...good, epoch: 'another-process' })).toBe(false);   // restarted server
+  expect(applyDelta(fresh(), { ...good, prev: (good.prev as number) + 1 })).toBe(false); // a tick we missed
+  expect(applyDelta(fresh(), { ...good, projectSig: 'edited' })).toBe(false);       // project changed
+  expect(applyDelta(fresh(), { ...good, resync: true })).toBe(false);               // flood
+  expect(applyDelta(fresh(), { ...good, tasks: [] })).toBe(false);                  // row dropped in transit
+  expect(applyDelta(fresh(), { ...good, sig: { ...(good.sig as object), tasks: 'x' } })).toBe(false); // digest disagrees
+  expect(applyDelta({ data: null, epoch: null, rev: 0 }, good)).toBe(false);        // no snapshot yet
+
+  // a frame that is BEHIND the board's own snapshot is dropped rather than applied: it would
+  // otherwise overwrite fresh rows with the older copies it was built from, and its digest — built
+  // from those same older rows — would agree that the result was correct
+  const ahead = fresh();
+  ahead.rev = (good.rev as number) + 5;
+  expect(applyDelta(ahead, good)).toBe(true);      // "already inside our snapshot"
+  expect(ahead.rev).toBe((good.rev as number) + 5); // and it did not roll the board backwards
+  await w.close();
+});
+
+// The digest is order-INDEPENDENT by design, so it cannot catch this one: a board that holds the
+// right rows in the wrong order passes every check on the frame and still does not look like the
+// board a refetch would have drawn — cards out of sequence inside a column, the activity feed out of
+// time order. The reducer sorts the way /api/p/:capId sorts, and this is what says so. Frames here
+// are hand-built, deliberately: the server sends rows in order, so only a synthetic frame can put
+// the reducer in front of the case where it does not.
+test('rows land in the order a refetch would have given them, whatever order they arrive in', () => {
+  const stamp = (r: { updatedAt?: string }) => String(r.updatedAt ?? '');
+  const task = (n: number) => ({ _id: `t${n}`, createdAt: `2026-08-1${n}T00:00:00.000Z`, updatedAt: `u${n}` });
+  const fb = (n: number) => ({ _id: `f${n}`, createdAt: `2026-08-1${n}T00:00:00.000Z`, updatedAt: `u${n}` });
+  const ev = (n: number) => ({ _id: `e${n}`, at: `2026-08-1${n}T00:00:00.000Z` });
+  const state: Client = {
+    epoch: 'e', rev: 4,
+    data: { projectSig: 'p', tasks: [task(1), task(3)], feedback: [fb(3), fb(1)], events: [ev(3), ev(1)] } as Client['data'],
+  };
+  // newest first in the frame, oldest last: the reverse of how tasks are kept, and the wrong order
+  // for events if they were merely appended
+  const frame = {
+    kind: 'delta', epoch: 'e', rev: 5, prev: 4, projectSig: 'p', resync: false, eventsMax: 50,
+    tasks: [task(4), task(2)], feedback: [fb(2), fb(4)], events: [ev(2), ev(4)],
+    sig: {
+      tasks: rowSig([task(1), task(2), task(3), task(4)], stamp as never),
+      feedback: rowSig([fb(1), fb(2), fb(3), fb(4)], stamp as never),
+      events: rowSig([ev(1), ev(2), ev(3), ev(4)], (() => '') as never),
+    },
+  };
+  expect(applyDelta(state, frame)).toBe(true);
+  const ids = (rows: unknown[]) => (rows as { _id: string }[]).map((r) => r._id);
+  expect(ids(state.data!.tasks)).toEqual(['t1', 't2', 't3', 't4']);      // createdAt ascending
+  expect(ids(state.data!.feedback)).toEqual(['f4', 'f3', 'f2', 'f1']);   // createdAt descending
+  expect(ids(state.data!.events)).toEqual(['e4', 'e3', 'e2', 'e1']);     // at descending
+});
+
+// and the same list, cut to the length the board payload would have carried
+test('the event list is trimmed to what a refetch would carry, not grown without limit', () => {
+  const stamp = (() => '') as never;
+  const ev = (n: number) => ({ _id: `e${n}`, at: new Date(Date.UTC(2026, 7, 1) + n * 1000).toISOString() });
+  const held = [ev(3), ev(2), ev(1)];
+  const state: Client = { epoch: 'e', rev: 1, data: { projectSig: 'p', tasks: [], feedback: [], events: held } as Client['data'] };
+  const frame = {
+    kind: 'delta', epoch: 'e', rev: 2, prev: 1, projectSig: 'p', resync: false, eventsMax: 2,
+    tasks: [], feedback: [], events: [ev(4)],
+    sig: { tasks: rowSig([], stamp), feedback: rowSig([], stamp), events: rowSig([ev(4), ev(3)], stamp) },
+  };
+  expect(applyDelta(state, frame)).toBe(true);
+  expect((state.data!.events as { _id: string }[]).map((e) => e._id)).toEqual(['e4', 'e3']);
+});
+
+// The one case where a delta would be bigger than the refetch it saves. A board connecting to a
+// project that has just been seeded asks its first tick for a 60s window, and a seeded task tree is
+// hundreds of rows: sending them one frame at a time is worse than the load() it is trying to avoid,
+// so past DELTA_MAX_ROWS the server stops trying and says so, and the board does the plain thing.
+test('a burst bigger than a delta is worth carrying is announced, not streamed row by row', async () => {
+  const p = await project();
+  for (let i = 0; i < 101; i++) await task(p.prefix, { title: `seeded ${i}` }); // nobody watching yet
+  const w = await watch(p.capId);
+  const client = asClient(await snapshot(p.capId)); // the board loads, THEN the tick arrives
+  await req('POST', '/tasks', { project: p.prefix, title: 'the tick that finds them all' });
+  await w.settle();
+
+  const frame = w.frames[w.frames.length - 1]!;
+  expect(frame.resync).toBe(true);
+  expect(frame.tasks).toEqual([]);  // and it does not carry them anyway
+  expect(applyDelta(client, frame)).toBe(false); // which the board answers with a full refetch
+  await w.close();
+});
+
+test('a tick with nothing connected costs nothing: no board, no delta', async () => {
+  const p = await project();
+  const t = await task(p.prefix);
+  // no watcher: the frame is the old bell, which a board would answer with a full refetch anyway
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_progress' });
+  const w = await watch(p.capId);
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'blocked', blocker: 'waiting on review' });
+  await w.settle();
+  expect(w.frames.every((f) => f.kind === 'delta')).toBe(true); // everything AFTER it connected is a delta
+  expect(w.frames.length).toBeGreaterThan(0);
+  await w.close();
 });

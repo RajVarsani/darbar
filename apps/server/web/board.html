@@ -629,6 +629,11 @@ const DISPATCH_STALE_MS = 15*60*1000;
 
 const state = {
   data: null,
+  // the two numbers that say WHICH server state `data` is: the process that served it, and where in
+  // that process's per-project sequence of changes the snapshot sits. A tick is only applied when it
+  // continues from exactly this rev; anything else is a full refetch. See applyDelta.
+  epoch: null,
+  rev: 0,
   view: 'board',           // board | list | feedback | activity | lane
   lane: null,              // active lane key when view === 'lane'
   fbFilter: 'open',        // open | all | closed
@@ -2215,6 +2220,8 @@ async function load(){
   const r = await fetch(`/api/p/${capId}`);
   if (!r.ok){ $('list').innerHTML = '<div class="empty">board not found. check the link</div>'; return; }
   state.data = await r.json();
+  state.epoch = state.data.epoch ?? null;
+  state.rev = state.data.rev ?? 0;
   render();
   loadParked(); // second request on purpose; see state.parked
 }
@@ -2266,10 +2273,87 @@ async function registerReporter(parkId){
     load();
   } catch { toast('could not register them: network'); }
 }
+// ---------- DAR-254: patch the board from the tick instead of refetching it ----------
+//
+// Every SSE event used to call load(), which is the WHOLE project again — fine on DAR, not fine on
+// a 1MB project, and a request per tick per viewer against a share link that is rate limited. The
+// frame now carries the rows that changed (api.ts: buildDelta) and this patches state with them.
+//
+// THE ONLY WAY THIS IS ALLOWED TO BE WRONG IS BY REFETCHING. applyDelta returns false for every
+// doubt it has — a frame it does not understand, a frame that does not continue from the rev we
+// hold, a frame from a different server process, a project edit, a flood, or a patched state whose
+// digest does not match what the server says it should be — and false means load(), the exact
+// behaviour that shipped before this change. It never returns true on a maybe.
+//
+// The block between the markers is lifted VERBATIM by engine.test.ts and run against real frames
+// off the real stream, so it stays self-contained: no DOM, no fetch, no globals but its own, and
+// `state` arrives as an argument rather than being reached for.
+//
+// ---- delta reducer: extracted by engine.test.ts, keep self-contained ----
+function fnv1a(s){ let h=0x811c9dc5; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0; } return h.toString(16); }
+// the same digest api.ts computes over the collection, over the rows we hold instead. Sorted, so it
+// is about WHICH rows exist and what version each is at, never about the order they are kept in.
+const rowSig = (rows, stamp) => fnv1a(rows.map(r=>`${r._id}:${stamp(r)}`).sort().join('\n'));
+const byUpdated = r => String(r.updatedAt ?? '');
+const idOnly = () => '';
+const cmp = (a,b) => a<b ? -1 : a>b ? 1 : 0;
+// replace by _id, append what is new. Returns a NEW array: nothing is committed to state until the
+// digest below has agreed, so a delta that turns out to be wrong cannot leave a half-patched board.
+function upsert(rows, incoming){
+  const out = rows.slice();
+  const at = new Map(out.map((r,i)=>[String(r._id), i]));
+  for (const r of incoming ?? []){
+    const i = at.get(String(r._id));
+    if (i === undefined){ at.set(String(r._id), out.length); out.push(r); } else out[i] = r;
+  }
+  return out;
+}
+/** true: `state` now holds exactly what the server holds. false: refetch — say nothing, trust nothing. */
+function applyDelta(state, f){
+  if (!f || f.kind !== 'delta' || !state.data) return false;   // not a delta we understand
+  if (f.epoch !== state.epoch) return false;                   // different server process
+  if (f.rev <= state.rev) return true;                         // already inside our snapshot
+  if (f.prev !== state.rev) return false;                      // a tick we never saw sits between
+  // the project itself never rides on a tick (it is redacted and sliced on /api/p/:capId, and that
+  // shape is built in one place). A digest of it does, so an edit to the charter, the roster, the
+  // pipeline or the share panel is a refetch rather than a board that quietly keeps the old copy.
+  if (f.projectSig !== state.data.projectSig) return false;
+  if (f.resync) return false;                                  // too big to be worth streaming
+  // sorted the way /api/p/:capId sorts, so a patched board and a refetched one are the same board
+  const tasks = upsert(state.data.tasks ?? [], f.tasks).sort((a,b)=>cmp(String(a.createdAt), String(b.createdAt)));
+  const feedback = upsert(state.data.feedback ?? [], f.feedback).sort((a,b)=>cmp(String(b.createdAt), String(a.createdAt)));
+  const events = upsert(state.data.events ?? [], f.events)
+    .sort((a,b)=>cmp(String(b.at), String(a.at)))
+    .slice(0, f.eventsMax ?? undefined);
+  // the honesty check: if what we just built is not what the server says it is holding, we are not
+  // in sync and no amount of this is going to fix it
+  if (rowSig(tasks, byUpdated) !== f.sig?.tasks) return false;
+  if (rowSig(feedback, byUpdated) !== f.sig?.feedback) return false;
+  if (rowSig(events, idOnly) !== f.sig?.events) return false;
+  state.data.tasks = tasks;
+  state.data.feedback = feedback;
+  state.data.events = events;
+  state.rev = f.rev;
+  return true;
+}
+// ---- end delta reducer ----
+
 $('refresh').addEventListener('click', ()=>load());
-let reloadT, esDropped = false;
+let reloadT, esDropped = false, pending = null;
+// the 250ms debounce is unchanged and still there for genuine bursts — what it defers is now the
+// RENDER, since patching state off a frame costs nothing. A refetch outranks a render inside one
+// window: if any frame in the burst could not be applied, the window ends in load().
+function tick(what){
+  pending = (what === 'load' || pending === 'load') ? 'load' : 'render';
+  clearTimeout(reloadT);
+  reloadT = setTimeout(()=>{ const p = pending; pending = null; if (p === 'load') load(); else render(); }, 250);
+}
 const es = new EventSource(`/api/p/${capId}/stream`);
-es.addEventListener('message', ()=>{ clearTimeout(reloadT); reloadT=setTimeout(load, 250); });
+es.addEventListener('message', ev=>{
+  let f = null;
+  try { f = JSON.parse(ev.data); } catch {}
+  tick(applyDelta(state, f) ? 'render' : 'load');
+});
 es.onopen = ()=>{ $('livedot')?.classList.remove('off'); if (esDropped){ esDropped=false; load(); } }; // catch up after a drop
 es.onerror = ()=>{ esDropped=true; $('livedot')?.classList.add('off'); };
 

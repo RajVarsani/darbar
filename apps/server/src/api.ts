@@ -233,7 +233,124 @@ function laneError(p: { pipeline?: Pipeline } | null, want: string[]): string | 
 async function logEvent(projectId: ObjectId, text: string, taskId?: ObjectId | null) {
   await Events.insertOne({ projectId, taskId: taskId ?? null, text, at: new Date() });
   const p = await Projects.findOne({ _id: projectId }, { projection: { capId: 1 } });
-  if (p) emit(p.capId, { kind: 'event', text });
+  if (p) emit(p.capId, await boardTick(p.capId, projectId, text));
+}
+
+// ---------- DAR-254: the tick carries the change, not a bell ----------
+//
+// The frame used to be {kind:'event', text} and the board answered it by refetching the WHOLE
+// project: 250ms debounce, then GET /api/p/:capId in full. ~2.7KB gzipped on DAR, but it is the
+// whole board every time, so it scales with the project (MRF is 1,045KB raw) and it spends a
+// request per tick per viewer against a zrok share that allows 2000 per 300s per IP.
+//
+// So the frame carries the rows that changed, and the board patches its own state. Three separate
+// things have to be true for that to be SAFE rather than merely smaller, and each has its own
+// mechanism on the frame:
+//
+//   1. ORDER — epoch + rev/prev. Frames are a sequence per project; the board applies one only when
+//      its `prev` is exactly the rev the board is holding. A frame from before the board's own last
+//      full load (rev <= ours) is dropped rather than applied, which is the case a digest alone
+//      cannot see: a refetch racing a tick would otherwise be overwritten by the older copy the
+//      tick was built from, and the digest would AGREE, because it was built from that same older
+//      copy. `epoch` is this process; a restart resets the sequence and every board refetches.
+//   2. CONTENT — a digest of every row's (id, updatedAt), computed here over the collection and
+//      recomputed by the board over its own arrays (board.html: rowSig, same 6 lines). Anything the
+//      window below missed, anything deleted out of band, anything the board holds a stale copy of,
+//      comes out as a mismatch on the very next tick and the board refetches.
+//   3. SHAPE — a frame that is not a delta at all (this build failing, an older server, garbage) is
+//      not understood, and not understanding a frame means a full refetch. Every degradation in
+//      here lands on the same floor: the behaviour that shipped before this change.
+//
+// The window is "changed since the last frame for this board", dragged back by a small OVERLAP. The
+// overlap is there because a row's updatedAt is stamped when its request is handled and this query
+// runs when the emit reaches here: two concurrent writers interleave those by milliseconds, so
+// without it a row can miss its own delta. Re-sending is cheap (the board replaces by _id) and it
+// is paid on every frame in a burst, so the overlap is a quarter second rather than seconds; a miss
+// that slips past it still ends in one refetch off the digest, never in a board that is quietly
+// wrong. Both numbers are measured behaviour in engine.test.ts, not estimates.
+const DELTA_SKEW_MS = 250;
+const DELTA_FLOOR_MS = 60_000; // widest window a delta ever asks for; an older gap is a refetch
+const DELTA_MAX_ROWS = 100; // a bulk seed is cheaper to refetch once than to stream row by row
+// this process. Not persisted on purpose: a restart MUST invalidate every board's sequence.
+const EPOCH = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+type BoardTick = { seq: number; at: Date };
+const ticks = new Map<string, BoardTick>(); // capId -> the last delta built for that board
+const liveBoards = new Map<string, number>(); // capId -> open SSE streams (0 = build nothing)
+
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16);
+}
+// Order-INDEPENDENT (the lines are sorted), so it says nothing about how rows are arranged and
+// everything about which rows exist and what version each is at. board.html computes the identical
+// digest from the JSON it holds, where an ObjectId is already its hex string and a Date is already
+// its ISO string — which is exactly what these two stamps produce.
+const rowSig = <T,>(rows: T[], stamp: (r: T) => string) =>
+  fnv1a(rows.map((r) => `${(r as { _id?: unknown })._id}:${stamp(r)}`).sort().join('\n'));
+const byUpdated = (r: { updatedAt?: Date }) => r.updatedAt?.toISOString() ?? '';
+const idOnly = () => '';
+// over the BOARD SHAPE of the project (boardProject), never the raw doc: the raw doc holds
+// proxy.target, the one field a link-holder must not learn, and a 32-bit digest of a value drawn
+// from a small candidate space (http://127.0.0.1:PORT) is an oracle for it. Over the redacted shape
+// it is a digest of what the board already has, which tells a link-holder nothing new.
+const projectSig = (bp: unknown) => fnv1a(JSON.stringify(bp));
+
+/** the frame a project's boards get: a delta when one is listening and it built, the old bell otherwise */
+async function boardTick(capId: string, projectId: ObjectId, text: string) {
+  // nothing connected: the delta would be six queries nobody reads. The bell is what a '*'
+  // subscriber (there is none today) would still see, and it costs nothing to keep emitting.
+  if (!liveBoards.get(capId)) return { kind: 'event', text };
+  try {
+    return await buildDelta(capId, projectId, text);
+  } catch (e) {
+    // a delta that cannot be built is not a reason to leave the board unaware that SOMETHING moved
+    console.error(`board delta failed (${capId}): ${String(e)} — boards fall back to a full refetch`);
+    return { kind: 'event', text };
+  }
+}
+
+async function buildDelta(capId: string, projectId: ObjectId, text: string) {
+  const prev = ticks.get(capId);
+  const now = new Date();
+  const since = new Date(Math.max((prev?.at.getTime() ?? 0) - DELTA_SKEW_MS, now.getTime() - DELTA_FLOOR_MS));
+  const [changedTasks, taskStamps, changedFb, fbStamps, events, project] = await Promise.all([
+    Tasks.find({ projectId, updatedAt: { $gt: since } }).sort({ createdAt: 1 }).toArray(),
+    Tasks.find({ projectId }, { projection: { updatedAt: 1 } }).toArray(),
+    Feedback.find({ projectId, updatedAt: { $gt: since } }).sort({ createdAt: -1 }).toArray(),
+    Feedback.find({ projectId }, { projection: { updatedAt: 1 } }).toArray(),
+    // the same read the board payload does, so the board's own list and this digest agree on which
+    // 50 events exist; the new ones are taken from it rather than queried a second time
+    Events.find({ projectId }).sort({ at: -1 }).limit(config.eventsBoardLimit).toArray(),
+    Projects.findOne({ _id: projectId }),
+  ]);
+  const seq = (prev?.seq ?? 0) + 1;
+  ticks.set(capId, { seq, at: now });
+  // one delta carrying half a seed is a bigger frame than the refetch it saves
+  const flood = changedTasks.length + changedFb.length > DELTA_MAX_ROWS;
+  return {
+    kind: 'delta',
+    epoch: EPOCH,
+    rev: seq,
+    prev: prev?.seq ?? 0,
+    text, // what the old frame carried, kept for anything reading the stream by hand
+    // The project is FINGERPRINTED and never sent: its board shape is redacted and sliced, so
+    // rebuilding it here would put a second copy of a redaction on a second path. The board holds
+    // the same digest from its last full load and refetches the moment the two differ — which also
+    // catches an edit made BEFORE this board connected, where a server-side "changed since the last
+    // tick" flag would have said nothing.
+    projectSig: project ? projectSig(boardProject(project)) : null,
+    resync: flood,
+    tasks: flood ? [] : changedTasks,
+    feedback: flood ? [] : changedFb,
+    events: events.filter((e) => e.at > since),
+    eventsMax: config.eventsBoardLimit,
+    sig: {
+      tasks: rowSig(taskStamps, byUpdated),
+      feedback: rowSig(fbStamps, byUpdated),
+      events: rowSig(events, idOnly),
+    },
+  };
 }
 
 // The feedback statuses that make the server SPEAK TO A HUMAN in their own Slack thread. Every one
@@ -1693,14 +1810,11 @@ api.get('/projects/:ref/events', async (c) => {
 
 // ---------- board (capability URL) ----------
 
-api.get('/p/:capId', async (c) => {
-  const p = await Projects.findOne({ capId: c.req.param('capId') });
-  if (!p) return c.json({ error: 'not found' }, 404);
-  const [tasks, feedback, events] = await Promise.all([
-    Tasks.find({ projectId: p._id }).sort({ createdAt: 1 }).toArray(),
-    Feedback.find({ projectId: p._id }).sort({ createdAt: -1 }).toArray(),
-    Events.find({ projectId: p._id }).sort({ at: -1 }).limit(config.eventsBoardLimit).toArray(),
-  ]);
+// The project as a board link may see it. ONE function, called by the board payload and by the
+// digest on every SSE tick, because the redaction below is the whole reason this shape exists and a
+// second copy of it is a second place for it to be got wrong. Key order is fixed here, which is
+// also what makes JSON.stringify of it a stable fingerprint.
+function boardProject(p: Project) {
   // This endpoint IS on the proxy's public allowlist, so everything here is readable by anyone
   // holding a board link. proxy.target is the internal host:port being exposed — the one field a
   // link-holder must not learn — so it is dropped and flagged (FB-89). prefix/public/enabled stay:
@@ -1713,12 +1827,36 @@ api.get('/p/:capId', async (c) => {
   // "nothing shared" (FB-95/FB-102). It was being read by the board and never sent, which made every
   // fail-open state on that surface unreachable. Same redaction as above: prefix and allowlist are
   // the boundary and belong on the board; the internal host:port never leaves the machine.
-  const published = (p.proxyPublished ?? [])
+  const proxyPublished = (p.proxyPublished ?? [])
     .filter((r) => r && typeof r.prefix === 'string')
     .map((r) => ({ prefix: r.prefix, public: Array.isArray(r.public) ? r.public : [], targetRedacted: true }));
   // charter sliced to 401: board shows a ~400-char preview and needs the +1 to know it truncated
   // baseUrl rides along so the board can state the shared link exactly as a stakeholder receives it
-  return c.json({ project: { name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders, pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy, proxyPublished: published, baseUrl: config.baseUrl, charter: (p.charter ?? '').slice(0, 401) }, tasks, feedback, events });
+  return {
+    name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders,
+    pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy, proxyPublished,
+    baseUrl: config.baseUrl, charter: (p.charter ?? '').slice(0, 401),
+  };
+}
+
+api.get('/p/:capId', async (c) => {
+  const p = await Projects.findOne({ capId: c.req.param('capId') });
+  if (!p) return c.json({ error: 'not found' }, 404);
+  // READ BEFORE THE ROWS, deliberately. This snapshot is at least as new as `rev`, so a write that
+  // lands mid-read either arrives in the rows below (and its delta re-applies the same values,
+  // which is a no-op) or bumps the sequence past this number (and the board sees the gap on the
+  // next frame and refetches). Read AFTER, it could name a sequence newer than the rows, and the
+  // board would drop the very frame that carried the row it is missing. See buildDelta.
+  const rev = ticks.get(p.capId)?.seq ?? 0;
+  const project = boardProject(p);
+  const [tasks, feedback, events] = await Promise.all([
+    Tasks.find({ projectId: p._id }).sort({ createdAt: 1 }).toArray(),
+    Feedback.find({ projectId: p._id }).sort({ createdAt: -1 }).toArray(),
+    Events.find({ projectId: p._id }).sort({ at: -1 }).limit(config.eventsBoardLimit).toArray(),
+  ]);
+  // epoch/rev/projectSig are how the board knows whether a later SSE delta continues from THIS
+  // snapshot or has left it behind; the project itself is never sent on a tick, only fingerprinted.
+  return c.json({ epoch: EPOCH, rev, projectSig: projectSig(project), project, tasks, feedback, events });
 });
 
 api.get('/p/:capId/stream', async (c) => {
@@ -1727,12 +1865,23 @@ api.get('/p/:capId/stream', async (c) => {
   if (!exists) return c.json({ error: 'not found' }, 404);
   return streamSSE(c, async (stream) => {
     let open = true;
+    // a connected board is the only reason to build a delta (boardTick), so the count of open
+    // streams is kept where the open and every close already are. One `close` for all three exits,
+    // idempotent, so a stream that fails a write AND aborts cannot decrement twice.
+    liveBoards.set(key, (liveBoards.get(key) ?? 0) + 1);
+    function close() {
+      if (!open) return;
+      open = false;
+      off();
+      const n = (liveBoards.get(key) ?? 1) - 1;
+      if (n > 0) liveBoards.set(key, n); else liveBoards.delete(key);
+    }
     const off = subscribe(key, {
-      send: (data) => { stream.writeSSE({ data }).catch(() => { off(); open = false; }); },
+      send: (data) => { stream.writeSSE({ data }).catch(close); },
     });
-    stream.onAbort(() => { off(); open = false; });
+    stream.onAbort(close);
     while (open) {
-      await stream.writeSSE({ event: 'ping', data: 'keepalive' }).catch(() => { off(); open = false; });
+      await stream.writeSSE({ event: 'ping', data: 'keepalive' }).catch(close);
       await stream.sleep(config.sseKeepaliveMs);
     }
   });
@@ -2013,7 +2162,35 @@ api.patch('/tasks/:ref', async (c) => {
   set.updatedAt = new Date();
   const update: { $set: Record<string, unknown>; $push?: { commits: string } } = { $set: set };
   if (addCommit) update.$push = { commits: addCommit };
-  await Tasks.updateOne({ _id: t._id }, update);
+  // ---------- DAR-256: the transition itself is the lock ----------
+  // Every guard above this line, and openReviewCount inside spawnReviews, is a READ. Two requests
+  // crossing into in_review together therefore both pass all of them before either one writes, and
+  // the row comes out carrying two rounds — measured on this rig, not argued: 4 children on a
+  // two-lane task, 3 on the reviewAgain shape. Guarding harder in front of the write cannot fix
+  // that; it only reproduces the same window one floor up, which is what DAR-247 did.
+  //
+  // So the condition moves INTO the write, where the driver settles it: exactly one racer flips the
+  // status, and only that one goes on to run the hooks. `$ne` rather than a compare-and-swap on the
+  // status we read, because the invariant this owes is "one entry into in_review", not "the row has
+  // not moved at all" — a patch that crossed some other status in between is not this bug.
+  //
+  // SCOPED TO THE ENTERING-REVIEW PATCH and nowhere else. As a filter on every PATCH it would
+  // refuse every legitimate write to a row that is sitting in in_review: a note, a commit, an
+  // assignee, a lanes echo, and the explicit `done` that leaves in_review when autoAdvance is off.
+  // Uncontended patches are unchanged — same one filter on _id, same one write, no extra read.
+  const res = await Tasks.updateOne(
+    { _id: t._id, ...(enteringReview ? { status: { $ne: 'in_review' as TaskStatus } } : {}) },
+    update,
+  );
+  // The loser matched nothing, so NOTHING it sent landed: not the status, not the notes beside it,
+  // not its addCommit. That is why this is a 409 and not a 200 naming the real state — the row does
+  // end up in_review, so a 200 would be true about the status and false about the rest of the body,
+  // which is the silent drop the rest of this route exists to stop. One re-read, on the contended
+  // path only, so the sentence states what the row actually says rather than assuming.
+  if (enteringReview && res.matchedCount === 0) {
+    const now = await Tasks.findOne({ _id: t._id });
+    return c.json({ error: `${t.shortId} is ${now ? now.status : 'no longer on the board'}: another patch crossed into in_review while this one was in flight, and that one owns the review round. So nothing in this patch was applied — not the status, and not the other fields it carried. Re-read the row and send whatever still applies.` }, 409);
+  }
   const changed = Object.keys(set).filter((k) => k !== 'updatedAt').concat(addCommit ? ['commit'] : []).join(', ');
   await logEvent(t.projectId, `${t.shortId} updated (${changed})${set.status ? ` → ${set.status}` : ''}`, t._id);
 
