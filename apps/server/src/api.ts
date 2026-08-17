@@ -2538,13 +2538,18 @@ const parkedFor = (i: ParkedSummary, p: Project): boolean =>
 // the trailing slash publishes this route, and so do '/api/' and '/api/*'. That is a property of a
 // file somebody edits, not of this code, and an exposure boundary that a typo elsewhere can move is
 // not a boundary. So the check below is the boundary, and routes.json is the second layer.
-// x-forwarded-host is what ngrok sets on every tunneled request and exactly what the proxy's own
-// isPublic() switches on, so this is the same fact asserted at both ends rather than a new one.
-// Residual, stated plainly: a LOCAL caller can set that header by hand and lose access to a local
-// route, which fails closed and costs somebody with shell access nothing; and a front door that does
-// not set the header fools this check and the proxy's identically, which is the pre-existing trust
-// boundary and not something this adds. Whatever else changes here, this route must never move under
-// '/api/p/' and this check must not come out.
+// x-forwarded-host is set by OUR proxy on every request it judged public, and stripped from every
+// request it judged local, so this is the proxy's own decision asserted here rather than a new one.
+// It is deliberately not re-derived: `host` is hop-by-hop at the proxy, so everything forwarded
+// arrives here looking like loopback and a Host test at this end would pass for the whole internet.
+//
+// This comment used to say the header was "what ngrok sets", and named as a tolerable residual that
+// "a front door that does not set the header fools this check and the proxy's identically". DAR-252
+// is that residual happening: zrok forwards without it. The proxy setting it is what closes it, so
+// the dependency runs on our code now, not a vendor's. A local caller can still set it by hand and
+// lose access to a local route, which fails closed and costs somebody with shell access nothing.
+// Whatever else changes here, this route must never move under '/api/p/' and this check must not
+// come out.
 api.get('/parked', async (c) => {
   if (c.req.header('x-forwarded-host')) {
     return c.json({ error: 'held reports are local-only: they are unfiled words from somebody this project has not vouched for, and they do not travel through a share link' }, 403);

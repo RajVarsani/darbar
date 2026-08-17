@@ -9,7 +9,7 @@ Mission control for agent-orchestrated projects: live boards + human feedback pi
 |---|---|---|
 | `apps/server` | Hono API + SSE + capability-URL boards on `127.0.0.1:4899` | `src/server.ts` |
 | `apps/gabbar` | Slack Socket Mode intake bot (writes pending feedback, nothing else) | `src/bot.ts` |
-| `apps/proxy` | Dynamic front door on `127.0.0.1:4800`; ngrok fronts ONLY this | `src/server.ts` |
+| `apps/proxy` | Dynamic front door on `127.0.0.1:4800`; the tunnel fronts ONLY this | `src/server.ts` |
 | `apps/mcp` | stdio MCP tools wrapping the API (spawned by Claude sessions) | `src/server.ts` |
 | `packages/core` | Shared config + Mongo collections + types (`@darbar/core`) | `src/index.ts` |
 
@@ -19,7 +19,7 @@ Runtime is Bun everywhere: `bun install`, `bun run`, `bunx`, `Bun.file`, `bun te
 ## Run
 
 ```bash
-bun dev              # EVERYTHING: mongo check -> server + gabbar + proxy + ngrok tunnel
+bun dev              # EVERYTHING: mongo check -> server + gabbar + proxy + zrok tunnel
 bun run server|gabbar|proxy|tunnel   # individual pieces
 bun run mcp          # stdio; normally spawned via MCP registration (README)
 bun run typecheck    # tsc --noEmit; run before committing
@@ -40,10 +40,13 @@ routes.json) and is gitignored.
   humans file feedback; one promoter keeps the board coherent.
 - **Only the server touches Mongo and posts Slack replies.** Resolution replies live
   in the server's feedback PATCH, not in the bot.
-- **Nothing binds beyond loopback.** Outside traffic comes through ngrok -> proxy,
+- **Nothing binds beyond loopback.** Outside traffic comes through the tunnel -> proxy,
   and the proxy's per-route `public` regex list defines the exposed surface
-  (boards `/p/`, board API `/api/p/`, files `/files/` by default). Tunneled requests
-  carry `x-forwarded-host`; that header is the public/local switch.
+  (boards `/p/`, board API `/api/p/`, files `/files/` by default). The public/local
+  switch is LOOPBACK, not a vendor header: public unless the request proves it came
+  from loopback. The proxy then sets `x-forwarded-host` itself on public requests, so
+  the server's local-only routes can tell. Keying this off one tunnel's header is what
+  broke in DAR-252 — ngrok set it, zrok does not, and the API went world-readable.
 - **API bodies are string-typed** (guards in `apps/server/src/api.ts`). Keep them:
   they block Mongo operator injection and untyped garbage reaching the board.
 - **Every feedback state change that matters replies in the original Slack thread**;

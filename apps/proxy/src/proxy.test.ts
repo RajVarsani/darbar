@@ -13,13 +13,21 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { mkdir, rm, symlink, copyFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { createServer, type Server as NetServer, type Socket } from 'node:net';
+import { createServer, connect as netConnect, type Server as NetServer, type Socket } from 'node:net';
 import type { Subprocess } from 'bun';
 
 const SRC = new URL('./proxy.ts', import.meta.url).pathname;
 const RIG = new URL('../../../data/.proxy-test-rig/', import.meta.url).pathname; // repo data/, gitignored
 const PROXY_DIR = `${RIG}a/b/c`; // three deep: proxy.ts reads ../../../data/routes.json from here
-const TUNNELED = { 'x-forwarded-host': 'test.ngrok.app' }; // what ngrok sets; the public/local switch
+const TUNNELED = { 'x-forwarded-host': 'test.ngrok.app' }; // what ngrok sets
+// What zrok actually sets, measured off a live share: note the ABSENCE of x-forwarded-host, which is
+// the header the public/local switch used to key off exclusively. See the DAR-252 test below.
+const ZROK_TUNNELED = {
+  'x-forwarded-for': '203.0.113.7, 10.32.0.47',
+  'x-forwarded-proto': 'https',
+  'x-forwarded-port': '443',
+  'x-proxy': 'zrok',
+};
 
 let proxyPort = 0;
 let upPort = 0;
@@ -86,6 +94,8 @@ beforeAll(async () => {
       if ((req.headers.get('upgrade') ?? '').toLowerCase().includes('websocket')) {
         return server.upgrade(req, { data: { path: u.pathname } }) ? undefined : new Response('no', { status: 400 });
       }
+      // reports what the proxy forwarded, so the upstream's own local-only checks can be tested
+      if (u.pathname === '/assets/xfh') return new Response(req.headers.get('x-forwarded-host') ?? 'ABSENT');
       return new Response(`served ${resolveLikeStaticServer(u.pathname)}`);
     },
     // Echoes, so a socket can be shown to be still round-tripping and not merely still open.
@@ -188,6 +198,75 @@ test('local requests are not filtered', async () => {
   expect(await get('/pub/secret')).toEqual({ status: 200, body: 'served /secret' });
   expect(await get('/pub/assets/..%2fsecret')).toEqual({ status: 200, body: 'served /secret' });
   expect(await upgrades('/pub/assets/..%2fsecret')).toBe(true);
+});
+
+// DAR-252, measured on a live share before the fix: /api/tasks answered 200 with all 862 rows through
+// a zrok URL. isPublic() was `req.headers.has('x-forwarded-host')` — the one header ngrok happens to
+// set — so a tunnel that forwards differently read as LOCAL and got the whole app unfiltered. The
+// vulnerability is recognising tunnels one at a time, so this asserts the shapes we do not run too.
+test('a tunnel that does not set x-forwarded-host is still public', async () => {
+  for (const [name, headers] of [
+    ['zrok, as measured', ZROK_TUNNELED],
+    ['x-forwarded-for alone', { 'x-forwarded-for': '203.0.113.7' }],
+    ['RFC 7239 Forwarded', { forwarded: 'for=203.0.113.7;proto=https' }],
+    ['x-real-ip alone', { 'x-real-ip': '203.0.113.7' }],
+  ] as const) {
+    expect({ name, ...(await get('/pub/secret', headers)) }).toEqual({ name, status: 403, body: '403 · not shared' });
+    expect({ name, ...(await get('/pub/assets/..%2fsecret', headers)) }).toEqual({ name, status: 403, body: '403 · encoded path separator' });
+    expect({ name, upgraded: await upgrades('/pub/secret', headers) }).toEqual({ name, upgraded: false });
+  }
+});
+
+// The case no forwarding header covers: a tunnel that rewrites nothing and just delivers the request
+// with its original Host. Loopback is the only thing that proves a request came from this machine,
+// so an unrecognised Host must fail closed on its own. fetch() will not let us set Host, so this one
+// is written onto the socket by hand.
+// Settles on the STATUS LINE and destroys the socket immediately, rather than waiting for the server
+// to close. Waiting on 'end' hangs when the connection is kept alive, and every socket left hanging
+// here is a slot the concurrent-socket test later expects to be free — the rig is shared.
+function rawGet(path: string, host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const sock = netConnect(proxyPort, '127.0.0.1', () => {
+      sock.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+    });
+    let buf = '';
+    const settle = (fn: () => void) => { clearTimeout(timer); sock.destroy(); fn(); };
+    const timer = setTimeout(() => settle(() => reject(new Error(`raw request to ${host} timed out`))), 5_000);
+    sock.on('data', (d) => {
+      buf += d.toString();
+      const m = /^HTTP\/1\.[01] (\d{3})/.exec(buf);
+      if (m) settle(() => resolve(Number(m[1])));
+    });
+    sock.on('error', (e) => settle(() => reject(e)));
+  });
+}
+
+// The upstream has local-only routes (/api/parked, the inbox doorbell) that key off x-forwarded-host,
+// and it CANNOT repeat the proxy's own test because `host` is hop-by-hop and every proxied request
+// arrives at it looking like loopback. So the proxy states the fact instead of relying on the tunnel
+// to state it — which is exactly what stopped being true when ngrok became zrok.
+test('the proxy tells the upstream a request was tunneled, whatever the tunnel sets', async () => {
+  const local = await get('/pub/assets/xfh');
+  expect(local.body).toBe('ABSENT'); // local stays local, so local-only routes still answer
+
+  for (const headers of [TUNNELED, ZROK_TUNNELED, { 'x-real-ip': '203.0.113.7' }]) {
+    const r = await get('/pub/assets/xfh', headers);
+    expect(r.status).toBe(200);
+    expect(r.body).not.toBe('ABSENT'); // the upstream can tell, even from a tunnel setting nothing
+  }
+
+  // And it is OUR fact, not the caller's: a forged value is overwritten, never forwarded as given.
+  const forged = await get('/pub/assets/xfh', { 'x-forwarded-host': 'evil.example' });
+  expect(forged.body).not.toBe('evil.example');
+});
+
+test('an unrecognised Host is public even with no forwarding headers at all', async () => {
+  expect(await rawGet('/pub/secret', 'darbar.shares.zrok.io')).toBe(403);
+  expect(await rawGet('/pub/assets/app.js', 'darbar.shares.zrok.io')).toBe(200); // still serves what is shared
+  // and the loopback names stay local, ports and IPv6 brackets included
+  for (const host of ['localhost:4800', '127.0.0.1:4800', 'LocalHost', '[::1]:4800']) {
+    expect({ host, status: await rawGet('/pub/secret', host) }).toEqual({ host, status: 200 });
+  }
 });
 
 // board.html warns about a public[] entry that exposes the whole app, and the warning is only right

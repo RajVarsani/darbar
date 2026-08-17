@@ -1,10 +1,11 @@
 // Dynamic reverse proxy — the single front door for everything shared outside.
-// ngrok (permanent domain) forwards to this; local services stay loopback-only behind it.
+// A tunnel (zrok, permanent name) forwards to this; local services stay loopback-only behind it.
 //
 // Routing:  /<prefix>/... -> prefixes[prefix].target (prefix stripped)
 //           anything else -> routes.default.target
-// Public policy: requests arriving THROUGH the tunnel (x-forwarded-host set by ngrok)
-//   are only allowed onto paths matching the route's `public` list. Those are PATH PATTERNS,
+// Public policy: every request is PUBLIC unless it proves it came from loopback (see isPublic —
+//   the tunnel is identified by exclusion, never by recognising a particular vendor's header).
+//   Public requests are only allowed onto paths matching the route's `public` list. Those are PATH PATTERNS,
 //   not regexes (see PATH_PATTERN_FORM in @darbar/core) — matched with string operations, so no
 //   pattern anyone can write is able to hang this event loop. A tunneled path carrying an ENCODED
 //   separator (%2f/%5c) is refused outright — see hasEncodedSeparator. Local requests bypass the
@@ -70,8 +71,27 @@ async function saveRoutes(r: Routes) {
 // upstream's allowedHosts check (see README). Don't "fix" the list.
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'host']);
 
+// Loopback is the ONLY thing that counts as local: the proxy binds to 127.0.0.1, so a request whose
+// Host is a loopback name physically came from this machine and cannot have been routed here by a
+// tunnel. Tunnels are identified by exclusion, not by recognising them one at a time.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+// Any of these means SOMETHING forwarded this request, whoever it was.
+const FORWARDED_HEADERS = ['x-forwarded-host', 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-port', 'forwarded', 'x-real-ip', 'x-proxy'];
+
+// Fail CLOSED. This used to be `req.headers.has('x-forwarded-host')` — the one header ngrok happens
+// to set — which made the default "trusted" and required a positive signal to become "public". zrok
+// forwards without it, so every tunneled request was classified local: allowlist skipped, %2f refusal
+// skipped, admin routes un-hidden, the whole board API world-readable. Recognising tunnels one at a
+// time is the bug, not the header choice, so the test is inverted: public unless PROVEN loopback.
+// Host is trustworthy here precisely because a tunnel routes on it — measured on zrok, a forged
+// `Host: localhost` never reaches us at all, the frontend fails to route it.
 function isPublic(req: Request): boolean {
-  return req.headers.has('x-forwarded-host'); // set by ngrok on every tunneled request
+  for (const h of FORWARDED_HEADERS) if (req.headers.has(h)) return true;
+  const host = (req.headers.get('host') ?? '').toLowerCase();
+  if (!host) return true; // no Host at all is not a local browser; treat it as outside
+  // strip the port, keeping bracketed IPv6 literals intact ([::1]:4800 -> [::1])
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : (host.split(':')[0] ?? '');
+  return !LOOPBACK_HOSTS.has(name);
 }
 // String ops only — no RegExp anywhere on this path, so no pattern can hang the front door. An empty
 // list (nothing configured, or every entry rejected at load) matches nothing, which is the point.
@@ -408,6 +428,13 @@ async function proxy(req: Request, server: Server<WsData>): Promise<Response | u
 
   const headers = new Headers();
   req.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k.toLowerCase())) headers.set(k, v); });
+  // The upstream has its own local-only routes (/api/parked, the inbox doorbell) that key off
+  // x-forwarded-host. It cannot repeat OUR test: `host` is hop-by-hop here, so every proxied request
+  // reaches it looking like loopback. So state the fact rather than hoping the tunnel states it —
+  // relying on the vendor to set this is precisely what broke when ngrok became zrok. Set on public
+  // requests and REMOVED on local ones, so a local caller cannot hand-forge a tunneled request.
+  if (isPublic(req)) headers.set('x-forwarded-host', req.headers.get('host') ?? 'tunnel');
+  else headers.delete('x-forwarded-host');
   try {
     const upstream = await fetch(`${route.target}${path}${url.search}`, {
       method: req.method,
@@ -434,7 +461,7 @@ async function proxy(req: Request, server: Server<WsData>): Promise<Response | u
 console.log(`proxy listening on 127.0.0.1:${config.proxyPort} (routes: ${ROUTES_PATH})`);
 export default {
   port: config.proxyPort,
-  hostname: '127.0.0.1', // ngrok's agent connects locally; nothing binds public
+  hostname: '127.0.0.1', // the tunnel agent connects locally; nothing binds public
   fetch: proxy,
   websocket, // Bun only accepts server.upgrade() when a handler is declared here
   idleTimeout: config.serverIdleTimeout,
