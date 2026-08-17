@@ -1,16 +1,40 @@
 import { Hono } from 'hono';
 import { api, reconcileAllProxies } from './api';
-import { initDb, config } from '@darbar/core';
+import { initDb, config, db } from '@darbar/core';
 
 const app = new Hono();
 
-// Restart readiness probe (docs/orchestrator-loop.md §12). Cannot answer before the port
-// binds below, which waits on initDb(), so 200 here already implies DB connectivity too.
+// DAR-250: this used to answer 200 without ever touching mongo, so when docker (and mongo
+// with it) died the route stayed green while the API returned nothing — and the restart
+// poll below trusts exactly this route to decide the new process is actually up, so a green
+// healthz that never checked anything could authorise killing the only working server.
+// A bounded ping, not a scan: `db.command({ping:1})` is the cheapest round-trip mongo
+// offers. It's raced against a short local timeout rather than trusted to fail fast on its
+// own — the driver's default server-selection timeout is 30s, which would turn a dead mongo
+// into a healthz that hangs for 30s per poll instead of failing immediately.
+const HEALTHZ_MONGO_TIMEOUT_MS = 2000;
+async function pingMongo(): Promise<void> {
+  await Promise.race([
+    db.command({ ping: 1 }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('mongo ping timed out')), HEALTHZ_MONGO_TIMEOUT_MS)),
+  ]);
+}
+
+// Restart readiness probe (docs/orchestrator-loop.md §12). Cannot answer 200 before the port
+// binds below, which waits on initDb(), so a 200 here already implied DB connectivity AT
+// BOOT — this adds the same proof on every poll after boot too, since mongo can die later.
 // The pid header matters BECAUSE of reusePort: once two processes share the port, the
 // kernel may hand a poll to either one, so "some response" alone cannot tell the caller
 // the NEW process specifically is up — only a response carrying the new pid can.
-app.get('/healthz', (c) => {
+app.get('/healthz', async (c) => {
   c.header('x-darbar-pid', String(process.pid));
+  try {
+    await pingMongo();
+  } catch (e) {
+    // explicit about WHICH dependency is down, not just "not ok" — this is what a human
+    // (or the restart poll's caller, reading the failure) needs to not go debug the wrong thing
+    return c.text(`down: mongo (${String(e)})`, 503);
+  }
   return c.text('ok');
 });
 

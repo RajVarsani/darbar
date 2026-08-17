@@ -23,6 +23,40 @@ const app = new App({
   socketMode: true,
 });
 
+// DAR-250. Liveness that reflects the SOCKET, not the process: this process once sat alive
+// for 21h51m looping ECONNREFUSED on reconnect after the slack socket died, and pgrep called
+// it healthy the whole time. This file is touched ONLY while the underlying SocketModeClient
+// currently believes it is connected, so a stuck reconnect loop stops the touches and the
+// file's mtime goes stale — staleness (checked by sweep.py) is the signal, not the file's
+// mere existence. Explicitly NOT wiring this to exit the process on an unrecoverable socket:
+// that is a real behaviour change (who restarts it, and how) and is a call for Raj, not a
+// side effect of adding visibility.
+// @slack/bolt types App.receiver as private with no public accessor for socket state, so this
+// reaches the real SocketModeClient through `any` — there is no supported alternative today.
+const HEARTBEAT_PATH = new URL('../../../data/gabbar-heartbeat.json', import.meta.url).pathname;
+const HEARTBEAT_PULSE_MS = 30_000;
+let socketConnected = false;
+function writeHeartbeat() {
+  if (!socketConnected) return;
+  void Bun.write(HEARTBEAT_PATH, JSON.stringify({ ts: new Date().toISOString(), connected: true })).catch(() => {});
+}
+const socketClient = (app as any).receiver?.client;
+if (socketClient?.on) {
+  socketClient.on('connected', () => { socketConnected = true; writeHeartbeat(); });
+  // 'close' is the real websocket-level disconnect signal (fired before any retry/backoff
+  // decision is even made); 'reconnecting'/'disconnecting'/'disconnected' cover the rest of
+  // the state machine. A bare 'error' is NOT treated as a disconnect here — the client logs
+  // plenty of those on transient blips without actually dropping the connection, and flipping
+  // staleness on every one of those would make this noisy rather than trustworthy.
+  socketClient.on('close', () => { socketConnected = false; });
+  socketClient.on('reconnecting', () => { socketConnected = false; });
+  socketClient.on('disconnecting', () => { socketConnected = false; });
+  socketClient.on('disconnected', () => { socketConnected = false; });
+} else {
+  console.error('gabbar: could not reach receiver.client — socket liveness heartbeat will not be tracked');
+}
+setInterval(writeHeartbeat, HEARTBEAT_PULSE_MS);
+
 // skip our own replies, not everything bot-flavored: messages sent via the app's
 // own user token carry a bot_id but user = the real human
 let SELF_USER = '';
