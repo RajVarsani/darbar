@@ -949,8 +949,27 @@ async function maybeAdvanceParent(parentId: ObjectId) {
     await logEvent(parent.projectId, `${parent.shortId}: all reviews closed — awaiting explicit push out of in_review`, parent._id);
     return;
   }
+  // ---------- DAR-259: the advance itself is the lock ----------
+  // Every line above this one is a READ, so two review children closing together both find the
+  // parent in_review and both find zero open children before either writes. Measured on this rig,
+  // not argued: the very first race produced two "auto-advanced → done" events on one row.
+  //
+  // The status write is idempotent, which is why this stayed invisible; the CASCADE hanging off it
+  // is not. Both racers log the advance, and both go on to resolvePromotedFeedback — which resolves
+  // the same feedback rows twice and posts the "*FB-n resolved.*" reply into the real Slack thread
+  // once per racer. Duplicate events on the board and duplicate messages to a human are the damage.
+  //
+  // So the precondition this function already read moves INTO the write, and only the racer that
+  // actually flips the row runs the cascade. NARROW on purpose: this write is the one in_review →
+  // done advance, it carries no caller-supplied body, and the loser has nothing to report — its own
+  // request (closing a review child) landed in full and the parent really is done. Uncontended
+  // advances are unchanged: the same single write, no extra read.
   // dispatchedAt goes with the status change here too: a shipped task has nothing outstanding
-  await Tasks.updateOne({ _id: parentId }, { $set: { status: 'done', dispatchedAt: null, updatedAt: new Date() } });
+  const advanced = await Tasks.updateOne(
+    { _id: parentId, status: 'in_review' as TaskStatus },
+    { $set: { status: 'done', dispatchedAt: null, updatedAt: new Date() } },
+  );
+  if (advanced.matchedCount === 0) return; // a concurrent closer advanced it and owns the cascade
   await logEvent(parent.projectId, `${parent.shortId} auto-advanced → done (all reviews closed)`, parent._id);
   const shipped = await Tasks.findOne({ _id: parentId });
   if (shipped) await resolvePromotedFeedback(shipped);
@@ -2473,11 +2492,15 @@ api.post('/feedback', async (c) => {
   // the two doors onto a feedback row the CREATE door was the weak one, and it is the one the mess
   // came through.
   //
-  // Gated on the project having a stakeholder list, because that list is the only statement of who
-  // this project's reports come from. Without one there is nothing to check a name against and
-  // refusing would just block filing; with one, an author outside it is either a typo or a probe.
-  // Agents count too: an agent registered on the project is as real a reporter as a person, and the
-  // MCP file_feedback tool files under an agent's own name.
+  // Gated on the project having a ROSTER — stakeholders or agents — because between them they are
+  // the only statement of who this project's reports come from. With neither there is nothing to
+  // check a name against and refusing would just block bootstrapping; with either, an author outside
+  // it is either a typo or a probe. Agents count as reporters in their own right: the MCP
+  // file_feedback tool files under an agent's own name, and an agent-only project (REV on the live
+  // board: stakeholders [], agents [orchestrator, review-agent]) was the one shape the gate still
+  // let probes through, because it switched on off `people.length` while matching on both lists.
+  // DAR-257, Raj's call: agents should be able to file and others not. Accepted consequence — a
+  // human not on an agent-only roster is refused, and the error names the fix.
   //
   // Trimmed and case-folded through keyOf, the same normalisation the config uses for every other
   // identity key, so " Raj" and "raj" address the person the roster already knows rather than
@@ -2488,7 +2511,7 @@ api.post('/feedback', async (c) => {
   const people = (p.stakeholders ?? []).map((s) => s.name);
   const bots = (p.agents ?? []).map((a) => a.name);
   const knownAuthors = [...people, ...bots];
-  if (people.length) {
+  if (knownAuthors.length) {
     const roster = [
       people.length ? `stakeholders [${people.join(', ')}]` : '',
       bots.length ? `agents [${bots.join(', ')}]` : '',

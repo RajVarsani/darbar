@@ -413,11 +413,54 @@ test('a name is a lookup key, so it matches trimmed and case-folded, and an agen
   expect(agent.status).toBe(200);
 });
 
-test('with no stakeholder list there is nothing to check a name against, so filing stays open', async () => {
+test('with NEITHER list there is nothing to check a name against, so filing stays open', async () => {
   const p = await project();
   const filed = await req<{ author: string }>('POST', '/feedback', { project: p.prefix, body: 'no roster here' });
   expect(filed.status).toBe(200);
   expect(filed.body.author).toBe('unknown');
+});
+
+// ---------- 3b. DAR-257: agents alone are a roster ----------
+//
+// The gate matched against stakeholders ∪ agents from the day it was written, but switched ON off
+// the stakeholder half alone. So the one project shape made entirely of agents — REV on the live
+// board — was ungated end to end: `probe` filed as `probe`, no author filed as `unknown`, which is
+// the exact litter the gate exists to stop. Raj's call is that agents file and others do not.
+const AGENTS_ONLY = {
+  agents: [
+    { name: 'orchestrator', kind: 'lane-manager', brief: 'runs the board' },
+    { name: 'review-agent', kind: 'lane-manager', brief: 'reviews' },
+  ],
+};
+
+test('an agent files on a project that has agents and no stakeholders', async () => {
+  const p = await project(AGENTS_ONLY);
+  const filed = await req<{ author: string }>('POST', '/feedback', { project: p.prefix, author: 'review-agent', authorType: 'agent', body: 'lane finding' });
+  expect(filed.status).toBe(200);
+  expect(filed.body.author).toBe('review-agent');
+});
+
+test('probe litter is refused on an agent-only project, where it used to sail through', async () => {
+  const p = await project(AGENTS_ONLY);
+  const filed = await req('POST', '/feedback', { project: p.prefix, author: 'probe', body: 'test test' });
+  expect(filed.status).toBe(400);
+  expect(filed.error).toContain('"probe" is not on');
+
+  // and the no-author door, which stored the literal "unknown"
+  const anon = await req('POST', '/feedback', { project: p.prefix, body: 'test test' });
+  expect(anon.status).toBe(400);
+  expect(anon.error).toContain('author (non-empty string) required');
+});
+
+// the roster sentence is built from both halves; an empty stakeholder half must not leave a dangling
+// conjunction or a leading blank behind ("knows  and agents [...]")
+test('the roster sentence reads correctly with an empty stakeholder half', async () => {
+  const p = await project(AGENTS_ONLY);
+  const filed = await req('POST', '/feedback', { project: p.prefix, author: 'probe', body: 'x' });
+  expect(filed.error).toContain(`${p.prefix} knows agents [orchestrator, review-agent]`);
+  expect(filed.error).not.toContain('knows  ');
+  expect(filed.error).not.toContain(' and agents');
+  expect(filed.error).not.toContain('stakeholders []');
 });
 
 // str() alone cannot tell a WRONG type from an ABSENT field, so {author: 42} used to read as "no
@@ -976,4 +1019,97 @@ test('a query value the list does not understand is a 400, never a quiet fallbac
   const r = await req('GET', '/projects?archived=1');
   expect(r.status).toBe(400);
   expect(r.error).toContain('archived must be one of false, true, all');
+});
+
+// ---------- 2d. DAR-259: the two remaining read-then-write windows of the DAR-256 class ----------
+//
+// Both were LOCATED by reading code while DAR-256 was being fixed, never observed. Reproduction came
+// first here, and only the window that actually reproduced was fixed — window 1 below is kept as a
+// PROBE, not as a guard on a fix, because hardening against something unobserved is exactly the
+// blast radius this project refuses to take on. Same method as 2c: Promise.all against the real
+// routes on the real driver, repeated, because the interleaving is what is under test.
+const RACES_259 = 40;
+
+const eventsOf = async (prefix: string) =>
+  (await req<{ text: string }[]>('GET', `/projects/${prefix}/events?limit=50`)).body;
+
+// ---------- window 1: spawnReviews off the CREATE path — NOT REPRODUCED, NOT FIXED ----------
+//
+// Filed as "POST /tasks with status in_review reaches the same spawn with its own read-then-write".
+// It does reach the same spawn, but there is no second racer that can reach it for the SAME row:
+// every create inserts a freshly generated _id, so concurrent creates run spawnReviews against N
+// different parents, and openReviewCount is per-parent. The only other caller is the PATCH
+// entering-review path, which needs the row to leave in_review and come back — and no client can
+// address the row at all until the create has returned its shortId.
+//
+// Probed anyway rather than argued away: 8 concurrent creates × 120 iterations on each of four
+// shapes (explicit lanes, all lanes, lanes:[] which routes into maybeAdvanceParent, and a create
+// followed by an immediate concurrent re-entry), ~3,800 creates, zero doubled rounds. The cheap
+// shape is kept here so the claim stays checked; the source is untouched.
+test('DAR-259/1 probe: concurrent creates at in_review each get their own single round', async () => {
+  for (let i = 0; i < RACES_259; i++) {
+    await reset();
+    const p = await project();
+    const made = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        req<{ shortId: string }>('POST', '/tasks', {
+          project: p.prefix, title: 'retro-init at in_review', status: 'in_review', lanes: ['code-review', 'qa'],
+        })),
+    );
+    for (const r of made) {
+      expect(r.status, `iteration ${i}`).toBe(200);
+      // two lanes selected => exactly two children on that row. Four is a doubled round.
+      expect(await children(r.body.shortId), `iteration ${i} ${r.body.shortId}`).toHaveLength(2);
+    }
+  }
+});
+
+// ---------- window 2: maybeAdvanceParent — REPRODUCED on the first race, FIXED ----------
+//
+// Two review children closing together both read the parent as in_review and both read zero open
+// children before either writes, so both advance it. The status write is idempotent, which is why
+// this never showed up as a wrong status; what is NOT idempotent is everything hanging off it.
+// Before the fix this failed on iteration 0 with two "auto-advanced → done" events on one row.
+test('DAR-259/2: two review children closing at once advance the parent exactly ONCE', async () => {
+  for (let i = 0; i < RACES_259; i++) {
+    await reset();
+    const p = await project();
+    const t = await task(p.prefix, { lanes: ['code-review', 'qa'] });
+    await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_progress' });
+    await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+    const kids = await children(t.shortId);
+    expect(kids).toHaveLength(2);
+
+    const closes = await Promise.all(kids.map((k) => req('PATCH', `/tasks/${k.shortId}`, { status: 'done' })));
+
+    // both closers still succeed: the loser of the advance race lost nothing of its OWN request
+    for (const r of closes) expect(r.status, `iteration ${i}`).toBe(200);
+    expect(await statusOf(t.shortId), `iteration ${i}`).toBe('done');
+    const advanced = (await eventsOf(p.prefix)).filter((e) => e.text.includes('auto-advanced'));
+    expect(advanced, `iteration ${i}: ${advanced.map((e) => e.text).join(' | ')}`).toHaveLength(1);
+  }
+});
+
+// The damage the duplicate advance actually does is in the cascade, not the status: resolvePromoted-
+// Feedback runs once per racer, resolving the same promoted row twice and posting the resolution
+// into the real Slack thread once per racer. Pinned separately because it is the reason this window
+// was worth fixing at all — the status alone would have been a genuine no-op.
+test('DAR-259/2: the promoted-feedback cascade runs once, not once per closing lane', async () => {
+  for (let i = 0; i < RACES_259; i++) {
+    await reset();
+    const p = await project();
+    const t = await task(p.prefix, { lanes: ['code-review', 'qa'] });
+    const fb = await feedback({ project: p.prefix });
+    await req('PATCH', `/feedback/${fb.shortId}`, { status: 'accepted' });
+    await req('PATCH', `/feedback/${fb.shortId}`, { resolvedTaskRef: t.shortId });
+    await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_progress' });
+    await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+    const kids = await children(t.shortId);
+
+    await Promise.all(kids.map((k) => req('PATCH', `/tasks/${k.shortId}`, { status: 'done' })));
+
+    expect(await statusOf(t.shortId), `iteration ${i}`).toBe('done');
+    const resolved = (await eventsOf(p.prefix)).filter((e) => e.text.includes('auto-resolved'));
+    expect(resolved, `iteration ${i}: ${resolved.map((e) => e.text).join(' | ')}`).toHaveLength(1);
+  }
 });
