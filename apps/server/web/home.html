@@ -24,11 +24,11 @@
   .sub{font-family:var(--mono);font-size:11.5px;color:var(--soft);margin:4px 0 28px}
   .sub b{color:var(--gdeep)}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:18px}
-  .card{display:block;background:var(--beige);
+  .card{position:relative;display:block;background:var(--beige);
     border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:16px 18px;transition:.1s}
   .card:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 var(--ink)}
   .card-link{display:block;text-decoration:none;color:var(--ink)}
-  .card h2{font-family:var(--mono);font-size:15px;font-weight:700;margin-bottom:2px}
+  .card h2{font-family:var(--mono);font-size:15px;font-weight:700;margin-bottom:2px;padding-right:40px}
   .card .prefix{font-family:var(--mono);font-size:10px;font-weight:700;border:2px solid var(--ink);
     background:var(--beige2);padding:1px 7px;margin-left:8px;vertical-align:2px}
   .card .repos{font-family:var(--mono);font-size:10.5px;color:var(--soft);margin-bottom:12px}
@@ -56,18 +56,37 @@
   .card.arch .openrows{font-family:var(--mono);font-size:10px;color:var(--soft);margin-top:4px}
 
   /* archive / unarchive controls */
-  .card-actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
-  .card-actions button,.archive-panel button,.conflict-actions button{
+  .archive-panel button,.conflict-actions button{
     font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--ink);text-transform:lowercase;
     background:var(--beige2);border:2px solid var(--ink);padding:5px 10px;cursor:pointer;
     box-shadow:2px 2px 0 var(--ink);transition:.1s}
-  .card-actions button:hover,.archive-panel button:hover,.conflict-actions button:hover{
+  .archive-panel button:hover,.conflict-actions button:hover{
     transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--ink)}
-  .card-actions button:active,.archive-panel button:active,.conflict-actions button:active{
+  .archive-panel button:active,.conflict-actions button:active{
     transform:translate(0,0);box-shadow:0 0 0 var(--ink)}
-  .card-actions button:disabled,.archive-panel button:disabled,.conflict-actions button:disabled{
+  .archive-panel button:disabled,.conflict-actions button:disabled{
     opacity:.5;cursor:default;transform:none;box-shadow:2px 2px 0 var(--ink)}
   .btn-confirm{background:var(--ink)!important;color:var(--lime)!important}
+  /* ⋯ dot menu — sits outside .card-link, top-right, so it never adds a row */
+  .menu-trigger{position:absolute;top:14px;right:14px;z-index:2;width:24px;height:20px;
+    display:flex;align-items:center;justify-content:center;padding:0;
+    font-family:var(--mono);font-size:15px;font-weight:700;line-height:1;letter-spacing:1px;
+    color:var(--ink);background:var(--beige2);border:2px solid var(--ink);cursor:pointer;
+    box-shadow:2px 2px 0 var(--ink);transition:.1s}
+  .menu-trigger:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--ink)}
+  .menu-trigger:disabled{opacity:.5;cursor:default;transform:none;box-shadow:2px 2px 0 var(--ink)}
+  .menu-trigger[aria-expanded="true"]{background:var(--ink);color:var(--lime)}
+  .card-menu{position:absolute;top:38px;right:14px;z-index:3;min-width:118px;
+    background:var(--beige2);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink)}
+  .card-menu button{display:block;width:100%;text-align:left;font-family:var(--mono);
+    font-size:10.5px;font-weight:700;color:var(--ink);text-transform:lowercase;
+    background:transparent;border:0;padding:8px 12px;cursor:pointer}
+  .card-menu button:hover{background:var(--lime)}
+  .card.arch .menu-trigger{border-color:var(--faint);color:var(--soft);
+    box-shadow:2px 2px 0 var(--faint);background:transparent}
+  .card.arch .menu-trigger:hover{box-shadow:3px 3px 0 var(--faint)}
+  .card.arch .menu-trigger[aria-expanded="true"]{background:var(--faint);color:var(--beige2)}
+  .card.arch .card-menu{border-color:var(--faint);box-shadow:3px 3px 0 var(--faint)}
   .archive-panel{margin-top:12px;padding-top:12px;border-top:2px dashed var(--ink)}
   .archive-label{display:block;font-family:var(--mono);font-size:10px;color:var(--soft);margin-bottom:5px}
   .archive-reason{display:block;width:100%;font-family:var(--sans);font-size:12px;color:var(--ink);
@@ -80,9 +99,6 @@
   .conflict-hint{font-family:var(--mono);font-size:10px;color:var(--soft);margin-top:8px}
   .card-error{margin-top:12px;font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--ink);
     background:var(--beige2);border:2px solid var(--ink);padding:7px 9px}
-  .card.arch .card-actions button{border-color:var(--faint);color:var(--soft);
-    box-shadow:2px 2px 0 var(--faint);background:transparent}
-  .card.arch .card-actions button:hover{box-shadow:3px 3px 0 var(--faint)}
   .card.arch .card-error{border-color:var(--faint);color:var(--soft);background:transparent}
 </style>
 </head>
@@ -109,7 +125,8 @@ function cardHtml(p) {
         </div>
         <div class="progress"><i style="width:${pct}%"></i></div>
       </a>
-      <div class="card-actions"><button type="button" data-action="open-archive">archive</button></div>
+      <button type="button" class="menu-trigger" data-action="toggle-menu" aria-haspopup="true" aria-expanded="false" aria-label="project actions">&#8943;</button>
+      <div class="card-menu" hidden><button type="button" data-action="open-archive">archive</button></div>
       <div class="archive-panel" hidden>
         <label class="archive-label" for="reason-${esc(p.prefix)}">reason (optional)</label>
         <input type="text" class="archive-reason" id="reason-${esc(p.prefix)}" placeholder="why is this done?">
@@ -135,7 +152,8 @@ function archCardHtml(p) {
         ${reason}
         ${openRows}
       </a>
-      <div class="card-actions"><button type="button" data-action="unarchive">unarchive</button></div>
+      <button type="button" class="menu-trigger" data-action="toggle-menu" aria-haspopup="true" aria-expanded="false" aria-label="project actions">&#8943;</button>
+      <div class="card-menu" hidden><button type="button" data-action="unarchive">unarchive</button></div>
       <div class="card-error" hidden></div>
     </div>`;
 }
@@ -238,14 +256,33 @@ function reasonBody(card, extra) {
   return Object.assign({ archived: true }, reason ? { archiveReason: reason } : {}, extra || {});
 }
 
+// dot-menu: only one open at a time, closes on outside click / Escape
+function closeAllMenus() {
+  document.querySelectorAll('.card-menu').forEach(m => { m.hidden = true; });
+  document.querySelectorAll('.menu-trigger[aria-expanded="true"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeAllMenus();
+});
+
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-action]');
-  if (!btn) return;
+  if (!btn) { closeAllMenus(); return; }
   const card = btn.closest('.card');
   if (!card) return;
   const action = btn.dataset.action;
 
+  if (action === 'toggle-menu') {
+    const menu = card.querySelector('.card-menu');
+    const wasOpen = !menu.hidden;
+    closeAllMenus();
+    if (!wasOpen) { menu.hidden = false; btn.setAttribute('aria-expanded', 'true'); }
+    return;
+  }
+
   if (action === 'open-archive') {
+    closeAllMenus();
     const panel = card.querySelector('.archive-panel');
     const conflict = card.querySelector('.conflict');
     const confirmBtn = card.querySelector('.btn-confirm');
@@ -268,6 +305,7 @@ document.addEventListener('click', (e) => {
   } else if (action === 'force-archive') {
     patchArchive(card, reasonBody(card, { force: true }));
   } else if (action === 'unarchive') {
+    closeAllMenus();
     const prefix = card.dataset.prefix;
     setBusy(card, true);
     hideError(card);
