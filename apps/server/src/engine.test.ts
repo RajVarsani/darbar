@@ -712,3 +712,268 @@ test('a tick with nothing connected costs nothing: no board, no delta', async ()
   expect(w.frames.length).toBeGreaterThan(0);
   await w.close();
 });
+
+// ---------- archiving a finished project ----------
+//
+// The gate here is not really about a flag, it is about the doctrine. This board's standing rule is
+// that it carries ALL pending work, and an empty todo column while work is pending is a bug. An
+// archive with open rows would satisfy every check on that board by making the work invisible, which
+// is the doctrine defeated in one write rather than met. So the honest answers (cancel them and say
+// why, or leave them open and record how many) are what is pinned below, along with the two silent
+// failures the vocabulary exists to stop: an archive word sent with the wrong TYPE, and an archive
+// word MISSPELLED so it never arrives at all.
+
+const projRow = async (ref: string) => (await req<{ archivedAt: string | null; archiveReason: string | null; archivedOpenRows: number | null }>('GET', `/projects/${ref}/context`)).body;
+const listPrefixes = async (q = '') =>
+  (await req<unknown>('GET', `/projects${q}`)).body as unknown as Array<{ prefix: string; archivedAt: string | null }>;
+
+test('a project with open rows cannot be archived silently: the 409 counts them and names both ways out', async () => {
+  const p = await project();
+  const a = await task(p.prefix, { title: 'did not make it' });
+  const b = await task(p.prefix, { title: 'also open' });
+  const shipped = await task(p.prefix, { lanes: [] });
+  await req('PATCH', `/tasks/${shipped.shortId}`, { status: 'done' });
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true });
+  expect(r.status).toBe(409);
+  expect(r.error).toContain('2 open row(s)');
+  expect(r.error).toContain(a.shortId);
+  expect(r.error).toContain(b.shortId);
+  expect(r.error).toContain('"cancelOpen": true');
+  expect(r.error).toContain('"force": true');
+  // and it did not half-archive on the way to refusing
+  expect((await projRow(p.prefix)).archivedAt).toBeNull();
+});
+
+test('a project with nothing open archives on its own, and the timestamp is what it records', async () => {
+  const p = await project();
+  const t = await task(p.prefix, { lanes: [] });
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'done' });
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, archiveReason: 'round 2 shipped' });
+  expect(r.status).toBe(200);
+  const row = await projRow(p.prefix);
+  expect(typeof row.archivedAt).toBe('string');
+  expect(Number.isNaN(Date.parse(row.archivedAt!))).toBe(false);
+  expect(row.archiveReason).toBe('round 2 shipped');
+  expect(row.archivedOpenRows).toBe(0);
+});
+
+test('cancelOpen closes the open rows AND writes onto each one why it was cancelled', async () => {
+  const p = await project();
+  const open = await task(p.prefix, { title: 'never staffed' });
+  const withNotes = await task(p.prefix, { title: 'half done', notes: 'builder got as far as the parser' });
+  const done = await task(p.prefix, { lanes: [] });
+  await req('PATCH', `/tasks/${done.shortId}`, { status: 'done' });
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, cancelOpen: true, archiveReason: 'round 2 is over' });
+  expect(r.status).toBe(200);
+
+  for (const ref of [open.shortId, withNotes.shortId]) {
+    const t = (await req<{ status: string; notes: string }>('GET', `/tasks/${ref}`)).body;
+    expect(t.status).toBe('cancelled');
+    // the WHY, on the row itself: which project ended it, and when
+    expect(t.notes).toContain(`${p.prefix} was archived on`);
+    expect(t.notes).toContain('did not ship');
+    expect(t.notes).toContain('round 2 is over');
+    expect(t.notes).toContain(new Date().toISOString().slice(0, 10));
+  }
+  // a builder's own notes are the other half of the story, so the reason is APPENDED, never over it
+  const kept = (await req<{ notes: string }>('GET', `/tasks/${withNotes.shortId}`)).body;
+  expect(kept.notes).toContain('builder got as far as the parser');
+  // a row that was already done is not re-touched by the cascade
+  expect((await req<{ status: string; notes: string }>('GET', `/tasks/${done.shortId}`)).body.status).toBe('done');
+  expect((await req<{ notes: string }>('GET', `/tasks/${done.shortId}`)).body.notes).toBe('');
+  // nothing was left open, so nothing was left behind
+  expect((await projRow(p.prefix)).archivedOpenRows).toBe(0);
+});
+
+test('cancelOpen reaches review children too, since an open lane is open work', async () => {
+  const p = await project();
+  const t = await task(p.prefix, { lanes: ['code-review', 'qa'] });
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+  const kids = await children(t.shortId);
+  expect(kids).toHaveLength(2);
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, cancelOpen: true });
+  expect(r.status).toBe(200);
+  for (const k of kids) {
+    expect((await req<{ status: string }>('GET', `/tasks/${k.shortId}`)).body.status).toBe('cancelled');
+  }
+  expect(await statusOf(t.shortId)).toBe('cancelled');
+});
+
+test('force archives and LEAVES the rows open, and the count of what was left is on the project', async () => {
+  const p = await project();
+  const a = await task(p.prefix);
+  const b = await task(p.prefix);
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, force: true, archiveReason: 'work continues on MRFIII' });
+  expect(r.status).toBe(200);
+
+  // still open, untouched, still on their board
+  expect(await statusOf(a.shortId)).toBe('todo');
+  expect(await statusOf(b.shortId)).toBe('todo');
+  expect((await req<{ notes: string }>('GET', `/tasks/${a.shortId}`)).body.notes).toBe('');
+
+  const row = await projRow(p.prefix);
+  expect(row.archivedOpenRows).toBe(2);
+  // the human's sentence is stored as they wrote it and is not rewritten to carry the count
+  expect(row.archiveReason).toBe('work continues on MRFIII');
+});
+
+test('cancelOpen and force are opposite answers, so sending both is refused rather than one winning', async () => {
+  const p = await project();
+  const t = await task(p.prefix);
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, cancelOpen: true, force: true });
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('opposite answers');
+  expect(await statusOf(t.shortId)).toBe('todo');
+  expect((await projRow(p.prefix)).archivedAt).toBeNull();
+});
+
+test('unarchiving clears the timestamp, the reason and the count', async () => {
+  const p = await project();
+  await req('PATCH', `/projects/${p.prefix}`, { archived: true, force: true, archiveReason: 'shipped' });
+  expect((await projRow(p.prefix)).archivedAt).not.toBeNull();
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: false });
+  expect(r.status).toBe(200);
+  const row = await projRow(p.prefix);
+  expect(row.archivedAt).toBeNull();
+  expect(row.archiveReason).toBeNull();
+  expect(row.archivedOpenRows).toBeNull();
+  // and it is back in the default list
+  expect((await listPrefixes()).map((x) => x.prefix)).toContain(p.prefix);
+});
+
+test('rows a cancelOpen archive closed are NOT resurrected by unarchiving, because that was a decision', async () => {
+  const p = await project();
+  const t = await task(p.prefix);
+  await req('PATCH', `/projects/${p.prefix}`, { archived: true, cancelOpen: true });
+  await req('PATCH', `/projects/${p.prefix}`, { archived: false });
+  expect(await statusOf(t.shortId)).toBe('cancelled');
+});
+
+test('re-archiving is refused, because re-stamping the date destroys the one fact the field is for', async () => {
+  const p = await project();
+  await req('PATCH', `/projects/${p.prefix}`, { archived: true, archiveReason: 'first ending' });
+  const first = (await projRow(p.prefix)).archivedAt;
+
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, archiveReason: 'second ending' });
+  expect(r.status).toBe(409);
+  expect(r.error).toContain('already archived');
+  // The STATUS alone does not pin this guard, and finding that out is the point of the assertions
+  // below. The conditional write further down refuses a second archive by itself (its claim filter
+  // matches only a not-archived project), so deleting the read guard still produces a 409. What it
+  // produces is the RACE sentence: "another write settled that while this one was in flight", which
+  // is simply false about somebody archiving the same finished project twice by hand, and it tells
+  // them to re-read and retry rather than telling them the date they would have destroyed. So what
+  // this guard owes is the right explanation, and that is what is pinned.
+  expect(r.error).toContain('re-stamp');
+  expect(r.error).toContain('{"archived": false}');
+  expect(r.error).not.toContain('another write settled');
+  const after = await projRow(p.prefix);
+  expect(after.archivedAt).toBe(first!);
+  expect(after.archiveReason).toBe('first ending');
+});
+
+test('unarchiving a project that was never archived is refused rather than answering 200 about nothing', async () => {
+  const p = await project();
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: false });
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('not archived');
+});
+
+// ---------- the silent-drop guards on the archive words ----------
+
+test('an archive word sent with the wrong type is a 400, not a non-boolean read as "not archived"', async () => {
+  const p = await project();
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: 'true' });
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('archived must be true or false');
+  expect((await projRow(p.prefix)).archivedAt).toBeNull();
+
+  const f = await req('PATCH', `/projects/${p.prefix}`, { archived: true, force: 'yes' });
+  expect(f.status).toBe(400);
+  expect(f.error).toContain('force must be true or false');
+  expect((await projRow(p.prefix)).archivedAt).toBeNull();
+});
+
+test('a misspelled cancelOpen does not quietly mean "no": the row survives and the gate still fires', async () => {
+  const p = await project();
+  const t = await task(p.prefix);
+  const r = await req('PATCH', `/projects/${p.prefix}`, { archived: true, cancelOpne: true });
+  expect(r.status).toBe(409);
+  expect(r.error).toContain('1 open row(s)');
+  // the thing that must never happen: archived anyway, with the row swallowed
+  expect((await projRow(p.prefix)).archivedAt).toBeNull();
+  expect(await statusOf(t.shortId)).toBe('todo');
+});
+
+test('the archive modifiers mean nothing without the act, so they are refused instead of dropped', async () => {
+  const p = await project();
+  for (const body of [{ archiveReason: 'over' }, { cancelOpen: true }, { force: true }, { charter: 'x', cancelOpen: true }]) {
+    const r = await req('PATCH', `/projects/${p.prefix}`, body);
+    expect(r.status).toBe(400);
+    expect(r.error).toContain('not settable here');
+  }
+  // and the charter that rode along with the refused word did NOT apply
+  expect((await req<{ charter: string }>('GET', `/projects/${p.prefix}`)).body.charter).toBe('');
+});
+
+test('archivedAt is server-owned, so a hand-set timestamp is refused rather than believed', async () => {
+  const p = await project();
+  for (const k of ['archivedAt', 'archivedOpenRows']) {
+    const r = await req('PATCH', `/projects/${p.prefix}`, { [k]: k === 'archivedAt' ? new Date().toISOString() : 5 });
+    expect(r.status).toBe(400);
+    expect(r.error).toContain(k);
+  }
+});
+
+test('archiving is not something a project can be CREATED as, and the create route says so', async () => {
+  const r = await req('POST', '/projects', { name: 'born finished', prefix: 'ZZA', archived: true });
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('archived');
+  expect(r.error).toContain('PATCH /api/projects/:ref');
+});
+
+test('unarchiving is not the door for the archive modifiers either', async () => {
+  const p = await project();
+  await req('PATCH', `/projects/${p.prefix}`, { archived: true });
+  for (const body of [{ archived: false, cancelOpen: true }, { archived: false, force: true }, { archived: false, archiveReason: 'x' }]) {
+    const r = await req('PATCH', `/projects/${p.prefix}`, body);
+    expect(r.status).toBe(400);
+    expect(r.error).toContain('not settable here');
+  }
+  expect((await projRow(p.prefix)).archivedAt).not.toBeNull(); // and none of them unarchived it either
+});
+
+// ---------- what GET /projects lists by default ----------
+
+test('the project list leaves archived projects out by default, and every row says which it is', async () => {
+  const live = await project();
+  const gone = await project();
+  await req('PATCH', `/projects/${gone.prefix}`, { archived: true, archiveReason: 'shipped' });
+
+  const def = await listPrefixes();
+  expect(def.map((p) => p.prefix)).toEqual([live.prefix]);
+  // present on every row, whichever query was sent, so a consumer never has to guess
+  expect(def[0]!.archivedAt).toBeNull();
+
+  const only = await listPrefixes('?archived=true');
+  expect(only.map((p) => p.prefix)).toEqual([gone.prefix]);
+  expect(typeof only[0]!.archivedAt).toBe('string');
+
+  const both = await listPrefixes('?archived=all');
+  expect(both.map((p) => p.prefix).sort()).toEqual([live.prefix, gone.prefix].sort());
+  expect(await listPrefixes('?archived=false')).toEqual(def);
+});
+
+test('a query value the list does not understand is a 400, never a quiet fallback to the default', async () => {
+  const gone = await project();
+  await req('PATCH', `/projects/${gone.prefix}`, { archived: true });
+  const r = await req('GET', '/projects?archived=1');
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('archived must be one of false, true, all');
+});

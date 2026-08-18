@@ -156,6 +156,26 @@ export type Project = {
   proxyPublished?: PublishedRoute[];
   counters: { task: number; feedback: number };
   createdAt: Date;
+  // ---------- archiving: a finished project comes OFF the active board ----------
+  // A TIMESTAMP, not a boolean, for the same reason dispatchedAt is: when it was finished is the
+  // thing you want later, and a boolean throws it away on the one write that could have recorded it.
+  // Absent on every project registered before this existed, and that is the honest reading: never
+  // archived, not "we lost the date". Nothing is backfilled. null means the same as absent and is
+  // what an UNARCHIVE writes, because a field that has been cleared is worth telling apart from one
+  // that was never set. Every read normalises both to null so a consumer never has to know which.
+  archivedAt?: Date | null;
+  /** why it was finished, in the words of whoever archived it. A project archived with no reason is
+   *  a project nobody can explain in a month, which is why the doors ask for one. */
+  archiveReason?: string;
+  /**
+   * Rows still OPEN at the moment it was archived and deliberately LEFT open, which only happens on
+   * a forced archive. 0 on every honest archive, including one that cancelled its open rows.
+   *
+   * Server-owned and counted at archive time. It exists because forcing is the one path that takes
+   * pending work off every active surface without closing it, and a count that lives only in an
+   * event line is a count nobody reads. The rows themselves are untouched and still on their board.
+   */
+  archivedOpenRows?: number;
 };
 
 // jira-style workflow; blocked stays a status (visible column) with the free-text `blocker` field carrying the why

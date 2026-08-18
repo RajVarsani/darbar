@@ -1155,7 +1155,7 @@ function buildTools(ctx: AgentContext) {
   return [
     betaTool({
       name: 'list_projects',
-      description: 'List all Darbar projects with prefixes, board URLs and counts (tasks done, feedback waiting). Call this to find which projects exist or to resolve an ambiguous project reference.',
+      description: 'List all Darbar projects with prefixes, board URLs and counts (tasks done, feedback waiting). ACTIVE projects only: an archived project will not appear here, so do not tell someone their project does not exist just because it is missing from this list. get_board still reaches an archived project by name. Call this to find which projects exist or to resolve an ambiguous project reference.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       run: async () => mc('/projects'),
     }),
@@ -1168,7 +1168,8 @@ function buildTools(ctx: AgentContext) {
         required: ['project'], additionalProperties: false,
       },
       run: async ({ project }: any) => {
-        const listed = await fetchDarbar('/projects');
+        // archived included: asking about a finished project is normal, not an error
+        const listed = await fetchDarbar('/projects?archived=all');
         // the last place an outage read as a fact: "project not found" when darbar is simply down
         if (!listed.reachable) return JSON.stringify({ error: `${listed.detail}, so i cannot tell you what exists right now`, unreachable: true });
         const list = listed.json as unknown as Array<{ prefix: string; name: string; capId: string }>;

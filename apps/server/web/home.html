@@ -39,24 +39,35 @@
   .progress i{display:block;height:100%;background:var(--green)}
   .empty{font-family:var(--mono);color:var(--soft);padding:40px 0}
   .note{margin-top:34px;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  details.arch-wrap{margin-top:30px}
+  details.arch-wrap summary{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--soft);
+    cursor:pointer;list-style:none;user-select:none}
+  details.arch-wrap summary::-webkit-details-marker{display:none}
+  details.arch-wrap summary::before{content:'▸ ';display:inline-block;width:1em}
+  details.arch-wrap[open] summary::before{content:'▾ '}
+  .arch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-top:12px}
+  a.card.arch{padding:9px 12px;border-color:var(--faint);box-shadow:2px 2px 0 var(--faint);background:transparent}
+  a.card.arch:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--faint)}
+  a.card.arch h2{font-size:12.5px;color:var(--soft);margin-bottom:0}
+  a.card.arch .prefix{border-color:var(--faint);color:var(--soft);background:transparent;font-size:9px}
+  a.card.arch .meta{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:3px}
+  a.card.arch .reason{font-family:var(--sans);font-size:10.5px;color:var(--soft);margin-top:4px}
+  a.card.arch .openrows{font-family:var(--mono);font-size:10px;color:var(--soft);margin-top:4px}
 </style>
 </head>
 <body>
 <h1>DARBAR · projects</h1>
 <div class="sub">local-only console. this page and the full api <b>403 through the tunnel</b>; only boards are shared.</div>
 <div class="grid" id="grid"><div class="empty">loading…</div></div>
+<div id="archived"></div>
 <div class="note">boards open on the tunnel url (shareable). manage projects via the api or /darbar-project-init.</div>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-(async () => {
-  const r = await fetch('/api/projects');
-  const list = await r.json();
-  const grid = document.getElementById('grid');
-  if (!Array.isArray(list) || !list.length) { grid.innerHTML = '<div class="empty">no projects yet. run /darbar-project-init in a claude session.</div>'; return; }
-  grid.innerHTML = list.map(p => {
-    const c = p.counts || {tasks:0, done:0, pendingFb:0};
-    const pct = c.tasks ? Math.round(c.done / c.tasks * 100) : 0;
-    return `<a class="card" href="${esc(p.boardUrl)}">
+
+function cardHtml(p) {
+  const c = p.counts || {tasks:0, done:0, pendingFb:0};
+  const pct = c.tasks ? Math.round(c.done / c.tasks * 100) : 0;
+  return `<a class="card" href="${esc(p.boardUrl)}">
       <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
       <div class="repos">${esc((p.repos||[]).join(' · ')) || 'no repos'}</div>
       <div class="nums">
@@ -66,7 +77,39 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
       </div>
       <div class="progress"><i style="width:${pct}%"></i></div>
     </a>`;
-  }).join('');
+}
+
+function archCardHtml(p) {
+  const dateStr = p.archivedAt ? new Date(p.archivedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '';
+  const reason = p.archiveReason ? `<div class="reason">${esc(p.archiveReason)}</div>` : '';
+  const openRows = (typeof p.archivedOpenRows === 'number' && p.archivedOpenRows > 0)
+    ? `<div class="openrows">${esc(p.archivedOpenRows)} rows left open</div>` : '';
+  return `<a class="card arch" href="${esc(p.boardUrl)}">
+      <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
+      <div class="meta">${dateStr ? 'archived ' + esc(dateStr) : 'archived'}</div>
+      ${reason}
+      ${openRows}
+    </a>`;
+}
+
+function archivedSectionHtml(archived) {
+  if (!archived.length) return '';
+  return `<details class="arch-wrap">
+      <summary>archived (${archived.length})</summary>
+      <div class="arch-grid">${archived.map(archCardHtml).join('')}</div>
+    </details>`;
+}
+
+(async () => {
+  const r = await fetch('/api/projects?archived=all');
+  const list = await r.json();
+  const grid = document.getElementById('grid');
+  const archivedEl = document.getElementById('archived');
+  if (!Array.isArray(list) || !list.length) { grid.innerHTML = '<div class="empty">no projects yet. run /darbar-project-init in a claude session.</div>'; return; }
+  const live = list.filter(p => !p.archivedAt);
+  const archived = list.filter(p => p.archivedAt);
+  grid.innerHTML = live.length ? live.map(cardHtml).join('') : '<div class="empty">no active projects.</div>';
+  archivedEl.innerHTML = archivedSectionHtml(archived);
 })();
 </script>
 </body>

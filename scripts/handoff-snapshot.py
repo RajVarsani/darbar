@@ -53,7 +53,10 @@ def main():
             live = []
         else:
             items = projects if isinstance(projects, list) else projects.get('projects', [])
-            live = [p.get('prefix') for p in items if p.get('prefix')]
+            # Archived projects are closed by choice; do not let their leftover open rows pad
+            # the handoff. Only the DISCOVERED path is filtered - an explicit LIVE= is a
+            # deliberate narrowing and is trusted as-is.
+            live = [p.get('prefix') for p in items if p.get('prefix') and not p.get('archivedAt')]
     if not live:
         out.append('BOARD: could not list projects on 4899')
         live = []

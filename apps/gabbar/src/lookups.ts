@@ -28,7 +28,8 @@ import { fetchDarbar } from './agent';
  * across two lines. A guard that passes on the bug it was built for is worse than no guard.
  */
 export async function senderName(client: any, userId: string): Promise<string> {
-  const f = await fetchDarbar('/projects');
+  // identity lookup, not a work-surface listing: a stakeholder only on an archived project must still resolve
+  const f = await fetchDarbar('/projects?archived=all');
   if (f.reachable) {
     // /projects is an array; fetchDarbar passes arrays through untouched for exactly this
     const projects = f.json as unknown as Array<{ stakeholders?: Array<{ slackUserId?: string; name: string }> }>;

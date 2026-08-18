@@ -31,11 +31,14 @@ const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x) => typ
 // caller then reads that as "not sent". So a field with the wrong type was dropped under a 200 —
 // the DAR-187 defect class, one layer down from the routes. This says so instead. Absent stays
 // absent; only a field the caller actually sent is judged.
-type FieldType = 'string' | 'string|null' | 'string[]';
+type FieldType = 'string' | 'string|null' | 'string[]' | 'boolean';
 const FIELD_WANT: Record<FieldType, string> = {
   string: 'a string',
   'string|null': 'a string or null',
   'string[]': 'an array of strings',
+  // the shape the two boolean verbs already in this file (dispatched, reviewAgain) hand-check for.
+  // A boolean sent as "true" read as absent is how {"archived": "true"} would mean "not archived".
+  boolean: 'true or false',
 };
 function typeErrors(b: Record<string, unknown>, spec: Record<string, FieldType>): string[] {
   const errs: string[] = [];
@@ -44,6 +47,7 @@ function typeErrors(b: Record<string, unknown>, spec: Record<string, FieldType>)
     if (v === undefined) continue;
     const ok = want === 'string' ? typeof v === 'string'
       : want === 'string|null' ? v === null || typeof v === 'string'
+      : want === 'boolean' ? typeof v === 'boolean'
       : Array.isArray(v) && v.every((x) => typeof x === 'string');
     if (!ok) errs.push(`${k} must be ${FIELD_WANT[want]} (got ${JSON.stringify(v)})`);
   }
@@ -132,7 +136,26 @@ const PROJECT_VOCAB: FieldVocab = {
   counters: 'the short-id counters belong to the server; a hand-set value re-issues an id that already exists',
   proxyPublished: 'that is the record of what the server actually put in the proxy route table, not a setting. Change `proxy` and the reconciliation rewrites it',
   createdAt: 'stamped by the server at create',
+  // ---------- the archive words ----------
+  // `archived` is the VERB and archivedAt is the record, the same split as dispatched/dispatchedAt:
+  // the server owns the clock so the stamp and the age a reader takes off it cannot disagree. The
+  // other three are modifiers that only mean something ON an archive act, so anywhere else they are
+  // a caller believing they asked for something. They are in this table so that is a 400 naming the
+  // right door, rather than the silent drop under a 200 that DAR-208 spent a day closing.
+  archived: 'archiving is its own act: PATCH /api/projects/:ref {"archived": true} to take a finished project off the active board, {"archived": false} to put it back',
+  archivedAt: 'the server owns that clock: send {"archived": true} to stamp it now, false to clear it. When a project was finished is the thing the field is for, so it is not hand-settable',
+  archiveReason: 'a reason belongs to the act that needs one: PATCH /api/projects/:ref {"archived": true, "archiveReason": "…"}. On its own it would be a reason for nothing, and unarchiving clears it',
+  archivedOpenRows: 'the server counts what was still open when a project was forced into the archive; it is a record of what was left behind, not a setting',
+  cancelOpen: 'that answers a question only archiving asks: PATCH /api/projects/:ref {"archived": true, "cancelOpen": true} cancels the still-open rows as part of archiving',
+  force: 'that answers a question only archiving asks: PATCH /api/projects/:ref {"archived": true, "force": true} archives and leaves the open rows open',
 };
+
+// The archive act, and why it is not in CONFIG_FIELDS below. Config fields are declared wholesale at
+// init and re-declared freely; this is a LIFECYCLE transition with a gate, a cascade onto tasks and
+// a server-owned clock. Keeping them apart is also what stops POST /projects from silently eating
+// {"archived": true} at create: that route declares CONFIG_FIELDS applied, so an archive word sent
+// to it falls through to the vocabulary above and is refused by name instead of dropped.
+const ARCHIVE_FIELDS = ['archived', 'archiveReason', 'cancelOpen', 'force'];
 
 // The seven fields the config write path DOES apply, for use on the granular routes, where each of
 // them is somebody else's door. Sending {text, repos} to /charter/append appended the line and
@@ -953,6 +976,35 @@ async function resolvePromotedFeedback(task: Task) {
   for (const id of filedOn.values()) await maybeAdvanceParent(id);
 }
 
+// ---------- project archived with cancelOpen: close the rows, and say why on each one ----------
+// Direct writes rather than a re-entry into PATCH /tasks/:ref, the same way resolvePromotedFeedback
+// does it: this is one decision cascading, not N independent edits, and the task route's own gates
+// are about a row moving on its own (the done-gate, the lanes freeze, the review-round guard) and
+// mean nothing to a row being closed because its project ended.
+//
+// The REASON is the point. A row that just turns up cancelled with an empty note is unreadable in a
+// month, which is the same defect as an archive with no reason one level down. It is APPENDED to
+// `notes` and never overwrites them, because whatever the builder wrote there is the other half of
+// the story. This is also the shape the project-init skill already teaches by hand ("cancel what
+// will not be done, with a reason in notes"), so a cancelled row reads the same however it got there.
+//
+// ONE event for the whole cascade, not one per row: logEvent pushes an SSE tick to every connected
+// board, and 82 of those is a burst that buries the archive itself. The per-row record lives in the
+// notes, which is where somebody looking at that row will actually be.
+async function cancelForArchive(p: Project, rows: Task[], at: Date, reason?: string) {
+  const day = at.toISOString().slice(0, 10);
+  const why = `cancelled: ${p.prefix} was archived on ${day} and this row was still open, so it did not ship.${reason ? ` Archive reason: ${reason}` : ''}`;
+  for (const t of rows) {
+    const notes = t.notes ? `${t.notes.replace(/\s+$/, '')}\n${why}` : why;
+    // dispatchedAt goes with the status change, as everywhere else: a closed row has nothing
+    // outstanding, and a stamp left behind would read as a live hand-off on the board
+    await Tasks.updateOne({ _id: t._id }, { $set: { status: 'cancelled', notes, dispatchedAt: null, updatedAt: new Date() } });
+  }
+  const ids = rows.map((t) => t.shortId);
+  const named = ids.slice(0, 8).join(', ') + (ids.length > 8 ? `, and ${ids.length - 8} more` : '');
+  await logEvent(p._id!, `${rows.length} open row(s) cancelled by the archive of ${p.prefix}: ${named}. Each row carries the reason in its notes`);
+}
+
 async function resolveProject(ref: string) {
   if (ObjectId.isValid(ref)) {
     const byId = await Projects.findOne({ _id: new ObjectId(ref) });
@@ -1031,8 +1083,28 @@ api.post('/projects', async (c) => {
   return c.json({ ...r.doc, boardUrl: `${config.baseUrl}/p/${doc.capId}`, warnings: r.warnings });
 });
 
+// ---------- the archived default, and why it is exclude ----------
+// Four things read this list and every one of them treats it as "the projects that are live": the
+// console grid, the MCP and Gabbar project tools, the tick sweep and the handoff snapshot. So the
+// question is which way a consumer that has NOT been updated should fail. Defaulting to include
+// means every one of them has to grow a filter, and the one that forgets reports finished work as
+// pending forever, which is the thing archiving exists to stop. Defaulting to exclude means an
+// un-updated consumer gets the SAFE answer and the cost is a project that is merely harder to find,
+// which the explicit parameter fixes and which `archivedAt` on every row makes visible anyway.
+//
+// A BAD VALUE IS A 400, not a fallback to the default. `?archived=1` silently meaning "active only"
+// is the same silent drop as a body field a route does not apply, one layer along in the query
+// string, and it would hide exactly the projects the caller asked to see.
+const ARCHIVED_QUERY = ['false', 'true', 'all'];
 api.get('/projects', async (c) => {
-  const list = await Projects.find({}, { projection: { charter: 0 } }).sort({ createdAt: -1 }).toArray();
+  const want = c.req.query('archived') ?? 'false';
+  if (!ARCHIVED_QUERY.includes(want)) {
+    return c.json({ error: `archived must be one of ${ARCHIVED_QUERY.join(', ')} (got ${JSON.stringify(want)}); it defaults to "false", which lists ACTIVE projects only. "true" lists archived projects only and "all" lists both. Every row carries archivedAt either way` }, 400);
+  }
+  // `archivedAt: null` matches an explicit null AND a missing field, which is exactly the population
+  // of projects that were registered before archiving existed plus every one since put back.
+  const scope = want === 'all' ? {} : want === 'true' ? { archivedAt: { $ne: null } } : { archivedAt: null };
+  const list = await Projects.find(scope, { projection: { charter: 0 } }).sort({ createdAt: -1 }).toArray();
   const withCounts = await Promise.all(list.map(async (p) => {
     const [tasks, done, pendingFb] = await Promise.all([
       Tasks.countDocuments({ projectId: p._id }),
@@ -1044,6 +1116,10 @@ api.get('/projects', async (c) => {
     // that carries the upstream. (redactProxy/redactPublished are defined with that endpoint.)
     return {
       ...p, boardUrl: `${config.baseUrl}/p/${p.capId}`, counts: { tasks, done, pendingFb },
+      // ALWAYS present, normalised to null, whatever was asked for. A consumer must be able to tell
+      // live from archived off the row itself rather than off which query it happened to send, and
+      // absent-vs-null is a distinction no reader of this list should have to know about.
+      archivedAt: p.archivedAt ?? null,
       ...(p.proxy ? { proxy: redactProxy(p.proxy) } : {}),
       ...(p.proxyPublished ? { proxyPublished: redactPublished(p.proxyPublished) } : {}),
     };
@@ -1071,13 +1147,27 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
   // str() returned undefined, the field was skipped, and the write still reported success on
   // everything sent. Every other field here already errors on a shape it cannot store; these two
   // were the exceptions (DAR-187 item 5).
-  const badTypes = typeErrors(b, { charter: 'string', slackChannel: 'string|null', repos: 'string[]' });
+  const badTypes = typeErrors(b, {
+    charter: 'string', slackChannel: 'string|null', repos: 'string[]',
+    // typed here rather than hand-checked below so {"archived": "true"} is a 400 that says what is
+    // wrong, instead of a non-boolean read as absent and quietly meaning "not archived"
+    archived: 'boolean', cancelOpen: 'boolean', force: 'boolean', archiveReason: 'string',
+  });
   if (badTypes.length) return { error: badTypes.join(' | '), status: 400 };
+  // The archive words are applied HERE and nowhere else, and only on a patch that is actually
+  // archiving: `archiveReason`, `cancelOpen` and `force` sent without `archived` are a caller
+  // believing they asked for something, so they get the vocabulary 400 naming the real door rather
+  // than a 200 that did none of it. `false` on the two flags is exempt for the same reason
+  // reviewAgain:false is exempt on PATCH /tasks: nothing here reads false as an instruction, so
+  // declining an option on an unrelated patch has not claimed anything untrue about that patch.
+  const archiveApplied = b.archived !== undefined
+    ? ARCHIVE_FIELDS
+    : (['cancelOpen', 'force'] as const).filter((k) => b[k] === false);
   // DAR-208. There was no repos branch and no granular route, so {repos, charter} applied the
   // charter and dropped repos under a 200 — and the charter is the thing that tells every builder
   // which repo and branch it is working in, so the drop hands agents the wrong one. It is a plain
   // wholesale list like stakeholders/agents: sent, replaced; absent, untouched.
-  const badFields = notApplied(b, PROJECT_VOCAB, CONFIG_FIELDS, p as unknown as Record<string, unknown>);
+  const badFields = notApplied(b, PROJECT_VOCAB, [...CONFIG_FIELDS, ...archiveApplied], p as unknown as Record<string, unknown>);
   if (badFields) {
     return { error: `${badFields}. If you are editing a project by reading it and sending it back, GET /api/projects/${p.prefix} returns exactly the body this route accepts`, status: 400 };
   }
@@ -1142,18 +1232,110 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
       proxyChange = { after: parsed.proxy };
     }
   }
-  if (Object.keys(set).length === 0 && Object.keys(unset).length === 0) {
-    return { error: `nothing to update (${CONFIG_FIELDS.join(', ')})`, status: 400 };
+  // ---------- archiving: the honest way a finished project leaves the active board ----------
+  // Until this existed the only way off was deleting the project out of mongo by hand, which throws
+  // away the charter, the event log and every row it ever carried. The design problem is not the
+  // flag, it is that this project's standing doctrine says the board carries ALL pending work and an
+  // empty todo column while work is pending is a bug. Archiving a project with 82 open rows would
+  // swallow all 82 in one write and satisfy every check on the board by making the work invisible,
+  // which is the doctrine defeated rather than met.
+  //
+  // So an archive with open rows is REFUSED, and the refusal names the two honest answers. Both are
+  // real, and the server cannot tell which is true, so it makes the caller say:
+  //   cancelOpen — this release is over and these did not make it. Each row is cancelled WITH THE
+  //                REASON on it, because a cancelled row with no reason is unreadable in a month.
+  //   force      — the work genuinely continues somewhere else. The rows stay open and the count of
+  //                what was left behind is recorded on the project, so forcing costs a number that
+  //                stays visible rather than a silence.
+  let cancelOpenRows: Task[] | null = null;
+  let archiveEvent = '';
+  if (b.archived !== undefined) {
+    const already = p.archivedAt ?? null;
+    if (b.archived === true) {
+      // re-archiving would re-stamp the date, and WHEN it was finished is the whole reason this is a
+      // timestamp and not a boolean. Refused rather than silently moved.
+      if (already) {
+        return { error: `${p.prefix} was already archived on ${new Date(already).toISOString()}${p.archiveReason ? ` (${p.archiveReason})` : ''}. Archiving it again would re-stamp that date, and when it was finished is the thing the field is for. Send {"archived": false} first if it genuinely went back into flight and has now finished a second time`, status: 409 };
+      }
+      if (b.cancelOpen === true && b.force === true) {
+        return { error: 'cancelOpen and force are opposite answers to the same question: cancelOpen closes the still-open rows as part of archiving, force leaves them open and records how many were left. Send one of them', status: 400 };
+      }
+      const open = await Tasks.find({ projectId: p._id, status: { $nin: CLOSED } }).toArray();
+      if (open.length && b.cancelOpen !== true && b.force !== true) {
+        const ids = open.map((t) => t.shortId);
+        const named = ids.slice(0, 8).join(', ') + (ids.length > 8 ? `, and ${ids.length - 8} more` : '');
+        return {
+          error: `${p.prefix} has ${open.length} open row(s) (${named}), and archiving takes a project off every active surface, so those rows would go with it and nothing would say what happened to them. Send {"archived": true, "cancelOpen": true} to cancel them as part of archiving, which is the honest "this release is over and these did not make it" and writes onto each row that ${p.prefix} was archived and when. Send {"archived": true, "force": true} to archive and leave them open, which is right only when that work genuinely continues somewhere else; the surviving count is then recorded on the project as archivedOpenRows`,
+          status: 409,
+        };
+      }
+      if (b.cancelOpen === true) cancelOpenRows = open;
+      set.archivedAt = new Date();
+      const reason = str(b.archiveReason);
+      // the reason is stored exactly as it was written and is never appended to by the server. What
+      // was left open is its own field, so a human's sentence stays a human's sentence.
+      if (reason !== undefined) set.archiveReason = reason; else unset.archiveReason = '';
+      unset.archivedOpenRows = ''; // recounted below from what actually happened, never from intent
+      archiveEvent = `project ARCHIVED${reason ? `: ${reason}` : ' (no reason given)'}`;
+    } else {
+      // false: back onto the active board. Everything the archive recorded goes with it, because a
+      // stale reason on a live project is a sentence that is no longer true.
+      if (!already) return { error: `${p.prefix} is not archived, so there is nothing to put back`, status: 400 };
+      for (const k of ['cancelOpen', 'force'] as const) {
+        if (b[k] === true) return { error: notHere(k, `${k} is part of ARCHIVING a project, and this patch is unarchiving one. Send {"archived": false} on its own`), status: 400 };
+      }
+      if (b.archiveReason !== undefined) {
+        return { error: notHere('archiveReason', 'unarchiving clears the reason rather than setting one, since a project back on the active board is not archived for anything'), status: 400 };
+      }
+      set.archivedAt = null;
+      unset.archiveReason = '';
+      unset.archivedOpenRows = '';
+      // rows a previous cancelOpen closed are NOT reopened. They were a decision somebody made with
+      // a reason attached, and undoing the archive does not un-decide them.
+      archiveEvent = `project unarchived (archived ${new Date(already).toISOString()}); rows cancelled by that archive stay cancelled`;
+    }
   }
-  await Projects.updateOne({ _id: p._id }, {
+  if (Object.keys(set).length === 0 && Object.keys(unset).length === 0) {
+    return { error: `nothing to update (${[...CONFIG_FIELDS, ...ARCHIVE_FIELDS].join(', ')})`, status: 400 };
+  }
+  // ---------- the archive transition is its own lock ----------
+  // Every gate above is a READ, so two archives crossing together both pass and the second one
+  // re-stamps the date the first just wrote, which is DAR-256 one document along. The condition
+  // moves INTO the write and the driver settles it: `archivedAt: null` matches both an explicit null
+  // and a missing field, which is exactly the not-archived population. Scoped to an archive patch,
+  // so an ordinary config write is the same one filter on _id it always was.
+  const claim = b.archived === true ? { archivedAt: null }
+    : b.archived === false ? { archivedAt: { $ne: null } }
+    : {};
+  const wrote = await Projects.updateOne({ _id: p._id, ...claim }, {
     ...(Object.keys(set).length ? { $set: set } : {}),
     ...(Object.keys(unset).length ? { $unset: unset } : {}),
   });
+  // the loser matched nothing, so NOTHING it sent landed, not the archive and not the config beside
+  // it. A 200 naming the real state would be true about the archive and false about the rest.
+  if (b.archived !== undefined && wrote.matchedCount === 0) {
+    const now = await Projects.findOne({ _id: p._id });
+    return { error: `${p.prefix} is ${now?.archivedAt ? `already archived (${new Date(now.archivedAt).toISOString()})` : 'not archived'}: another write settled that while this one was in flight, so nothing in this patch was applied, not the archive and not the fields beside it. Re-read the project and send whatever still applies`, status: 409 };
+  }
+  // the cascade runs only for the writer that WON the claim above, so open rows can never be
+  // cancelled on behalf of an archive that did not happen
+  if (cancelOpenRows?.length) await cancelForArchive(p, cancelOpenRows, set.archivedAt as Date, str(b.archiveReason));
+  // What was left open is counted AFTER the cascade, from the board rather than from the intent, so
+  // a cancellation that only partly landed is reported as what it actually did.
+  if (b.archived === true) {
+    const left = await Tasks.countDocuments({ projectId: p._id, status: { $nin: CLOSED } });
+    await Projects.updateOne({ _id: p._id }, { $set: { archivedOpenRows: left } });
+    if (left) archiveEvent += `; ${left} row(s) left OPEN and still on the board`;
+  }
   const laneNote = pipeline ? `: lanes [${pipeline.reviews.map((r) => r.lane).join(', ')}], autoAdvance ${pipeline.autoAdvance}` : '';
   const agentNote = agents ? `: agents [${agents.map((a) => a.name).join(', ')}]` : '';
   // who may file feedback is an access-control fact, so the event log carries the resulting list
   const peopleNote = stakeholders ? `: stakeholders [${stakeholders.map((s) => s.name).join(', ') || 'nobody'}]` : '';
-  await logEvent(p._id!, `project updated (${[...Object.keys(set), ...Object.keys(unset)].join(', ')})${laneNote}${agentNote}${peopleNote}`);
+  // the archive is a lifecycle fact, not a field list, so it gets its own sentence in the log rather
+  // than reading as "project updated (archivedAt)" next to a charter edit
+  await logEvent(p._id!, archiveEvent
+    ? `${archiveEvent}${laneNote}${agentNote}${peopleNote}`
+    : `project updated (${[...Object.keys(set), ...Object.keys(unset)].join(', ')})${laneNote}${agentNote}${peopleNote}`);
   // the server owns the route table, so the proxy is updated from the doc that was just written.
   // What gets WITHDRAWN comes from proxyPublished (what is actually live) rather than from the old
   // config, so clearing the config never destroys the record of the prefix still to withdraw.
@@ -1779,6 +1961,11 @@ api.get('/projects/:ref/context', async (c) => {
     slackChannel: p.slackChannel ?? null,
     pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy: redactProxy(p.proxy),
     proxyPublished: redactPublished(p.proxyPublished),
+    // this is the read every agent takes before working, so it is the right place to learn the work
+    // is over. Normalised to null like the list, and archiveReason rides along because "archived"
+    // with no reason tells an agent to stop without telling it what happened.
+    archivedAt: p.archivedAt ?? null, archiveReason: p.archiveReason ?? null,
+    archivedOpenRows: p.archivedOpenRows ?? null,
     configured: { pipeline: p.pipeline !== undefined, agents: p.agents !== undefined, proxy: p.proxy !== undefined },
   });
 });
