@@ -24,9 +24,10 @@
   .sub{font-family:var(--mono);font-size:11.5px;color:var(--soft);margin:4px 0 28px}
   .sub b{color:var(--gdeep)}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:18px}
-  a.card{display:block;text-decoration:none;color:var(--ink);background:var(--beige);
+  .card{display:block;background:var(--beige);
     border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink);padding:16px 18px;transition:.1s}
-  a.card:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 var(--ink)}
+  .card:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 var(--ink)}
+  .card-link{display:block;text-decoration:none;color:var(--ink)}
   .card h2{font-family:var(--mono);font-size:15px;font-weight:700;margin-bottom:2px}
   .card .prefix{font-family:var(--mono);font-size:10px;font-weight:700;border:2px solid var(--ink);
     background:var(--beige2);padding:1px 7px;margin-left:8px;vertical-align:2px}
@@ -46,13 +47,43 @@
   details.arch-wrap summary::before{content:'▸ ';display:inline-block;width:1em}
   details.arch-wrap[open] summary::before{content:'▾ '}
   .arch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-top:12px}
-  a.card.arch{padding:9px 12px;border-color:var(--faint);box-shadow:2px 2px 0 var(--faint);background:transparent}
-  a.card.arch:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--faint)}
-  a.card.arch h2{font-size:12.5px;color:var(--soft);margin-bottom:0}
-  a.card.arch .prefix{border-color:var(--faint);color:var(--soft);background:transparent;font-size:9px}
-  a.card.arch .meta{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:3px}
-  a.card.arch .reason{font-family:var(--sans);font-size:10.5px;color:var(--soft);margin-top:4px}
-  a.card.arch .openrows{font-family:var(--mono);font-size:10px;color:var(--soft);margin-top:4px}
+  .card.arch{padding:9px 12px;border-color:var(--faint);box-shadow:2px 2px 0 var(--faint);background:transparent}
+  .card.arch:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--faint)}
+  .card.arch h2{font-size:12.5px;color:var(--soft);margin-bottom:0}
+  .card.arch .prefix{border-color:var(--faint);color:var(--soft);background:transparent;font-size:9px}
+  .card.arch .meta{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:3px}
+  .card.arch .reason{font-family:var(--sans);font-size:10.5px;color:var(--soft);margin-top:4px}
+  .card.arch .openrows{font-family:var(--mono);font-size:10px;color:var(--soft);margin-top:4px}
+
+  /* archive / unarchive controls */
+  .card-actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+  .card-actions button,.archive-panel button,.conflict-actions button{
+    font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--ink);text-transform:lowercase;
+    background:var(--beige2);border:2px solid var(--ink);padding:5px 10px;cursor:pointer;
+    box-shadow:2px 2px 0 var(--ink);transition:.1s}
+  .card-actions button:hover,.archive-panel button:hover,.conflict-actions button:hover{
+    transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--ink)}
+  .card-actions button:active,.archive-panel button:active,.conflict-actions button:active{
+    transform:translate(0,0);box-shadow:0 0 0 var(--ink)}
+  .card-actions button:disabled,.archive-panel button:disabled,.conflict-actions button:disabled{
+    opacity:.5;cursor:default;transform:none;box-shadow:2px 2px 0 var(--ink)}
+  .btn-confirm{background:var(--ink)!important;color:var(--lime)!important}
+  .archive-panel{margin-top:12px;padding-top:12px;border-top:2px dashed var(--ink)}
+  .archive-label{display:block;font-family:var(--mono);font-size:10px;color:var(--soft);margin-bottom:5px}
+  .archive-reason{display:block;width:100%;font-family:var(--sans);font-size:12px;color:var(--ink);
+    background:var(--beige2);border:2px solid var(--ink);padding:7px 9px;margin-bottom:10px}
+  .archive-reason::placeholder{color:var(--faint)}
+  .archive-panel-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .conflict{margin-top:12px;padding-top:12px;border-top:2px dashed var(--ink)}
+  .conflict-msg{font-family:var(--sans);font-size:12px;font-weight:600;color:var(--ink);margin-bottom:10px}
+  .conflict-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .conflict-hint{font-family:var(--mono);font-size:10px;color:var(--soft);margin-top:8px}
+  .card-error{margin-top:12px;font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--ink);
+    background:var(--beige2);border:2px solid var(--ink);padding:7px 9px}
+  .card.arch .card-actions button{border-color:var(--faint);color:var(--soft);
+    box-shadow:2px 2px 0 var(--faint);background:transparent}
+  .card.arch .card-actions button:hover{box-shadow:3px 3px 0 var(--faint)}
+  .card.arch .card-error{border-color:var(--faint);color:var(--soft);background:transparent}
 </style>
 </head>
 <body>
@@ -67,16 +98,29 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 function cardHtml(p) {
   const c = p.counts || {tasks:0, done:0, pendingFb:0};
   const pct = c.tasks ? Math.round(c.done / c.tasks * 100) : 0;
-  return `<a class="card" href="${esc(p.boardUrl)}">
-      <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
-      <div class="repos">${esc((p.repos||[]).join(' · ')) || 'no repos'}</div>
-      <div class="nums">
-        <div><b>${c.done}/${c.tasks}</b>tasks done</div>
-        <div class="${c.pendingFb?'warn':''}"><b>${c.pendingFb}</b>feedback waiting</div>
-        <div><b>${new Date(p.createdAt).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</b>started</div>
+  return `<div class="card" data-prefix="${esc(p.prefix)}" data-name="${esc(p.name)}">
+      <a class="card-link" href="${esc(p.boardUrl)}">
+        <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
+        <div class="repos">${esc((p.repos||[]).join(' · ')) || 'no repos'}</div>
+        <div class="nums">
+          <div><b>${c.done}/${c.tasks}</b>tasks done</div>
+          <div class="${c.pendingFb?'warn':''}"><b>${c.pendingFb}</b>feedback waiting</div>
+          <div><b>${new Date(p.createdAt).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}</b>started</div>
+        </div>
+        <div class="progress"><i style="width:${pct}%"></i></div>
+      </a>
+      <div class="card-actions"><button type="button" data-action="open-archive">archive</button></div>
+      <div class="archive-panel" hidden>
+        <label class="archive-label" for="reason-${esc(p.prefix)}">reason (optional)</label>
+        <input type="text" class="archive-reason" id="reason-${esc(p.prefix)}" placeholder="why is this done?">
+        <div class="archive-panel-actions">
+          <button type="button" class="btn-confirm" data-action="confirm-archive">confirm archive</button>
+          <button type="button" data-action="cancel-archive">cancel</button>
+        </div>
+        <div class="conflict" hidden></div>
       </div>
-      <div class="progress"><i style="width:${pct}%"></i></div>
-    </a>`;
+      <div class="card-error" hidden></div>
+    </div>`;
 }
 
 function archCardHtml(p) {
@@ -84,33 +128,166 @@ function archCardHtml(p) {
   const reason = p.archiveReason ? `<div class="reason">${esc(p.archiveReason)}</div>` : '';
   const openRows = (typeof p.archivedOpenRows === 'number' && p.archivedOpenRows > 0)
     ? `<div class="openrows">${esc(p.archivedOpenRows)} rows left open</div>` : '';
-  return `<a class="card arch" href="${esc(p.boardUrl)}">
-      <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
-      <div class="meta">${dateStr ? 'archived ' + esc(dateStr) : 'archived'}</div>
-      ${reason}
-      ${openRows}
-    </a>`;
+  return `<div class="card arch" data-prefix="${esc(p.prefix)}" data-name="${esc(p.name)}">
+      <a class="card-link" href="${esc(p.boardUrl)}">
+        <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
+        <div class="meta">${dateStr ? 'archived ' + esc(dateStr) : 'archived'}</div>
+        ${reason}
+        ${openRows}
+      </a>
+      <div class="card-actions"><button type="button" data-action="unarchive">unarchive</button></div>
+      <div class="card-error" hidden></div>
+    </div>`;
 }
 
-function archivedSectionHtml(archived) {
+function archivedSectionHtml(archived, open) {
   if (!archived.length) return '';
-  return `<details class="arch-wrap">
+  return `<details class="arch-wrap"${open ? ' open' : ''}>
       <summary>archived (${archived.length})</summary>
       <div class="arch-grid">${archived.map(archCardHtml).join('')}</div>
     </details>`;
 }
 
-(async () => {
-  const r = await fetch('/api/projects?archived=all');
-  const list = await r.json();
-  const grid = document.getElementById('grid');
-  const archivedEl = document.getElementById('archived');
-  if (!Array.isArray(list) || !list.length) { grid.innerHTML = '<div class="empty">no projects yet. run /darbar-project-init in a claude session.</div>'; return; }
+const grid = document.getElementById('grid');
+const archivedEl = document.getElementById('archived');
+
+function render(list, archivedOpen) {
+  if (!Array.isArray(list) || !list.length) { grid.innerHTML = '<div class="empty">no projects yet. run /darbar-project-init in a claude session.</div>'; archivedEl.innerHTML = ''; return; }
   const live = list.filter(p => !p.archivedAt);
   const archived = list.filter(p => p.archivedAt);
   grid.innerHTML = live.length ? live.map(cardHtml).join('') : '<div class="empty">no active projects.</div>';
-  archivedEl.innerHTML = archivedSectionHtml(archived);
-})();
+  archivedEl.innerHTML = archivedSectionHtml(archived, archivedOpen);
+}
+
+// re-fetches and re-renders so a card moves between sections after a write; carries forward
+// whether the archived <details> was open (plus openArchived to force it open on a fresh archive)
+async function reload(opts) {
+  opts = opts || {};
+  const wasOpen = document.querySelector('details.arch-wrap')?.open ?? false;
+  const r = await fetch('/api/projects?archived=all');
+  const list = await r.json();
+  render(list, wasOpen || !!opts.openArchived);
+}
+
+function setBusy(card, busy) {
+  card.querySelectorAll('button').forEach(b => { b.disabled = busy; });
+}
+
+function showError(card, msg) {
+  const el = card.querySelector('.card-error');
+  el.textContent = msg;
+  el.hidden = false;
+}
+
+function hideError(card) {
+  const el = card.querySelector('.card-error');
+  el.hidden = true;
+  el.textContent = '';
+}
+
+// the 409 body is a plain-language sentence, not structured JSON — the open-row count is pulled
+// out of it with a regex; if the server's wording ever changes, fall back to the raw sentence
+function showConflict(card, msg) {
+  const conflict = card.querySelector('.conflict');
+  const confirmBtn = card.querySelector('.btn-confirm');
+  if (confirmBtn) confirmBtn.hidden = true;
+  const m = msg.match(/has (\d+) open row/);
+  const name = card.dataset.name || card.dataset.prefix;
+  const plain = m
+    ? `${esc(name)} has ${m[1]} open row${m[1] === '1' ? '' : 's'}. Choose how to archive:`
+    : esc(msg);
+  conflict.innerHTML = `
+    <div class="conflict-msg">${plain}</div>
+    <div class="conflict-actions">
+      <button type="button" data-action="cancel-open-archive">cancel the open rows, then archive</button>
+      <button type="button" data-action="force-archive">archive, leave them open</button>
+    </div>
+    <div class="conflict-hint">"cancel the open rows" closes each one now, noting on it that ${esc(card.dataset.prefix)} was archived. "leave them open" archives immediately and just records how many rows are still open.</div>`;
+  conflict.hidden = false;
+}
+
+async function patchArchive(card, body) {
+  const prefix = card.dataset.prefix;
+  setBusy(card, true);
+  hideError(card);
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(prefix)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => null);
+    if (r.ok) { await reload({ openArchived: body.archived === true }); return; }
+    const msg = (data && data.error) || `request failed (${r.status})`;
+    if (r.status === 409 && /open row/.test(msg)) {
+      const panel = card.querySelector('.archive-panel');
+      if (panel) panel.hidden = false;
+      showConflict(card, msg);
+    } else {
+      showError(card, msg);
+    }
+  } catch (err) {
+    showError(card, String((err && err.message) || err));
+  } finally {
+    setBusy(card, false);
+  }
+}
+
+function reasonBody(card, extra) {
+  const reason = card.querySelector('.archive-reason')?.value.trim();
+  return Object.assign({ archived: true }, reason ? { archiveReason: reason } : {}, extra || {});
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const card = btn.closest('.card');
+  if (!card) return;
+  const action = btn.dataset.action;
+
+  if (action === 'open-archive') {
+    const panel = card.querySelector('.archive-panel');
+    const conflict = card.querySelector('.conflict');
+    const confirmBtn = card.querySelector('.btn-confirm');
+    panel.hidden = false;
+    conflict.hidden = true;
+    conflict.innerHTML = '';
+    if (confirmBtn) confirmBtn.hidden = false;
+    card.querySelector('.archive-reason')?.focus();
+  } else if (action === 'cancel-archive') {
+    const panel = card.querySelector('.archive-panel');
+    const conflict = card.querySelector('.conflict');
+    panel.hidden = true;
+    conflict.hidden = true;
+    conflict.innerHTML = '';
+    hideError(card);
+  } else if (action === 'confirm-archive') {
+    patchArchive(card, reasonBody(card));
+  } else if (action === 'cancel-open-archive') {
+    patchArchive(card, reasonBody(card, { cancelOpen: true }));
+  } else if (action === 'force-archive') {
+    patchArchive(card, reasonBody(card, { force: true }));
+  } else if (action === 'unarchive') {
+    const prefix = card.dataset.prefix;
+    setBusy(card, true);
+    hideError(card);
+    fetch(`/api/projects/${encodeURIComponent(prefix)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ archived: false }),
+    }).then(async (r) => {
+      const data = await r.json().catch(() => null);
+      if (r.ok) { await reload(); return; }
+      showError(card, (data && data.error) || `request failed (${r.status})`);
+      setBusy(card, false);
+    }).catch((err) => {
+      showError(card, String((err && err.message) || err));
+      setBusy(card, false);
+    });
+  }
+});
+
+reload();
 </script>
 </body>
 </html>
