@@ -28,30 +28,43 @@ const app = new App({
 // it healthy the whole time. This file is touched ONLY while the underlying SocketModeClient
 // currently believes it is connected, so a stuck reconnect loop stops the touches and the
 // file's mtime goes stale — staleness (checked by sweep.py) is the signal, not the file's
-// mere existence. Explicitly NOT wiring this to exit the process on an unrecoverable socket:
-// that is a real behaviour change (who restarts it, and how) and is a call for Raj, not a
-// side effect of adding visibility.
+// mere existence. DAR-265: launchd now supervises this process, so a socket dead past
+// DEAD_SOCKET_EXIT_MS exits non-zero and the restart brings a fresh socket.
 // @slack/bolt types App.receiver as private with no public accessor for socket state, so this
 // reaches the real SocketModeClient through `any` — there is no supported alternative today.
 const HEARTBEAT_PATH = new URL('../../../data/gabbar-heartbeat.json', import.meta.url).pathname;
 const HEARTBEAT_PULSE_MS = 30_000;
+const DEAD_SOCKET_EXIT_MS = 5 * 60_000;
 let socketConnected = false;
+let disconnectedSince = Date.now(); // also covers never-connected-at-startup
 function writeHeartbeat() {
   if (!socketConnected) return;
   void Bun.write(HEARTBEAT_PATH, JSON.stringify({ ts: new Date().toISOString(), connected: true })).catch(() => {});
 }
+const markDisconnected = () => {
+  if (socketConnected || !disconnectedSince) disconnectedSince = Date.now();
+  socketConnected = false;
+};
 const socketClient = (app as any).receiver?.client;
 if (socketClient?.on) {
-  socketClient.on('connected', () => { socketConnected = true; writeHeartbeat(); });
+  socketClient.on('connected', () => { socketConnected = true; disconnectedSince = 0; writeHeartbeat(); });
   // 'close' is the real websocket-level disconnect signal (fired before any retry/backoff
   // decision is even made); 'reconnecting'/'disconnecting'/'disconnected' cover the rest of
   // the state machine. A bare 'error' is NOT treated as a disconnect here — the client logs
   // plenty of those on transient blips without actually dropping the connection, and flipping
   // staleness on every one of those would make this noisy rather than trustworthy.
-  socketClient.on('close', () => { socketConnected = false; });
-  socketClient.on('reconnecting', () => { socketConnected = false; });
-  socketClient.on('disconnecting', () => { socketConnected = false; });
-  socketClient.on('disconnected', () => { socketConnected = false; });
+  socketClient.on('close', markDisconnected);
+  socketClient.on('reconnecting', markDisconnected);
+  socketClient.on('disconnecting', markDisconnected);
+  socketClient.on('disconnected', markDisconnected);
+  // DAR-265: only armed when socket state is trackable — without receiver.client this
+  // would read as permanently dead and restart-loop a working process
+  setInterval(() => {
+    if (!socketConnected && disconnectedSince && Date.now() - disconnectedSince > DEAD_SOCKET_EXIT_MS) {
+      console.error(`gabbar: socket dead ${Math.round((Date.now() - disconnectedSince) / 60_000)}m, exiting for launchd to restart`);
+      process.exit(1);
+    }
+  }, HEARTBEAT_PULSE_MS);
 } else {
   console.error('gabbar: could not reach receiver.client — socket liveness heartbeat will not be tracked');
 }
