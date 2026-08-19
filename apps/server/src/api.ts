@@ -985,13 +985,40 @@ async function resolvePromotedFeedback(task: Task) {
   if (rows.length === 0) return;
   const last = task.commits[task.commits.length - 1];
   const resolution = `shipped: ${task.shortId} (${task.title}) is done${last ? ` (commit ${last})` : ''}`;
+  // ---------- DAR-262: the resolution of each ROW is the lock ----------
+  // The find above is a READ, and this function has a second caller the two fixes above do not
+  // cover: PATCH /tasks/:ref with {status: 'done'}, which any number of clients can send at once on
+  // one task. All of them read the same open rows and all of them resolve each one. Measured on this
+  // rig: 3 concurrent closes, 2 promoted rows, 6 "auto-resolved" events and the same
+  // "*FB-n resolved.*" posted into the reporter's Slack thread 3 times. Board litter is the cheap
+  // half; the message to a human is the reason this one was worth fixing.
+  //
+  // PER ROW, NOT PER TASK, because the racers do not divide cleanly: the same run produced one row
+  // resolved once and the other three times in a single iteration. Whoever wins the write on a row
+  // owns that row's event and that row's reply, and a claim scoped to the task would have handed one
+  // racer rows another had already announced.
+  //
+  // AND NOT ON THE CALLER'S WRITE. Unlike DAR-256, the patch that gets here carries a body — a
+  // `notes`, an `addCommit`, an `assignee` can ride along with the status. A conditional up there
+  // would answer 200 having applied none of it, which is the silent drop the rest of this route
+  // exists to stop. So every closer's own patch lands in full and every closer is told the truth
+  // about the row; only the cascade has a single owner. Uncontended closes are unchanged: the same
+  // one write per row, no extra read.
+  const claimed: typeof rows = [];
   for (const fb of rows) {
-    await Feedback.updateOne({ _id: fb._id }, { $set: { status: 'resolved', resolution, updatedAt: new Date() } });
+    const won = await Feedback.updateOne(
+      { _id: fb._id, status: { $in: PROMOTED_OPEN } },
+      { $set: { status: 'resolved', resolution, updatedAt: new Date() } },
+    );
+    if (won.matchedCount === 0) continue; // a concurrent closer resolved this row and owns its reply
+    claimed.push(fb);
     await logEvent(fb.projectId, `${fb.shortId} auto-resolved: ${task.shortId} shipped`, fb.taskId);
     await slackThreadReply(fb, `*${fb.shortId} resolved.* ${resolution}`.trim());
   }
-  // rows just resolved may have been the last hold on the task they were FILED ON
-  const filedOn = new Map(rows.filter((fb) => fb.taskId).map((fb) => [fb.taskId!.toHexString(), fb.taskId!]));
+  // rows just resolved may have been the last hold on the task they were FILED ON. Only the rows
+  // THIS call resolved: a row somebody else claimed is somebody else's cascade to run, and they run
+  // it — dropping it here cannot lose the advance, and keeping it would re-read the same parent.
+  const filedOn = new Map(claimed.filter((fb) => fb.taskId).map((fb) => [fb.taskId!.toHexString(), fb.taskId!]));
   for (const id of filedOn.values()) await maybeAdvanceParent(id);
 }
 

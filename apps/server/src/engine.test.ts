@@ -19,6 +19,9 @@
 // values must all read as changes. field-drop.test.ts pins the true side.
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { api, children, feedback, project, req, reset, task, teardown } from './test-harness';
+// after the harness import on purpose: the harness installs the module mock, and this is the same
+// config object api.ts reads (the mock spreads it by reference), so tests can stub the slack fields
+import { config } from '@darbar/core';
 import { echoedUnchanged } from './api';
 
 afterAll(teardown);
@@ -1111,5 +1114,195 @@ test('DAR-259/2: the promoted-feedback cascade runs once, not once per closing l
     expect(await statusOf(t.shortId), `iteration ${i}`).toBe('done');
     const resolved = (await eventsOf(p.prefix)).filter((e) => e.text.includes('auto-resolved'));
     expect(resolved, `iteration ${i}: ${resolved.map((e) => e.text).join(' | ')}`).toHaveLength(1);
+  }
+});
+
+// ---------- 2e. DAR-262: the OTHER caller of resolvePromotedFeedback ----------
+//
+// The DAR-259 fix put one owner on the cascade that hangs off maybeAdvanceParent. It does not reach
+// this one: PATCH /tasks/:ref with {status: 'done'} calls resolvePromotedFeedback directly, and that
+// function is its own read-then-write — find the open promoted rows, then update each. Concurrent
+// explicit closes on one task therefore all read the same open rows and all resolve them, so the
+// board gets N "auto-resolved" events per row and the reporter gets "*FB-n resolved.*" posted into
+// their Slack thread N times. That last one is the only failure mode in this system a human sees.
+//
+// WHAT IS DIFFERENT FROM ITS TWO SIBLINGS, and what shapes the fix: this path carries a CALLER-
+// SUPPLIED BODY. DAR-256's loser is told 409 because nothing it sent landed; maybeAdvanceParent's
+// loser has no body at all. Here a `notes`, an `addCommit` or an `assignee` can ride along with the
+// status, so a conditional on the PATCH write would turn a legitimate edit into 200-and-applied-
+// nothing, which is the silent-drop class this whole run has been closing. So the claim goes on the
+// CASCADE and never on the caller's write, and every racer's own patch lands in full.
+const RACES_262 = 40;
+
+type SlackPost = { channel: string; thread_ts?: string; text: string };
+
+// Slack replies are counted at the HTTP boundary — the actual fetch slackThreadReply would make —
+// because "one event on the board" and "one message to a human" are two different claims and it is
+// the second one this row is about. The fixtures below are the only ones in this file that carry a
+// `slack` thread, so nothing may reach the real workspace: fetch is replaced for the duration AND
+// the api base is pointed at the discard port, so a bypass of the stub fails closed rather than
+// posting. Hono's api.request() builds a Request and calls the app directly, so the harness itself
+// does not go through global fetch and is unaffected.
+async function withSlackRecorder<T>(fn: (posts: SlackPost[]) => Promise<T>): Promise<T> {
+  const posts: SlackPost[] = [];
+  const realFetch = globalThis.fetch;
+  const realToken = config.slackBotToken;
+  const realBase = config.slackApiBase;
+  config.slackBotToken = 'xoxb-scratch-never-a-real-token';
+  config.slackApiBase = 'http://127.0.0.1:9/api';
+  globalThis.fetch = (async (input: unknown, init?: { body?: string }) => {
+    const url = String(input);
+    if (!url.startsWith(config.slackApiBase)) throw new Error(`unexpected fetch while slack was stubbed: ${url}`);
+    posts.push(JSON.parse(init?.body ?? '{}') as SlackPost);
+    return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  try {
+    return await fn(posts);
+  } finally {
+    globalThis.fetch = realFetch;
+    config.slackBotToken = realToken;
+    config.slackApiBase = realBase;
+  }
+}
+
+/** a task carrying TWO accepted feedback rows promoted onto it, each with its own slack thread */
+async function promotedOnto(prefix: string, iteration: number) {
+  const t = await task(prefix, { title: 'ships two promoted rows' });
+  const rows = [];
+  for (const n of [1, 2]) {
+    const fb = await feedback({
+      project: prefix,
+      body: `promoted finding ${n}`,
+      slack: { channel: 'C-SCRATCH', ts: `17000000${iteration}.00${n}` },
+    });
+    await req('PATCH', `/feedback/${fb.shortId}`, { status: 'accepted' });
+    await req('PATCH', `/feedback/${fb.shortId}`, { resolvedTaskRef: t.shortId });
+    rows.push(fb.shortId);
+  }
+  return { t, rows };
+}
+
+// Reproduced on iteration 0 before the fix: 3 racers, 2 promoted rows, 6 "auto-resolved" events and
+// 6 slack posts where 2 of each is the whole truth.
+test('DAR-262: three explicit closes at once auto-resolve each promoted row exactly ONCE', async () => {
+  await withSlackRecorder(async (posts) => {
+    for (let i = 0; i < RACES_262; i++) {
+      await reset();
+      posts.length = 0;
+      const p = await project();
+      const { t, rows } = await promotedOnto(p.prefix, i);
+
+      const closes = await Promise.all(
+        ['aaa1111', 'bbb2222', 'ccc3333'].map((sha) =>
+          req<{ status: string; commits: string[] }>('PATCH', `/tasks/${t.shortId}`, { status: 'done', addCommit: sha })),
+      );
+
+      for (const r of closes) expect(r.status, `iteration ${i}`).toBe(200);
+      expect(await statusOf(t.shortId), `iteration ${i}`).toBe('done');
+
+      // one auto-resolution per ROW, not per racer and not per task
+      const events = (await eventsOf(p.prefix)).filter((e) => e.text.includes('auto-resolved'));
+      for (const shortId of rows) {
+        const mine = events.filter((e) => e.text.startsWith(`${shortId} `));
+        expect(mine, `iteration ${i} ${shortId}: ${mine.map((e) => e.text).join(' | ')}`).toHaveLength(1);
+      }
+      expect(events, `iteration ${i}: ${events.map((e) => e.text).join(' | ')}`).toHaveLength(rows.length);
+
+      // and one message into each reporter's thread. This is the assertion the row exists for.
+      for (const shortId of rows) {
+        const mine = posts.filter((m) => m.text.includes(`*${shortId} resolved.*`));
+        expect(mine, `iteration ${i} ${shortId}: ${mine.map((m) => m.text).join(' | ')}`).toHaveLength(1);
+      }
+      expect(posts, `iteration ${i}: ${posts.map((m) => m.text).join(' | ')}`).toHaveLength(rows.length);
+    }
+  });
+});
+
+// The other half of the same fix, and the half a conditional on the PATCH write would have broken.
+// Three closers arrive together, each carrying a different legitimate edit beside the status. Every
+// one of those edits has to land and every closer has to be told the truth, because the row really
+// is done for all three of them — the only thing they contend for is the cascade. The three non-
+// append fields are DISJOINT on purpose (notes, assignee, description) so all three can be asserted
+// at once rather than one racer's write hiding under another's; addCommit is per-racer proof on its
+// own, since it pushes rather than overwrites.
+test('DAR-262: every concurrent closer keeps its own body, and is answered truthfully', async () => {
+  await withSlackRecorder(async (posts) => {
+    for (let i = 0; i < RACES_262; i++) {
+      await reset();
+      posts.length = 0;
+      const p = await project();
+      const { t, rows } = await promotedOnto(p.prefix, i);
+
+      const sent = [
+        { status: 'done', addCommit: 'aaa1111', notes: 'builder note that must survive' },
+        { status: 'done', addCommit: 'bbb2222', assignee: 'staff-engineer' },
+        { status: 'done', addCommit: 'ccc3333', description: 'rewritten spec that must survive' },
+      ];
+      const closes = await Promise.all(
+        sent.map((body) => req<{ status: string; commits: string[] }>('PATCH', `/tasks/${t.shortId}`, body)),
+      );
+
+      // truthful to each caller: 200, and the status the row actually holds
+      for (const [n, r] of closes.entries()) {
+        expect(r.status, `iteration ${i} racer ${n}: ${r.error}`).toBe(200);
+        expect(r.body.status, `iteration ${i} racer ${n}`).toBe('done');
+        expect(r.body.commits, `iteration ${i} racer ${n}`).toContain(sent[n]!.addCommit);
+      }
+
+      // and nothing any of them sent was dropped
+      const row = (await req<{ notes: string; assignee: string; description: string; commits: string[] }>(
+        'GET', `/tasks/${t.shortId}`)).body;
+      expect(row.notes, `iteration ${i}`).toBe('builder note that must survive');
+      expect(row.assignee, `iteration ${i}`).toBe('staff-engineer');
+      expect(row.description, `iteration ${i}`).toBe('rewritten spec that must survive');
+      expect([...row.commits].sort(), `iteration ${i}`).toEqual(['aaa1111', 'bbb2222', 'ccc3333']);
+
+      // the cascade still ran exactly once per row while all of that landed
+      const events = (await eventsOf(p.prefix)).filter((e) => e.text.includes('auto-resolved'));
+      expect(events, `iteration ${i}: ${events.map((e) => e.text).join(' | ')}`).toHaveLength(rows.length);
+      expect(posts, `iteration ${i}: ${posts.map((m) => m.text).join(' | ')}`).toHaveLength(rows.length);
+    }
+  });
+});
+
+// The cascade does not end at the feedback rows: a row that just resolved may have been the last
+// hold on the task it was FILED ON, so each one hands off to maybeAdvanceParent. That hand-off is
+// the second thing the losers were doing twice. DAR-259 put a claim on the ADVANCE itself, so no
+// duplicate "auto-advanced" can come out of here — but the branch where the parent cannot advance
+// only reads and logs, so three closers produced three "holding" lines about one row. Scoping the
+// hand-off to the rows this call actually claimed is what removes them.
+//
+// Asserted against the SEQUENTIAL count of the identical scenario rather than a hard-coded number,
+// because the claim is not "two events" (two acts legitimately re-check this parent: the review
+// child closing, and the feedback row resolving) — it is that racing adds nothing to what one
+// closer produces.
+test('DAR-262: a contended close logs no more about the held parent than an uncontended one', async () => {
+  const holdingCount = async (closers: number, i: number) => {
+    await reset();
+    const p = await project();
+    const host = await task(p.prefix, { lanes: ['code-review'] });        // the row the feedback is FILED ON
+    const fixer = await task(p.prefix, { title: 'the row that ships' });
+    // one row filed on host and promoted onto fixer, one filed on host and left open so that host
+    // is held rather than advanced when the first one resolves
+    const fb = await feedback({ taskRef: host.shortId, body: `filed on host ${i}` });
+    await feedback({ taskRef: host.shortId, body: `still open, holds host ${i}` });
+    await req('PATCH', `/feedback/${fb.shortId}`, { status: 'accepted' });
+    await req('PATCH', `/feedback/${fb.shortId}`, { resolvedTaskRef: fixer.shortId });
+    await req('PATCH', `/tasks/${host.shortId}`, { status: 'in_progress' });
+    await req('PATCH', `/tasks/${host.shortId}`, { status: 'in_review' });
+    const kids = await children(host.shortId);
+    await req('PATCH', `/tasks/${kids[0]!.shortId}`, { status: 'done' });
+
+    await Promise.all(Array.from({ length: closers }, (_, n) =>
+      req('PATCH', `/tasks/${fixer.shortId}`, { status: 'done', addCommit: `sha${n}` })));
+
+    const events = await eventsOf(p.prefix);
+    expect(events.filter((e) => e.text.includes('auto-resolved')), `iteration ${i}, ${closers} closer(s)`).toHaveLength(1);
+    return events.filter((e) => e.text.includes('holding')).length;
+  };
+
+  const alone = await holdingCount(1, -1);
+  for (let i = 0; i < RACES_262; i++) {
+    expect(await holdingCount(3, i), `iteration ${i}`).toBe(alone);
   }
 });
