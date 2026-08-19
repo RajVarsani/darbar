@@ -154,6 +154,9 @@ export type Project = {
   agents?: ProjectAgent[];
   proxy?: ProjectProxy;
   proxyPublished?: PublishedRoute[];
+  /** external mirror: when set, the console card opens this Linear view instead of the native
+   *  board. Rows, feedback and the engine stay HERE; the Linear side is a hand-synced copy. */
+  linearUrl?: string | null;
   counters: { task: number; feedback: number };
   createdAt: Date;
   // ---------- archiving: a finished project comes OFF the active board ----------

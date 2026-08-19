@@ -262,6 +262,13 @@ server.tool('set_slack_channel', 'Bind, rebind or unbind the Slack channel a pro
   },
   ({ project, slackChannel }) => call(`/projects/${px(project)}`, 'PATCH', { slackChannel }));
 
+server.tool('set_linear_url', 'Mark a project as MIRRORED to Linear, or clear that (null). What it changes: the console card opens this URL instead of the native board (the board stays one click away in the card\'s menu), and the URL rides on get_project_context so every agent learns the mode before working. What it does NOT change: everything else. Rows, feedback, dispatch, review lanes and the whole engine still live on THIS board — Linear is a stakeholder-facing copy, and until an automated bridge exists it is synced BY HAND, so an agent closing a task here should say so in its report; the orchestrator (with Raj\'s approval, which every Linear write currently needs) moves the Linear twin. Rows carry their twin\'s id in notes ("mirrored as MEE-26"). The URL is typically a Linear label/view filter (the darbar/<PREFIX> label), not a Linear project, because darbar rows may scatter across several Linear projects.',
+  {
+    project: z.string(),
+    linearUrl: z.string().nullable().describe('absolute https URL of the Linear view that shows this board\'s rows (label filter or saved view), or null to clear the mirror'),
+  },
+  ({ project, linearUrl }) => call(`/projects/${px(project)}`, 'PATCH', { linearUrl }));
+
 server.tool('append_to_charter', 'Append one rule, decision or note to a project charter without resending it. The charter is prose every agent reads before working, so this is how a protocol locked mid-session gets recorded. Appends on its own line at the end; PATCH /api/projects/:ref {charter} is still the way to rewrite or restructure the whole thing.',
   { project: z.string(), text: z.string().describe('the line(s) to append, written as they should read in the charter') },
   ({ project, text }) => call(`/projects/${px(project)}/charter/append`, 'POST', { text }));

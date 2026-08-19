@@ -1306,3 +1306,38 @@ test('DAR-262: a contended close logs no more about the held parent than an unco
     expect(await holdingCount(3, i), `iteration ${i}`).toBe(alone);
   }
 });
+
+// ---------- linearUrl: the mirror pointer is config, and junk cannot claim to be a URL ----------
+
+test('linearUrl sets, reads back everywhere a session looks, and null clears it', async () => {
+  const p = await project();
+  const url = 'https://linear.app/acme/team/MEE/label/mrfiii';
+  const r = await req('PATCH', `/projects/${p.prefix}`, { linearUrl: url });
+  expect(r.status).toBe(200);
+  // /context is the read every agent takes before working; the list feeds the console cards
+  expect((await req<{ linearUrl: string | null }>('GET', `/projects/${p.prefix}/context`)).body.linearUrl).toBe(url);
+  const row = (await req<unknown>('GET', '/projects')).body as unknown as Array<{ prefix: string; linearUrl?: string }>;
+  expect(row.find((x) => x.prefix === p.prefix)?.linearUrl).toBe(url);
+
+  const cleared = await req('PATCH', `/projects/${p.prefix}`, { linearUrl: null });
+  expect(cleared.status).toBe(200);
+  expect((await req<{ linearUrl: string | null }>('GET', `/projects/${p.prefix}/context`)).body.linearUrl).toBeNull();
+});
+
+test('a linearUrl that is not an absolute http(s) URL is a 400, not a stored string', async () => {
+  const p = await project();
+  for (const bad of ['linear.app/acme', 'ftp://x', 'not a url']) {
+    const r = await req('PATCH', `/projects/${p.prefix}`, { linearUrl: bad });
+    expect(r.status, bad).toBe(400);
+  }
+  expect((await req<{ linearUrl: string | null }>('GET', `/projects/${p.prefix}/context`)).body.linearUrl).toBeNull();
+});
+
+test('the round-trippable project GET carries linearUrl and its echo is a legal PATCH body', async () => {
+  const p = await project();
+  await req('PATCH', `/projects/${p.prefix}`, { linearUrl: 'https://linear.app/acme/view/abc' });
+  const body = (await req<Record<string, unknown>>('GET', `/projects/${p.prefix}`)).body;
+  expect(body.linearUrl).toBe('https://linear.app/acme/view/abc');
+  const echo = await req('PATCH', `/projects/${p.prefix}`, body);
+  expect(echo.status).toBe(200);
+});

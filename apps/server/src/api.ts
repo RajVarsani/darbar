@@ -169,6 +169,7 @@ const CONFIG_VOCAB: FieldVocab = {
   pipeline: 'lanes are edited one at a time under /api/projects/:ref/pipeline/lanes, autoAdvance at PATCH /api/projects/:ref/pipeline, or wholesale with PATCH /api/projects/:ref {"pipeline": {…}}',
   agents: 'agents are edited one at a time under /api/projects/:ref/agents, or wholesale with PATCH /api/projects/:ref {"agents": […]}',
   proxy: 'the share is edited at PATCH /api/projects/:ref/proxy and published at PATCH /api/projects/:ref/proxy/enabled, or wholesale with PATCH /api/projects/:ref {"proxy": {…}}',
+  linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} points the console card at the project\'s Linear view (null clears it). Rows and feedback still live HERE; the Linear side is a mirror',
 };
 // what a granular project route is measured against: the server-owned fields plus the config doors.
 // NOTE ON SCOPE: a vocabulary belongs to ONE document, so each route below has to say which of these
@@ -1184,7 +1185,7 @@ type ConfigOk = { doc: Project; warnings: string[] };
 const failed = (r: ConfigFail | ConfigOk): r is ConfigFail => 'error' in r;
 // the whole config surface, in one place: what applyConfig writes, what the 'nothing to update'
 // message lists, and what PROJECT_VOCAB is measured against
-const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy'];
+const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy', 'linearUrl'];
 
 async function applyConfig(p: Project, b: Record<string, unknown>): Promise<ConfigFail | ConfigOk> {
   const warnings: string[] = [];
@@ -1194,7 +1195,7 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
   // everything sent. Every other field here already errors on a shape it cannot store; these two
   // were the exceptions (DAR-187 item 5).
   const badTypes = typeErrors(b, {
-    charter: 'string', slackChannel: 'string|null', repos: 'string[]',
+    charter: 'string', slackChannel: 'string|null', repos: 'string[]', linearUrl: 'string|null',
     // typed here rather than hand-checked below so {"archived": "true"} is a 400 that says what is
     // wrong, instead of a non-boolean read as absent and quietly meaning "not archived"
     archived: 'boolean', cancelOpen: 'boolean', force: 'boolean', archiveReason: 'string',
@@ -1219,6 +1220,15 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
   }
   const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
+  const linearUrl = strOrNull(b.linearUrl);
+  if (linearUrl !== undefined) {
+    if (linearUrl !== null) {
+      let httpUrl = false;
+      try { httpUrl = /^https?:$/.test(new URL(linearUrl).protocol); } catch { /* not a URL at all */ }
+      if (!httpUrl) return { error: `linearUrl must be an absolute http(s) URL or null to clear (got ${JSON.stringify(linearUrl)})`, status: 400 };
+    }
+    set.linearUrl = linearUrl;
+  }
   if (b.repos !== undefined) set.repos = strArr(b.repos);
   let pipeline: Pipeline | undefined;
   if (b.pipeline !== undefined) {
@@ -1986,6 +1996,7 @@ api.get('/projects/:ref', async (c) => {
   return c.json({
     charter: p.charter ?? '',
     slackChannel: p.slackChannel ?? null,
+    linearUrl: p.linearUrl ?? null,
     repos: p.repos ?? [],
     stakeholders: p.stakeholders ?? [],
     ...(p.pipeline ? { pipeline: p.pipeline } : {}),
@@ -2005,6 +2016,10 @@ api.get('/projects/:ref/context', async (c) => {
   return c.json({
     name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders,
     slackChannel: p.slackChannel ?? null,
+    // linear-mirrored project: the console card opens this view and a human copy of the open rows
+    // lives there. Rows/feedback/engine stay HERE — an agent reading this still works THIS board,
+    // and anything it closes needs the Linear twin moved by hand until a bridge exists.
+    linearUrl: p.linearUrl ?? null,
     pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy: redactProxy(p.proxy),
     proxyPublished: redactPublished(p.proxyPublished),
     // this is the read every agent takes before working, so it is the right place to learn the work

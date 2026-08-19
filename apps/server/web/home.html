@@ -82,6 +82,10 @@
     font-size:10.5px;font-weight:700;color:var(--ink);text-transform:lowercase;
     background:transparent;border:0;padding:8px 12px;cursor:pointer}
   .card-menu button:hover{background:var(--lime)}
+  .card-menu a{display:block;font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--ink);
+    text-transform:lowercase;text-decoration:none;padding:8px 12px}
+  .card-menu a:hover{background:var(--lime)}
+  .prefix.linear{background:var(--ink);color:var(--lime)}
   .card.arch .menu-trigger{border-color:var(--faint);color:var(--soft);
     box-shadow:2px 2px 0 var(--faint);background:transparent}
   .card.arch .menu-trigger:hover{box-shadow:3px 3px 0 var(--faint)}
@@ -114,9 +118,14 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 function cardHtml(p) {
   const c = p.counts || {tasks:0, done:0, pendingFb:0};
   const pct = c.tasks ? Math.round(c.done / c.tasks * 100) : 0;
+  // a linear-mirrored project opens its Linear view; the native board stays one ⋯ click away
+  const href = p.linearUrl || p.boardUrl;
+  const ext = p.linearUrl ? ' target="_blank" rel="noopener"' : '';
+  const chip = p.linearUrl ? '<span class="prefix linear">LINEAR</span>' : '';
+  const boardItem = p.linearUrl ? `<a href="${esc(p.boardUrl)}">darbar board</a>` : '';
   return `<div class="card" data-prefix="${esc(p.prefix)}" data-name="${esc(p.name)}">
-      <a class="card-link" href="${esc(p.boardUrl)}">
-        <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
+      <a class="card-link" href="${esc(href)}"${ext}>
+        <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span>${chip}</h2>
         <div class="repos">${esc((p.repos||[]).join(' · ')) || 'no repos'}</div>
         <div class="nums">
           <div><b>${c.done}/${c.tasks}</b>tasks done</div>
@@ -126,7 +135,7 @@ function cardHtml(p) {
         <div class="progress"><i style="width:${pct}%"></i></div>
       </a>
       <button type="button" class="menu-trigger" data-action="toggle-menu" aria-haspopup="true" aria-expanded="false" aria-label="project actions">&#8943;</button>
-      <div class="card-menu" hidden><button type="button" data-action="open-archive">archive</button></div>
+      <div class="card-menu" hidden>${boardItem}<button type="button" data-action="open-archive">archive</button></div>
       <div class="archive-panel" hidden>
         <label class="archive-label" for="reason-${esc(p.prefix)}">reason (optional)</label>
         <input type="text" class="archive-reason" id="reason-${esc(p.prefix)}" placeholder="why is this done?">
