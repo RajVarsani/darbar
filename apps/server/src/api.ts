@@ -1153,16 +1153,19 @@ api.get('/projects', async (c) => {
   const scope = want === 'all' ? {} : want === 'true' ? { archivedAt: { $ne: null } } : { archivedAt: null };
   const list = await Projects.find(scope, { projection: { charter: 0 } }).sort({ createdAt: -1 }).toArray();
   const withCounts = await Promise.all(list.map(async (p) => {
-    const [tasks, done, pendingFb] = await Promise.all([
+    const [tasks, done, cancelled, pendingFb] = await Promise.all([
       Tasks.countDocuments({ projectId: p._id }),
       Tasks.countDocuments({ projectId: p._id, status: 'done' }),
+      // cancelled rides along so the console can keep its fraction consistent with the board
+      // header, which excludes cancelled rows ("not counted here") from the denominator
+      Tasks.countDocuments({ projectId: p._id, status: 'cancelled' }),
       Feedback.countDocuments({ projectId: p._id, status: { $in: ['pending', 'needs_clarification'] } }),
     ]);
     // proxy target redacted here for the same reason as on /context: Gabbar's list_projects tool
     // returns this payload verbatim to a Slack-facing model. GET /projects/:ref/proxy is the read
     // that carries the upstream. (redactProxy/redactPublished are defined with that endpoint.)
     return {
-      ...p, boardUrl: `${config.baseUrl}/p/${p.capId}`, counts: { tasks, done, pendingFb },
+      ...p, boardUrl: `${config.baseUrl}/p/${p.capId}`, counts: { tasks, done, cancelled, pendingFb },
       // ALWAYS present, normalised to null, whatever was asked for. A consumer must be able to tell
       // live from archived off the row itself rather than off which query it happened to send, and
       // absent-vs-null is a distinction no reader of this list should have to know about.
