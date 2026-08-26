@@ -265,7 +265,7 @@ server.tool('set_slack_channel', 'Bind, rebind or unbind the Slack channel a pro
 server.tool('set_linear_url', 'Mark a project as LINEAR-NATIVE, or clear that (null). For such a project, Linear IS the board of record: tasks live there, agents work them there (full CRUD on issues carrying the darbar/<PREFIX> workspace label — and READ-ONLY on any issue without it, those belong to colleagues), and the darbar project is archived, surviving only as history plus the gabbar feedback pipe. The console card opens this URL (the archived native board stays in the card\'s menu) and the URL rides on get_project_context so every agent learns the mode before working. Feedback still arrives HERE via gabbar; the orchestrator drains it into Linear (comment on the relevant ticket, comment on the standing feedback-inbox ticket, or a new labelled issue) and then resolves the darbar row so the reporter\'s Slack thread gets its reply. The URL is a label-filtered view (the darbar/<PREFIX> label), not a Linear project, because rows scatter across the company\'s existing Linear projects. A hand-synced mirror mode preceded this and drifted within two days; do not recreate it.',
   {
     project: z.string(),
-    linearUrl: z.string().nullable().describe('absolute https URL of the Linear view that shows this board\'s rows (label filter or saved view), or null to clear the mirror'),
+    linearUrl: z.string().nullable().describe('absolute https URL of the Linear view that shows this board\'s rows (the darbar/<PREFIX> label filter, or a saved view), or null to make the project darbar-native again'),
   },
   ({ project, linearUrl }) => call(`/projects/${px(project)}`, 'PATCH', { linearUrl }));
 

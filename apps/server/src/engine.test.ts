@@ -1307,7 +1307,7 @@ test('DAR-262: a contended close logs no more about the held parent than an unco
   }
 });
 
-// ---------- linearUrl: the mirror pointer is config, and junk cannot claim to be a URL ----------
+// ---------- linearUrl: the linear-native pointer is config, and junk cannot claim to be a URL ----------
 
 test('linearUrl sets, reads back everywhere a session looks, and null clears it', async () => {
   const p = await project();

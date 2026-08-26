@@ -169,7 +169,7 @@ const CONFIG_VOCAB: FieldVocab = {
   pipeline: 'lanes are edited one at a time under /api/projects/:ref/pipeline/lanes, autoAdvance at PATCH /api/projects/:ref/pipeline, or wholesale with PATCH /api/projects/:ref {"pipeline": {…}}',
   agents: 'agents are edited one at a time under /api/projects/:ref/agents, or wholesale with PATCH /api/projects/:ref {"agents": […]}',
   proxy: 'the share is edited at PATCH /api/projects/:ref/proxy and published at PATCH /api/projects/:ref/proxy/enabled, or wholesale with PATCH /api/projects/:ref {"proxy": {…}}',
-  linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} points the console card at the project\'s Linear view (null clears it). Rows and feedback still live HERE; the Linear side is a mirror',
+  linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} makes this project LINEAR-NATIVE: Linear becomes the board of record for tasks and the console card opens that view (null clears it). Feedback still arrives here through gabbar and is drained into Linear by the orchestrator',
 };
 // what a granular project route is measured against: the server-owned fields plus the config doors.
 // NOTE ON SCOPE: a vocabulary belongs to ONE document, so each route below has to say which of these
@@ -2019,9 +2019,10 @@ api.get('/projects/:ref/context', async (c) => {
   return c.json({
     name: p.name, prefix: p.prefix, repos: p.repos, charter: p.charter, stakeholders: p.stakeholders,
     slackChannel: p.slackChannel ?? null,
-    // linear-mirrored project: the console card opens this view and a human copy of the open rows
-    // lives there. Rows/feedback/engine stay HERE — an agent reading this still works THIS board,
-    // and anything it closes needs the Linear twin moved by hand until a bridge exists.
+    // linear-native project: Linear is the board of record for TASKS, so an agent reading this
+    // works there (full CRUD only on issues carrying the darbar/<PREFIX> label). Feedback still
+    // arrives HERE through gabbar and the orchestrator drains it into Linear; the darbar project
+    // is archived and keeps history plus that pipe.
     linearUrl: p.linearUrl ?? null,
     pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy: redactProxy(p.proxy),
     proxyPublished: redactPublished(p.proxyPublished),

@@ -83,14 +83,17 @@ Socket Mode on, bot user `U0AGUK6D207`. (Old TST/TODO test projects were wiped
 - Commits: conventional-ish (`feat:`, `fix:`, `refactor:`); no session URLs in bodies.
 - Git pushes use the repo-local credential helper (reads `~/fafo/.envrc`); remotes
   stay token-free.
-- The Claude skills for this system (`gabbar` persona, `darbar-project-init`)
-  live in the separate public repo `RajVarsani/skills`, NOT here.
+- The Claude skills for this system (`gabbar` persona, plus the four darbar ones:
+  `darbar-project-init`, `darbar-tick`, `darbar-handoff`, `darbar-resume`) live in the
+  separate public repo `RajVarsani/skills`, NOT here. `darbar-project-init` is the
+  authority; the other three point at it and restate nothing.
 
 ## Compact instructions
 
 Run `/darbar-handoff` BEFORE compacting: it moves conversation-only facts onto the board,
-which is the only thing compaction cannot reach. After compaction the `SessionStart` hook
-reprints live board state automatically.
+which is the only thing compaction cannot reach. AFTER compaction the `SessionStart` hook
+reprints live board state automatically, and then `/darbar-resume` re-loads the doctrine —
+state survives a compaction, the operating manual does not.
 
 When compacting this project, keep, in this order of priority:
 

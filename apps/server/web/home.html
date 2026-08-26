@@ -121,7 +121,7 @@ function cardHtml(p) {
   // so they leave the denominator instead of reading as unfinished work from the outside
   const total = c.tasks - (c.cancelled || 0);
   const pct = total ? Math.round(c.done / total * 100) : 0;
-  // a linear-mirrored project opens its Linear view; the native board stays one ⋯ click away
+  // a linear-native project opens its Linear view; the darbar board stays one ⋯ click away
   const href = p.linearUrl || p.boardUrl;
   const ext = p.linearUrl ? ' target="_blank" rel="noopener"' : '';
   const chip = p.linearUrl ? '<span class="prefix linear">LINEAR</span>' : '';

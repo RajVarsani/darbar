@@ -47,7 +47,7 @@ def main():
 
     # ---- board ----
     live = LIVE
-    mirrored = set()  # projects with a linear mirror; rows still live here, the copy is hand-synced
+    native = set()  # linear-native: Linear holds the tasks, darbar keeps history + the feedback pipe
     if not live:
         projects = get('/projects')
         if projects is None:
@@ -58,7 +58,7 @@ def main():
             # the handoff. Only the DISCOVERED path is filtered - an explicit LIVE= is a
             # deliberate narrowing and is trusted as-is.
             live = [p.get('prefix') for p in items if p.get('prefix') and not p.get('archivedAt')]
-            mirrored = {p.get('prefix') for p in items if p.get('prefix') and p.get('linearUrl') and not p.get('archivedAt')}
+            native = {p.get('prefix') for p in items if p.get('prefix') and p.get('linearUrl') and not p.get('archivedAt')}
     if not live:
         out.append('BOARD: could not list projects on 4899')
         live = []
@@ -79,7 +79,7 @@ def main():
     else:
         fb = get('/feedback?status=pending') or {}
         pending = fb.get('total', fb.get('returned', 0)) if isinstance(fb, dict) else 0
-        shown = [p + '(linear-mirrored)' if p in mirrored else p for p in live]
+        shown = [p + '(linear-native)' if p in native else p for p in live]
         out.append(f"BOARD: {total_open} open across {','.join(shown)} · {pending} pending feedback")
         out.extend(rows[:MAX_ROWS])
         if len(rows) > MAX_ROWS:
