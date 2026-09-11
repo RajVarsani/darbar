@@ -4,3 +4,4 @@ data/
 .obsidian/
 data/backups/
 data/backup.log
+data/watchdog-state/

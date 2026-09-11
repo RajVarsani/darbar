@@ -113,6 +113,9 @@ def main():
         f'mongo:{"up" if listening(27018) else "DOWN"}',
         f'tunnel:{"up" if running("zrok share public") else "DOWN"}',
         f'gabbar:{"up" if running("filter @darbar/gabbar") else "DOWN"}',
+        # the watchdog is a periodic job with no resident pid, so ask launchd whether it is loaded.
+        # A watchdog nobody watches is how the sleep-death outages went unnoticed in the first place.
+        f'watchdog:{"up" if sh("launchctl", "list", "com.rajvarsani.darbar-watchdog") else "DOWN"}',
     ]
     out.append('PROCS: ' + ' · '.join(proc))
     out.append('')
