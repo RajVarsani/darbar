@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__LABEL_PREFIX__-gabbar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__DARBAR_ROOT__/scripts/svc.sh</string>
+    <string>gabbar</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <!-- without this a service that cannot start (docker down, port taken) respawns in a hot loop -->
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.bun/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__DARBAR_ROOT__/data/logs/gabbar.log</string>
+  <key>StandardErrorPath</key><string>__DARBAR_ROOT__/data/logs/gabbar.log</string>
+  <key>WorkingDirectory</key><string>__DARBAR_ROOT__</string>
+</dict>
+</plist>

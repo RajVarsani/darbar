@@ -10,3 +10,6 @@ data/watchdog-state/
 # repo root would have published them. This repo is PUBLIC.
 .env.*
 !.env.example
+
+# session snapshot + watchdog bookkeeping: machine state, not source
+data/handoff.md

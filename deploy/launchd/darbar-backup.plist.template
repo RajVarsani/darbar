@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL_PREFIX__-backup</string>
+
+  <!-- Verified nightly mongodump of darbar's own mongo. Remove with:
+       launchctl bootout gui/$(id -u)/__LABEL_PREFIX__-backup
+       rm ~/Library/LaunchAgents/__LABEL_PREFIX__-backup.plist -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__DARBAR_ROOT__/scripts/backup.sh</string>
+  </array>
+
+  <!-- 03:15. launchd runs a missed calendar job once on wake, so a laptop that was
+       asleep still gets its backup rather than silently skipping the night. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>15</integer>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- docker lives in /usr/local/bin or /opt/homebrew/bin; launchd's default PATH has neither -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__DARBAR_ROOT__/data/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DARBAR_ROOT__/data/backup.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
