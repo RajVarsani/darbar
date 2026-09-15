@@ -5,3 +5,8 @@ data/
 data/backups/
 data/backup.log
 data/watchdog-state/
+
+# .env backups hold live tokens; only bare .env was ignored, so one `git add -A` at the
+# repo root would have published them. This repo is PUBLIC.
+.env.*
+!.env.example
