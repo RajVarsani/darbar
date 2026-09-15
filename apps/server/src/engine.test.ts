@@ -385,7 +385,7 @@ test('the loser of the race applied nothing at all, not even the fields that had
 // ---------- 3. a feedback row is attributed to somebody the project knows ----------
 
 const ROSTERED = {
-  stakeholders: [{ name: 'Raj', role: 'owner' }, { name: 'Tanisha' }],
+  stakeholders: [{ name: 'Raj', role: 'owner' }, { name: 'Teammate' }],
   agents: [{ name: 'staff-engineer', kind: 'lane-manager', brief: 'reviews code' }],
 };
 
@@ -402,7 +402,7 @@ test('an author nobody on the project has heard of is refused, and the 409 lists
   const filed = await req('POST', '/feedback', { project: p.prefix, author: 'probe', body: 'test test' });
   expect(filed.status).toBe(400);
   expect(filed.error).toContain('"probe" is not on');
-  expect(filed.error).toContain('stakeholders [Raj, Tanisha]');
+  expect(filed.error).toContain('stakeholders [Raj, Teammate]');
   expect(filed.error).toContain('agents [staff-engineer]');
 });
 

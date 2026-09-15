@@ -4,7 +4,7 @@
 // else. That is fine for the feedback row (a human clicks it) and useless for comprehension:
 // the model has no fetch tool, so a screenshot contributed no pixels and a .mov contributed
 // less than nothing, since the filed body sounded grounded while resting on the filename.
-// Tanisha's calendar recording is the case in point — Raj ended up typing out the cause the
+// a teammate's calendar recording is the case in point — Raj ended up typing out the cause the
 // video already showed.
 //
 // ---------- one pass, so the prompt cannot lie ----------

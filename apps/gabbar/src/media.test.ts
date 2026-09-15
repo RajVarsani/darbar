@@ -12,7 +12,7 @@
 //
 // The video fixtures are synthesized rather than checked in: a mostly static 1280x800 "screen"
 // with a small dark panel that jumps position ONCE at t=7s plus a cursor stepping around. That
-// is the shape of the bug this came from (Tanisha's date picker flipping above its input on a
+// is the shape of the bug this came from (a teammate's date picker flipping above its input on a
 // month change) and the shape a naive sampler fails on, since the panel is 1.5% of the frame and
 // scores ~0.05 where a conventional cut threshold is 0.3. `cut.mp4` is that same clip with
 // +faststart and 70% of its bytes removed, so ffprobe still answers 10.0s while almost nothing

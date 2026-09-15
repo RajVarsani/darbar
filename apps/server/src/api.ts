@@ -498,7 +498,7 @@ function readStakeholders(v: unknown): { stakeholders: Stakeholder[] } | { error
     const bad: string[] = [];
     if (typeof name !== 'string' || !name.trim()) bad.push('name (non-empty string) required');
     if (slackUserId !== undefined && (typeof slackUserId !== 'string' || !SLACK_USER_ID.test(slackUserId))) {
-      bad.push(`slackUserId must be a slack USER id when present: "U" or "W" then uppercase letters/digits, e.g. U08SXQF8RTQ (got ${JSON.stringify(slackUserId)}). Gabbar's feedback gate matches this exact string against the verified sender, so a wrong one silently refuses a real person`);
+      bad.push(`slackUserId must be a slack USER id when present: "U" or "W" then uppercase letters/digits, e.g. U0EXAMPLE123 (got ${JSON.stringify(slackUserId)}). Gabbar's feedback gate matches this exact string against the verified sender, so a wrong one silently refuses a real person`);
     }
     if (role !== undefined && typeof role !== 'string') bad.push('role must be a string when present');
     if (bad.length) { errs.push(`stakeholders[${i}]: ${bad.join('; ')}`); return; }
@@ -1584,11 +1584,11 @@ api.patch('/projects/:ref/stakeholders/:name', async (c) => {
   if (i < 0) return c.json({ error: `stakeholder "${name}" is not on this project — listed: ${current.map((s) => s.name).join(', ') || '(nobody)'}` }, 404);
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
-  // `name` is NOT on this list. It used to be, which made {"name":"Tanisha"} a 200 reporting
+  // `name` is NOT on this list. It used to be, which made {"name":"Teammate"} a 200 reporting
   // `updated` while changing nothing, because only `rename` is ever applied — a silent success on the
   // access-control surface, reachable by the curl the charter tells builders to use (same defect class
   // as DAR-187). Now it falls through to the 400 below, exactly like the agent route.
-  // `name` fell through to the 400 below only when it was sent ALONE. {"name":"Tanisha","role":"x"}
+  // `name` fell through to the 400 below only when it was sent ALONE. {"name":"Teammate","role":"x"}
   // applied the role and dropped the rename under a 200, which is the same hole the agent route had
   // one floor up, on the access-control surface. It is refused by name now, either way.
   if (b.name !== undefined) {
@@ -3127,7 +3127,7 @@ api.get('/parked', async (c) => {
 // ---------- the orchestrator inbox, and the doorbell on it ----------
 //
 // DAR-245. The pending queue is the orchestrator's inbox and, until this, nothing rang it: Gabbar
-// filed a row and the row waited for somebody to think of it. Two real cases in one day. Abhishek's
+// filed a row and the row waited for somebody to think of it. Two real cases in one day. Teammate C's
 // idea sat until Raj typed "process the feedbacks". A held report promoted only because Raj happened
 // to add him as a stakeholder, which ran the sweep by luck.
 //

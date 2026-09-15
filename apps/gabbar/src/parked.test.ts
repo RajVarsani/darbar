@@ -26,8 +26,8 @@ const input = (over: Partial<Parameters<typeof P.parkReport>[0]> = {}) => ({
   channel: 'D0AH8292D7Y',
   ts: '1754771234.123456',
   threadTs: null,
-  authorId: 'U0TANISHA',
-  authorName: 'Tanisha',
+  authorId: 'U0TEAMMATE',
+  authorName: 'Teammate',
   projectRef: 'MRF',
   projectName: 'MRF v3',
   taskRef: null,
@@ -37,7 +37,7 @@ const input = (over: Partial<Parameters<typeof P.parkReport>[0]> = {}) => ({
   attachments: ['http://localhost:4899/files/rec.mov'],
   mediaNotes: ['video rec.mov -> http://localhost:4899/files/rec.mov frames: .../f01.jpg'],
   gateKind: 'not_stakeholder',
-  gateDetail: 'Tanisha (U0TANISHA) is not a stakeholder on MRF v3',
+  gateDetail: 'Teammate (U0TEAMMATE) is not a stakeholder on MRF v3',
   cause: 'stakeholder_gap' as const,
   ...over,
 });
@@ -116,9 +116,9 @@ test('a message that goes on to file for real retires its held copy', () => {
 test('held reports are listed per author, so one sender never sees another', () => {
   P.parkReport(input());
   P.parkReport(input({ ts: '1754770000.000200', authorId: 'U0OTHER', authorName: 'Someone' }));
-  const mine = P.listParked({ status: 'parked', authorId: 'U0TANISHA' });
+  const mine = P.listParked({ status: 'parked', authorId: 'U0TEAMMATE' });
   expect(mine).toHaveLength(1);
-  expect(mine[0]?.author.name).toBe('Tanisha');
+  expect(mine[0]?.author.name).toBe('Teammate');
 });
 
 test('a corrupt file is skipped, not fatal', async () => {
@@ -423,7 +423,7 @@ test('what is already filed is never escalated', () => {
 test('the digest line says held, names the cause, and quotes no feedback id', () => {
   const line = P.escalationLine(aged(input({ cause: 'outage' }), 3 * HOUR));
   expect(line).toContain('held 3h');
-  expect(line).toContain('Tanisha');
+  expect(line).toContain('Teammate');
   expect(line).toContain('darbar could not be reached');
   expect(line).not.toMatch(/-FB-\d+/);
   expect(P.escalationLine(aged(input({ ts: '1754771234.999999' }), 2 * DAY))).toContain('not a stakeholder on MRF v3');

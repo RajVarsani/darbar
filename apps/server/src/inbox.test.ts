@@ -64,7 +64,7 @@ const heldFile = (parkId: string, over: Record<string, unknown> = {}) =>
   writeFileSync(path.join(RIG, `${parkId}.json`), JSON.stringify({
     status: 'parked',
     createdAt: new Date().toISOString(),
-    author: { name: 'Abhishek', slackUserId: 'U07UJ38U2RK' },
+    author: { name: 'Teammate C', slackUserId: 'U0EXAMPLE456' },
     feedbackType: 'idea',
     body: 'held idea',
     rawMessage: 'held idea',

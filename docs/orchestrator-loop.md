@@ -244,7 +244,7 @@ gated.
 | `origin`, `commits`, `shortId`, `parentTaskRef`/`parentTaskId`, `project`/`projectId` on `PATCH /tasks` | 400 `not settable on an existing task: origin — set at create only (POST /tasks {"origin": …})`, one clause per field sent |
 | prefix with a digit on `POST /projects` | 400 `name (string) and prefix (2-6 letters) required` |
 | duplicate project prefix | 409 |
-| malformed `stakeholders[].slackUserId` on `POST`/`PATCH /projects` | 400 naming the index and the `U`/`W` shape; on a POST nothing is created. Through a granular route the same 400 names the person instead: `stakeholder "Tanisha": slackUserId must be a slack USER id when present ...` |
+| malformed `stakeholders[].slackUserId` on `POST`/`PATCH /projects` | 400 naming the index and the `U`/`W` shape; on a POST nothing is created. Through a granular route the same 400 names the person instead: `stakeholder "Teammate": slackUserId must be a slack USER id when present ...` |
 | a granular config PATCH/DELETE naming an agent, lane or stakeholder that is not there | 404 `agent "staff-enginer" is not registered — registry holds: staff-engineer, qa-lead, orchestrator`, and the same shape for `lane "x" is not configured — pipeline holds: ...` and `stakeholder "X" is not on this project — listed: ...`. Never an upsert |
 | a granular POST of a name already taken, case and spacing folded | 409 naming the existing entry and the PATCH that edits it: `agent "staff-engineer" is already registered (you sent "Staff-Engineer", ...)` |
 | granular PATCH with no editable field | 400 `nothing to update (kind, brief, trigger, rename)`, `(label, manager, rename)`, `(slackUserId, role, rename)`, `(autoAdvance) — lanes are edited one at a time under /pipeline/lanes`, `(prefix, target, public)` |
@@ -376,9 +376,9 @@ B=localhost:4899/api/projects/DAR
 H='content-type: application/json'
 
 # stakeholders — access control: the slack id is what Gabbar's feedback gate matches
-curl -s -X POST   $B/stakeholders -H "$H" -d '{"name":"Tanisha","slackUserId":"U08SXQF8RTQ","role":"backend"}'
-curl -s -X PATCH  $B/stakeholders/Tanisha -H "$H" -d '{"slackUserId":null,"role":"product","rename":"Tanisha K"}'
-curl -s -X DELETE "$B/stakeholders/Tanisha%20K"    # the URL addresses the CURRENT name
+curl -s -X POST   $B/stakeholders -H "$H" -d '{"name":"Teammate","slackUserId":"U0EXAMPLE123","role":"backend"}'
+curl -s -X PATCH  $B/stakeholders/Teammate -H "$H" -d '{"slackUserId":null,"role":"product","rename":"Teammate B"}'
+curl -s -X DELETE "$B/stakeholders/Teammate%20K"    # the URL addresses the CURRENT name
 
 # agents — `name` is the assignee key, so a rename is not a cosmetic change
 curl -s -X POST   $B/agents -H "$H" -d '{"name":"deploy-devx","kind":"helper","brief":"...","trigger":"after lanes close"}'

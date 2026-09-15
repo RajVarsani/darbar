@@ -1,7 +1,7 @@
 // Parking lot for reports the stakeholder gate refused.
 //
 // The gate in agent.ts fails closed on the verified slack sender id, which is correct.
-// The bug it caused was that a refusal ALSO threw the report away: Tanisha's calendar bug
+// The bug it caused was that a refusal ALSO threw the report away: a teammate's calendar bug
 // and its screen recording survived only because Raj happened to be reading the thread.
 //
 // A parked item is held here instead. It is deliberately NOT a feedback row:

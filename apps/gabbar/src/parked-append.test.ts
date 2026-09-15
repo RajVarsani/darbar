@@ -103,8 +103,8 @@ beforeEach(() => {
 // as a whole is really reading whatever the run happened to leave there.
 const MSG = 'this is the same bug on the settings screen, screenshot attached';
 const mkCtx = (ts: string) => ({
-  senderId: 'U0TANISHA', // NOT the owner and NOT on the roster above: the gate has to actually refuse
-  senderName: 'Tanisha',
+  senderId: 'U0TEAMMATE', // NOT the owner and NOT on the roster above: the gate has to actually refuse
+  senderName: 'Teammate',
   isOwner: false,
   channel: 'D0AH8292D7Y',
   channelType: 'im',
@@ -173,7 +173,7 @@ test('a held addition is promoted through the APPEND route and never as a new ro
   expect(asked.some((a) => a.url === `${STUB_API}/feedback`)).toBe(false);
 
   // attribution stays with whoever sent it, and the note says it was held rather than sent now
-  expect(posts[0]!.body!.author).toBe('Tanisha');
+  expect(posts[0]!.body!.author).toBe('Teammate');
   expect(posts[0]!.body!.authorType).toBe('human');
   expect(posts[0]!.body!.attachments).toEqual(['http://127.0.0.1:9/files/shot.png']);
   expect(String(posts[0]!.body!.note)).toContain('it also happens on the settings screen');

@@ -175,7 +175,7 @@ server.tool('add_stakeholder', 'Add ONE person to a project\'s stakeholder list.
   {
     project: z.string(),
     name: z.string().describe('display name; this is how the person is addressed by update_stakeholder / remove_stakeholder and how tasks are assigned to them'),
-    slackUserId: z.string().optional().describe('slack USER id, e.g. U08SXQF8RTQ — NOT a display name and not a channel id. This exact string is what the feedback gate matches'),
+    slackUserId: z.string().optional().describe('slack USER id, e.g. U0EXAMPLE123 — NOT a display name and not a channel id. This exact string is what the feedback gate matches'),
     role: z.string().optional().describe('owner / design / backend / product — free text, used for context'),
   },
   ({ project, ...rest }) => call(`/projects/${px(project)}/stakeholders`, 'POST', rest));

@@ -226,7 +226,7 @@ export type AgentContext = {
 // user id match) or the owner. The check runs against ctx.senderId — injected by
 // the transport from the verified slack payload, never model-supplied.
 //
-// A refusal used to end there, which threw the report away: Tanisha's calendar bug and its
+// A refusal used to end there, which threw the report away: a teammate's calendar bug and its
 // screen recording were saved only by Raj happening to read the thread. A refusal now PARKS
 // the report (see parked.ts) so the words and the evidence outlive the conversation. Parking
 // changes nothing about who may file: the gate's answer is untouched, and a parked report is
@@ -1318,7 +1318,7 @@ function buildTools(ctx: AgentContext) {
 
 // Owner-only: the parking lot. Held items belong to other people, so listing them is
 // restricted the same way memory is, and promotion is the owner acting deliberately (which is
-// exactly what Raj did by hand for Tanisha, minus the waiting). Promotion means two different
+// exactly what Raj did by hand for Teammate, minus the waiting). Promotion means two different
 // things depending on the kind, and the tools below route on it rather than asking the model to.
 function parkedTools(ctx: AgentContext) {
   return [

@@ -192,9 +192,9 @@ test('an append does not trim the body it is appending to', () => {
 
 test('appends stack, oldest first, each one attributed', () => {
   const one = appendedBody('original', ADD);
-  const two = appendedBody(one, { ...ADD, author: 'Tanisha', note: 'same on the mobile layout', attachments: [] });
+  const two = appendedBody(one, { ...ADD, author: 'Teammate', note: 'same on the mobile layout', attachments: [] });
   expect(two.indexOf('original')).toBe(0);
-  expect(two.indexOf('[Raj added')).toBeLessThan(two.indexOf('[Tanisha added'));
+  expect(two.indexOf('[Raj added')).toBeLessThan(two.indexOf('[Teammate added'));
 });
 
 // a feedback body is quoted back into slack by Gabbar's get_feedback, and the charter bans em

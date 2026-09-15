@@ -1,6 +1,6 @@
 // ---------- the doorbell on the orchestrator's inbox ----------
 //
-// DAR-245. Gabbar files a pending feedback row and nothing tells the orchestrator. Abhishek's idea
+// DAR-245. Gabbar files a pending feedback row and nothing tells the orchestrator. Teammate C's idea
 // sat in the queue until Raj typed "process the feedbacks"; a held report promoted only because Raj
 // happened to add him as a stakeholder and that triggered the sweep by luck. The pending queue IS
 // the orchestrator's inbox and nothing rang it.

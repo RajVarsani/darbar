@@ -49,7 +49,7 @@ const park = (name: string, o: unknown) => write(`${name}.json`, JSON.stringify(
 const held = (over: Record<string, unknown> = {}) => ({
   status: 'parked',
   createdAt: '2026-08-05T10:00:00.000Z',
-  author: { name: 'Priya Nair', slackUserId: 'U08SXQF8RTQ' },
+  author: { name: 'Priya Nair', slackUserId: 'U0EXAMPLE123' },
   target: { projectRef: 'PKT', projectName: 'Parked Kit' },
   feedbackType: 'bug',
   body: 'the board drops the last column on a narrow window',
@@ -222,7 +222,7 @@ const PWN = `';touch /tmp/darbar-should-never-exist;'`;
 const item = (over: Record<string, unknown> = {}) => ({
   parkId: 'PARK-C1_1_001', filed: false, parked: true, status: 'parked',
   kind: 'report', appendTo: null, addedToRow: null,
-  author: 'Priya Nair', authorSlackId: 'U08SXQF8RTQ',
+  author: 'Priya Nair', authorSlackId: 'U0EXAMPLE123',
   project: 'Parked Kit', projectRef: 'PKT', onTask: null, type: 'bug',
   body: 'the export button does nothing', theirWords: 'the export button does nothing on safari',
   theirWordsTruncated: false, attachments: [], mediaNotes: [],
@@ -246,7 +246,7 @@ test('a display name that breaks out of a shell quote produces no command at all
   const i = item({ author: PWN });
   const fix = band.heldFix(i);
   // the remedy is structured data now: a name is a value, not a word of a command
-  expect(fix.act).toEqual({ parkId: 'PARK-C1_1_001', name: PWN, slackUserId: 'U08SXQF8RTQ', prefix: 'PKT' });
+  expect(fix.act).toEqual({ parkId: 'PARK-C1_1_001', name: PWN, slackUserId: 'U0EXAMPLE123', prefix: 'PKT' });
   expect(JSON.stringify(fix)).not.toContain('curl');
 
   const html = band.heldRowHtml(i);
@@ -303,7 +303,7 @@ test('a slack id that can never clear the gate gets no button', () => {
 
 test('somebody already registered is told so instead of offered a duplicate grant', () => {
   board();
-  (state.data as { project: { stakeholders: unknown[] } }).project.stakeholders = [{ name: 'Priya Nair', slackUserId: 'U08SXQF8RTQ' }];
+  (state.data as { project: { stakeholders: unknown[] } }).project.stakeholders = [{ name: 'Priya Nair', slackUserId: 'U0EXAMPLE123' }];
   const fix = band.heldFix(item());
   expect(fix.act).toBeNull();
   expect(fix.p).toContain('already registered');
@@ -343,7 +343,7 @@ test('the remedy on an addition promises an append, never a filing', () => {
   expect(fix.p).toContain('does not add anything to PKT-FB-12');
   expect(fix.p).toContain('never becomes a second row');
   expect(fix.p).not.toContain('file the report');
-  expect(fix.act).toEqual({ parkId: 'PARK-C1_1_001', name: 'Priya Nair', slackUserId: 'U08SXQF8RTQ', prefix: 'PKT' });
+  expect(fix.act).toEqual({ parkId: 'PARK-C1_1_001', name: 'Priya Nair', slackUserId: 'U0EXAMPLE123', prefix: 'PKT' });
 });
 
 test('the armed grant on an addition declines the right thing', () => {
