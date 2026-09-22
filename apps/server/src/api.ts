@@ -237,7 +237,8 @@ const FEEDBACK_VOCAB: FieldVocab = {
   updatedAt: 'stamped by the server on every write',
 };
 
-// lanes: absent = untouched, null = default-all, [] = explicitly none, array = subset.
+// lanes: absent = untouched, null = default (code-review alone if the pipeline has that lane, else
+// every lane), [] = explicitly none, array = subset.
 // malformed shapes 400 instead of coercing — lanes:[123] must never read as "explicitly none"
 const LANES_SHAPE_ERROR = 'lanes must be null or an array of lane-key strings';
 const lanesShapeBad = (v: unknown): boolean =>
@@ -896,13 +897,16 @@ const openFeedbackShortIds = async (taskId: ObjectId) =>
     .map((f) => f.shortId);
 
 // dev task entered in_review -> one review subtask per configured lane, assigned to the lane manager.
-// task.lanes narrows the configured lanes when set (null/absent = all).
+// task.lanes narrows the configured lanes when set. null/absent defaults to the code-review lane
+// alone if the pipeline has one; a pipeline with no code-review key falls back to every configured
+// lane (the old default-all behaviour), so a project without that key is unaffected by this default.
 // A re-entry after rework spawns a fresh round only once the previous round is fully closed.
 async function spawnReviews(t: Task) {
   const p = await Projects.findOne({ _id: t.projectId });
   if (!p) return;
-  const want = t.lanes ?? null;
-  const lanes = (p.pipeline?.reviews ?? []).filter((l) => !want || want.includes(l.lane));
+  const configured = p.pipeline?.reviews ?? [];
+  const want = t.lanes ?? (configured.some((l) => l.lane === 'code-review') ? ['code-review'] : null);
+  const lanes = configured.filter((l) => !want || want.includes(l.lane));
   if (await openReviewCount(t._id!)) return;
   if (lanes.length === 0) {
     if (!want) return; // no pipeline configured: task waits in in_review as before
@@ -1489,14 +1493,18 @@ const relabel = (msg: string, i: number, label: string) =>
 //    configured lane at all, spawnReviews logs "no review lanes selected" and maybeAdvanceParent
 //    takes them straight to done UNREVIEWED. If they still name another surviving lane, they simply
 //    lose this one review.
-//  · DEFAULT-ALL tasks (`lanes` null or absent = every configured lane). A rename never touches them,
-//    since they take whatever the pipeline holds. Removing one lane of several only loses that review.
-//    But removing the LAST lane strands them somewhere worse than done: spawnReviews returns early
-//    when `want` is null and lanes is empty, so there is no event, no advance, and the task sits in
-//    in_review forever. The earlier version of this code both missed these tasks and told the operator
-//    they "advance immediately", which is wrong in the direction that makes someone stop looking.
+//  · DEFAULT tasks (`lanes` null or absent = the code-review lane alone if the pipeline has one, else
+//    every configured lane). Renaming or removing any OTHER lane never touches them, since they never
+//    looked at it. Renaming or removing code-review itself does not strand them either, as long as
+//    some lane survives: spawnReviews re-reads the pipeline at spawn time and falls back to every
+//    remaining lane. The only way to strand them is removing the LAST lane in the pipeline: with
+//    nothing configured at all, spawnReviews returns early when `want` is null and lanes is empty, so
+//    there is no event, no advance, and the task sits in in_review forever. The earlier version of
+//    this code both missed these tasks and told the operator they "advance immediately", which is
+//    wrong in the direction that makes someone stop looking.
 // Mongo note: `{ lanes: null }` matches both an explicit null and a missing field, which is exactly
-// the default-all population.
+// the default population — and the `remaining.length` check below gates strandedStall to the only
+// case where that population is actually at risk: the pipeline ending up with zero lanes.
 type LaneImpact = { stranded: string[]; partial: string[]; strandedStall: string[] };
 async function laneImpact(projectId: ObjectId, lane: string, remaining: string[]): Promise<LaneImpact> {
   const open = { projectId, status: { $nin: CLOSED } };
@@ -1517,7 +1525,7 @@ const laneBlockers = (x: LaneImpact) => [...x.stranded, ...x.strandedStall];
 const laneBlockerWhy = (x: LaneImpact, subject: string): string => {
   const parts: string[] = [];
   if (x.stranded.length) parts.push(`${x.stranded.length} task(s) select it explicitly (${x.stranded.join(', ')}) and would be left with no configured lane, so at in_review they skip review entirely and (with autoAdvance on) go straight to DONE UNREVIEWED`);
-  if (x.strandedStall.length) parts.push(`${x.strandedStall.length} task(s) take the default of all lanes (${x.strandedStall.join(', ')}) and this removes the last one, so at in_review they spawn nothing, log nothing and STALL in in_review rather than advancing`);
+  if (x.strandedStall.length) parts.push(`${x.strandedStall.length} task(s) take the default lane selection (${x.strandedStall.join(', ')}) and this removes the last lane in the pipeline, so at in_review they spawn nothing, log nothing and STALL in in_review rather than advancing`);
   return `${subject} is invisible to open work: ${parts.join('; and ')}`;
 };
 async function tasksAssignedTo(projectId: ObjectId, assignee: string): Promise<string[]> {

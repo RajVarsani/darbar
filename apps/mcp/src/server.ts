@@ -91,7 +91,7 @@ server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only t
     assigneeType: z.enum(['agent', 'human']).optional(), origin: z.string().optional(),
     type: TYPE.optional(), status: STATUS.optional(),
     blocker: z.string().optional().describe('why this task cannot be started, when you are filing it already blocked. It is applied at create now; it used to be dropped under a 200, which put blocked cards on the board with no why on them. Changing or clearing it later is update_task {blocker} / {blocker: null}'),
-    lanes: z.array(z.string()).optional().describe('review lanes to spawn when this task hits in_review — pick by judgment: code-review for code changes, qa for behavior/outcomes, design-qa only for UI surfaces; [] = explicitly no reviews; omit = all configured lanes'),
+    lanes: z.array(z.string()).optional().describe('review lanes to spawn when this task hits in_review — pick by judgment: code-review for code changes, qa for behavior/outcomes, design-qa only for UI surfaces; [] = explicitly no reviews; omit = code-review alone if the pipeline has that lane, else every configured lane'),
   },
   (args) => call('/tasks', 'POST', args));
 

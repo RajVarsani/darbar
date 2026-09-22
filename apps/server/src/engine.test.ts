@@ -60,6 +60,46 @@ test('closing the last review lane advances the parent by itself', async () => {
   expect(await statusOf(t.shortId)).toBe('done');
 });
 
+// ---------- DAR-272: an absent/null lanes field defaults to code-review, not every lane ----------
+
+test('a task with no lanes field spawns only code-review when the pipeline has that lane', async () => {
+  const p = await project(); // default fixture pipeline: code-review, qa, design-qa
+  const t = await task(p.prefix);
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+
+  const kids = await children(t.shortId);
+  expect(kids).toHaveLength(1);
+  expect((kids[0] as unknown as { lane: string }).lane).toBe('code-review');
+});
+
+test('a task with no lanes field spawns every lane on a pipeline with no code-review key', async () => {
+  const p = await project({
+    pipeline: {
+      autoAdvance: true,
+      reviews: [
+        { lane: 'qa', label: 'QA', manager: 'qa-lead' },
+        { lane: 'design-qa', label: 'DQA', manager: 'staff-designer' },
+      ],
+    },
+  });
+  const t = await task(p.prefix);
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+
+  const kids = await children(t.shortId);
+  expect(kids).toHaveLength(2);
+  const lanes = (kids as unknown as { lane: string }[]).map((k) => k.lane).sort();
+  expect(lanes).toEqual(['design-qa', 'qa']);
+});
+
+test('lanes: [] still spawns nothing, even on a pipeline with a code-review lane', async () => {
+  const p = await project();
+  const t = await task(p.prefix, { lanes: [] });
+  await req('PATCH', `/tasks/${t.shortId}`, { status: 'in_review' });
+
+  const kids = await children(t.shortId);
+  expect(kids).toHaveLength(0);
+});
+
 // ---------- gate two: open feedback filed on the task ----------
 
 test('every open feedback status filed on a task blocks done, and says which row', async () => {
