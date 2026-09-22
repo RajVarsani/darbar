@@ -35,6 +35,19 @@ def get(path):
         return None
 
 
+def get_text(path):
+    # DAR-275/281: memory index is text/markdown, not JSON, and a 404 (route not deployed
+    # yet) or any other failure must produce NOTHING — never an error string injected into
+    # a live session's context.
+    try:
+        with urllib.request.urlopen(f'{API}{path}', timeout=5) as r:
+            if r.status != 200:
+                return None
+            return r.read().decode('utf-8', errors='replace').strip()
+    except Exception:
+        return None
+
+
 def sh(*args, cwd=ROOT):
     try:
         return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=15).stdout.strip()
@@ -119,6 +132,25 @@ def main():
     ]
     out.append('PROCS: ' + ' · '.join(proc))
     out.append('')
+
+    # ---- memory index (DAR-275/281): GLOBAL ONLY here. This hook doesn't know which
+    # project the session is orchestrating, so it can't pick a per-project index without
+    # guessing — and a fetch per live project (6+ * up to 24KB) breaks the snapshot's own
+    # "keep it small, paid on every compaction" rule. Per-project memory is fetched
+    # on-demand by darbar-resume once it knows the project, not here. Route already caps
+    # the response under 24KB — append it verbatim, don't re-truncate. Silent on
+    # 404/error, per contract.
+    global_idx = get_text('/memory/index')
+    if global_idx:
+        out.append('# memory · global')
+        out.append(global_idx)
+        out.append('')
+    out.append(
+        'project memory: /darbar-resume fetches /api/memory/index?project=<PREFIX> for '
+        'the board you are running; or recall <PREFIX> on demand.'
+    )
+    out.append('')
+
     out.append('RECENT COMMITS')
     for l in sh('git', 'log', '--oneline', '-5').splitlines():
         out.append(f'  {l}')
