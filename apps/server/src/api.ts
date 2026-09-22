@@ -1801,8 +1801,10 @@ api.patch('/projects/:ref/pipeline/lanes/:lane', async (c) => {
   }
   const pre: string[] = [];
   if (rename && rename !== lane) {
-    // a rename keeps the lane count, so default-all tasks are untouched (they take whatever the
-    // pipeline holds); only explicit selectors of the old key can be stranded by it
+    // a rename keeps the lane count, but a default task (no lanes field) is NOT untouched if the
+    // renamed key is "code-review": spawnReviews only narrows the default to code-review-only
+    // when that exact key is configured, so renaming it away reverts default tasks to every
+    // configured lane. Explicit selectors of the old key can additionally be stranded by it.
     const remaining = cur.reviews.map((r) => (r.lane === lane ? rename : r.lane));
     const impact = await laneImpact(p._id!, lane, remaining);
     const blockers = laneBlockers(impact);
@@ -1839,11 +1841,11 @@ api.delete('/projects/:ref/pipeline/lanes/:lane', async (c) => {
   }
   const pre: string[] = [];
   if (impact.stranded.length) pre.push(`FORCED: ${impact.stranded.length} open task(s) (${impact.stranded.join(', ')}) selected only this lane and will now go to done with no review`);
-  if (impact.strandedStall.length) pre.push(`FORCED: ${impact.strandedStall.length} open task(s) (${impact.strandedStall.join(', ')}) take the default of all lanes and will now STALL in in_review, since spawnReviews returns early with no lanes configured and nothing advances them`);
+  if (impact.strandedStall.length) pre.push(`FORCED: ${impact.strandedStall.length} open task(s) (${impact.strandedStall.join(', ')}) take the pipeline default and will now STALL in in_review, since spawnReviews returns early with no lanes configured and nothing advances them`);
   if (impact.partial.length) pre.push(`${impact.partial.length} open task(s) (${impact.partial.join(', ')}) select "${lane}" among other lanes: they lose this one review and keep the rest`);
   // the two end states differ and the difference is the whole point: an explicit empty selection is
   // handled (event + advance), a default-all selection is not (early return, task sits in in_review)
-  if (!reviews.length) pre.push('no review lanes remain: a task that names its lanes explicitly now skips review and, with autoAdvance on, advances; a task with no lanes field takes the default of all lanes, matches nothing, and stalls in in_review with no event');
+  if (!reviews.length) pre.push('no review lanes remain: a task that names its lanes explicitly now skips review and, with autoAdvance on, advances; a task with no lanes field takes the pipeline default (which is now empty, since no code-review key remains), matches nothing, and stalls in in_review with no event');
   const r = await applyConfig(p, { pipeline: { autoAdvance: cur.autoAdvance, reviews } });
   if (failed(r)) return c.json({ error: r.error }, r.status);
   return c.json({ removed: lane, pipeline: r.doc.pipeline, warnings: [...pre, ...r.warnings] });
@@ -2345,8 +2347,9 @@ api.patch('/tasks/:ref', async (c) => {
   // read-the-row / change-one-part / send-it-back is the documented procedure, and every builder's
   // own status PATCH now travels past a freeze that covers the status it is reporting FROM. Compared
   // STRICTLY rather than with echoedUnchanged, because that predicate reads null and [] as the same
-  // emptiness and here they are opposite selections (all lanes vs no lanes): conflating them would
-  // wave a real change through the freeze, which is the bug rather than the exemption.
+  // emptiness and here they are opposite selections (null takes the pipeline default — code-review
+  // alone when configured, otherwise every lane — vs [] selecting no lanes at all): conflating them
+  // would wave a real change through the freeze, which is the bug rather than the exemption.
   const lanesEchoed = lanes !== undefined && deepEqual(jsonish(b.lanes), jsonish(t.lanes));
   if (lanes !== undefined && !lanesEchoed) {
     // in_progress is the status a live builder holds, and it was NOT frozen: lanes cleared under a

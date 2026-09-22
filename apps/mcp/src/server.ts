@@ -232,7 +232,7 @@ server.tool('add_review_lane', 'Add ONE review lane to the pipeline, keeping the
   },
   ({ project, ...rest }) => call(`/projects/${px(project)}/pipeline/lanes`, 'POST', rest));
 
-server.tool('update_review_lane', 'Reassign ONE lane\'s manager, or change its label or key, keeping every other lane. Renaming the KEY is gated: lane selection on a task is frozen once it enters review and is never re-validated, so open tasks that named the old key and nothing else would silently match no lane, skip review entirely and (with autoAdvance) go straight to done unreviewed. The 409 names those tasks and says which end state each one lands in; force repeats the call anyway. Tasks that also select a surviving lane are reported as a warning rather than gated, and tasks with no lanes field are unaffected by a rename since they take whatever the pipeline holds.',
+server.tool('update_review_lane', 'Reassign ONE lane\'s manager, or change its label or key, keeping every other lane. Renaming the KEY is gated: lane selection on a task is frozen once it enters review and is never re-validated, so open tasks that named the old key and nothing else would silently match no lane, skip review entirely and (with autoAdvance) go straight to done unreviewed. The 409 names those tasks and says which end state each one lands in; force repeats the call anyway. Tasks that also select a surviving lane are reported as a warning rather than gated. Tasks with no lanes field are NOT unaffected: renaming the code-review key changes their default from code-review-only back to every configured lane.',
   {
     project: z.string(),
     lane: z.string().describe('current lane key'),
@@ -243,7 +243,7 @@ server.tool('update_review_lane', 'Reassign ONE lane\'s manager, or change its l
   },
   ({ project, lane, ...rest }) => call(`/projects/${px(project)}/pipeline/lanes/${px(lane)}`, 'PATCH', rest));
 
-server.tool('remove_review_lane', 'Remove ONE review lane, keeping the others. Gated on any open task the removal would leave with no review, and the 409 distinguishes the two end states, because they are not the same: a task that named only this lane skips review and auto-advances to DONE unreviewed, while a task with no lanes field (the default of all lanes) that loses the LAST lane spawns nothing, logs nothing and STALLS in in_review. Tasks that keep another lane are warned about, not gated. Pass force after reading the list.',
+server.tool('remove_review_lane', 'Remove ONE review lane, keeping the others. Gated on any open task the removal would leave with no review, and the 409 distinguishes the two end states, because they are not the same: a task that named only this lane skips review and auto-advances to DONE unreviewed, while a task with no lanes field (the pipeline default: code-review alone when configured, otherwise every lane) that loses the LAST lane spawns nothing, logs nothing and STALLS in in_review. Tasks that keep another lane are warned about, not gated. Pass force after reading the list.',
   { project: z.string(), lane: z.string(), force: z.boolean().optional() },
   ({ project, lane, force }) => call(`/projects/${px(project)}/pipeline/lanes/${px(lane)}${force ? '?force=true' : ''}`, 'DELETE'));
 

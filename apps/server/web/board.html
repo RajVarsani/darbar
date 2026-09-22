@@ -1140,11 +1140,19 @@ function plannedLanesSec(t){
   // what will. A cancelled task will never move to in review, so "these lanes open when it does" is
   // simply false there.
   const closed = isClosed(t);
-  // default-all (lanes null/absent) is the state of most tasks, so silence here would leave the
-  // drawer saying nothing about a plan that will in fact spawn every lane. Stated, but as an
+  // default (lanes null/absent) is the state of most tasks, so silence here would leave the
+  // drawer saying nothing about a plan that will in fact spawn. Stated, but as an
   // inherited default rather than as a selection someone made.
   if (!Array.isArray(t.lanes)){
     if (!reviews.length) return ''; // no pipeline: there is genuinely no plan to state
+    // spawnReviews (api.ts) narrows an absent lanes field to code-review alone when the pipeline
+    // configures that key; only a pipeline without one still falls back to every configured lane.
+    const codeReview = reviews.find(l => l.lane === 'code-review');
+    if (codeReview){
+      return `<div class="dsec"><h3>Review lanes · ${closed?'none recorded':'1'}</h3>
+        ${closed?'':`<div class="mini dflt">${laneRow(codeReview.lane, codeReview)}</div>`}
+        <div class="note">${closed?'closed with no lanes recorded · no review ran on this task':'default · code-review only (pipeline default) · no per-task selection recorded'}</div></div>`;
+    }
     // closed: no rows. These rows are the PROJECT's pipeline as it stands today, not this task's —
     // on an open task the default makes them this task's plan, on a closed one they are a review
     // that never ran, drawn at full strength above a soft correction. State the fact, stop
