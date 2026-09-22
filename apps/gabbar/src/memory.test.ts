@@ -69,7 +69,7 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: stri
 // memory.ts imports fetchDarbar from agent.ts (circular, same pattern as lookups.ts), so importing
 // memory.ts pulls in the whole agent module. That is fine here: no slack socket opens (bot.ts is
 // never imported) and every darbar/slack call is already stubbed above.
-const { memoryTool, memoryTree, readPersonFile } = await import('./memory');
+const { memoryTool, memoryTree, readPersonFile, drainMemoryHoldForTest } = await import('./memory');
 
 afterAll(() => {
   globalThis.fetch = realFetch;
@@ -278,6 +278,44 @@ test('rename always refuses', async () => {
   const out = await call({ command: 'rename', old_path: '/memories/a.md', new_path: '/memories/b.md' });
   expect(out).toContain('no rename');
   expect(sent.length).toBe(0);
+});
+
+// ---------- drain: held payloads must reach the graph once darbar answers again (DAR-287) ----------
+
+test('drain replays held payloads in order and removes them once darbar answers 2xx', async () => {
+  router = () => 'refused';
+  await call({ command: 'create', path: '/memories/people/a.md', file_text: 'alpha' });
+  await call({ command: 'create', path: '/memories/people/b.md', file_text: 'beta' });
+  expect(readdirSync(process.env.MEMORY_HOLD_DIR!).length).toBe(2);
+
+  sent.length = 0;
+  router = () => ({ body: { node: {}, edges: [] } });
+  await drainMemoryHoldForTest();
+
+  expect(existsSync(process.env.MEMORY_HOLD_DIR!) ? readdirSync(process.env.MEMORY_HOLD_DIR!).length : 0).toBe(0);
+  const replayedTexts = rememberPost().map((s) => (s.body.observations as Array<{ text: string }>)[0]!.text);
+  expect(replayedTexts).toEqual(['alpha', 'beta']); // creation order preserved
+});
+
+test('a held payload whose replay 500s stays held and is logged exactly once across two drain ticks', async () => {
+  router = () => 'refused';
+  await call({ command: 'create', path: '/memories/people/c.md', file_text: 'gamma' });
+  expect(readdirSync(process.env.MEMORY_HOLD_DIR!).length).toBe(1);
+
+  router = () => ({ body: { error: 'boom' }, status: 500 });
+  const realError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  try {
+    await drainMemoryHoldForTest();
+    await drainMemoryHoldForTest();
+  } finally {
+    console.error = realError;
+  }
+
+  expect(readdirSync(process.env.MEMORY_HOLD_DIR!).length, 'a replay failure must keep the hold file').toBe(1);
+  const drainErrors = errors.filter((a) => String(a[0]).includes('replaying held memory'));
+  expect(drainErrors.length, 'must log exactly once across two ticks, not once per tick').toBe(1);
 });
 
 // ---------- every call goes through fetchDarbar ----------

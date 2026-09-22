@@ -88,10 +88,14 @@ function parsePath(p: string): { segments: string[]; type: MemoryNodeType; name:
 const holdRoot = (): string =>
   path.resolve(process.env.MEMORY_HOLD_DIR || new URL('../../../data/memory-hold/', import.meta.url).pathname);
 
+// leading zero-padded counter so two holds written in the same millisecond still sort by creation
+// order (holdRoot's readdir + filename sort is how drainHeld() decides replay order below).
+let holdSeq = 0;
+
 function holdWrite(kind: 'remember' | 'supersede', originalPath: string, body: Record<string, unknown>, detail: string): string {
   const dir = holdRoot();
   fs.mkdirSync(dir, { recursive: true });
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = `${String(holdSeq++).padStart(10, '0')}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const file = path.join(dir, `${id}.json`);
   const tmp = `${file}.tmp`;
   const record = { id, kind, path: originalPath, body, detail, at: new Date().toISOString() };
@@ -99,6 +103,89 @@ function holdWrite(kind: 'remember' | 'supersede', originalPath: string, body: R
   fs.renameSync(tmp, file); // never leave a half-written hold behind
   return id;
 }
+
+// ---------- draining held writes: a HELD file is not a promise anything replays it ----------
+//
+// DAR-287. holdWrite() gave an unreachable darbar somewhere to put the words; nothing afterwards
+// ever looked in that directory again, so a held remember/supersede sat on disk forever unless a
+// human noticed. Two triggers replay it, same function underneath:
+//   1. right after any darbar call FROM THIS FILE comes back reachable — the ordinary "gabbar is
+//      talking to darbar again" signal, so the backlog clears as a side effect of normal traffic
+//      with no separate process needed.
+//   2. a 60s timer, for the case nobody calls memory again for a while and a hold would otherwise
+//      sit unnoticed between conversations.
+// Idempotent by construction on the server side (remember dedupes a node by name+type+project and,
+// as of today's server rework, an identical observation on it too), so replaying the same file
+// twice — one attempt via each trigger racing — is harmless. The file is still deleted promptly on
+// the first 2xx rather than left for the other trigger to find, since there is no reason to keep it.
+//
+// Failures are logged ONCE PER FILE, not once per tick: draining runs every 60s regardless of
+// whether darbar is back, so a still-down darbar would otherwise log the same file 60x an hour.
+// loggedDrainFailures tracks which files already got their one line; a file that eventually
+// succeeds is dropped from it so a LATER unrelated failure on a re-created hold logs again.
+const DRAIN_INTERVAL_MS = 60_000;
+let draining = false; // re-entrancy guard: a drain triggered mid-drain (by its own successful
+// replay calling back here) is a no-op, not a second pass over the same directory
+const loggedDrainFailures = new Set<string>();
+
+async function drainHeld(): Promise<void> {
+  if (draining) return;
+  draining = true;
+  try {
+    const dir = holdRoot();
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+    } catch {
+      return; // no hold dir yet: nothing to drain
+    }
+    for (const f of files) {
+      const file = path.join(dir, f);
+      let record: { kind?: string; body?: Record<string, unknown> } | null = null;
+      try {
+        record = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      } catch {
+        continue; // unreadable/corrupt hold file: leave it for a human rather than loop on garbage
+      }
+      const kind = record?.kind === 'supersede' ? 'supersede' : 'remember';
+      const rf = await fetchDarbar(`/memory/${kind}`, 'POST', record?.body ?? {});
+      if (!rf.reachable) {
+        if (!loggedDrainFailures.has(f)) {
+          console.error(`gabbar: replaying held memory ${f} failed, still held: ${rf.detail}`);
+          loggedDrainFailures.add(f);
+        }
+        continue;
+      }
+      const rj = rf.json as { error?: string };
+      if (rj?.error) {
+        // darbar answered and refused the payload outright — not a reachability failure, but
+        // still not delivered, so it stays held and logs the same way a timeout would.
+        if (!loggedDrainFailures.has(f)) {
+          console.error(`gabbar: replaying held memory ${f} was refused, still held: ${rj.error}`);
+          loggedDrainFailures.add(f);
+        }
+        continue;
+      }
+      try {
+        fs.unlinkSync(file);
+      } catch (e) {
+        console.error(`gabbar: replayed held memory ${f} but could not delete the hold file:`, e);
+        continue;
+      }
+      loggedDrainFailures.delete(f);
+    }
+  } finally {
+    draining = false;
+  }
+}
+
+// Exposed under a test-facing name only so memory.test.ts can invoke a tick deterministically
+// instead of racing the real timer; nothing outside this file and its test calls it directly.
+export const drainMemoryHoldForTest = drainHeld;
+
+setInterval(() => {
+  void drainHeld();
+}, DRAIN_INTERVAL_MS).unref?.();
 
 // ---------- recall ----------
 
@@ -121,6 +208,7 @@ async function recall(
   qs.set('limit', String(opts.limit ?? 20));
   const f = await fetchDarbar(`/memory/recall?${qs.toString()}`);
   if (!f.reachable) return { ok: false, message: `memory unreachable: ${f.detail}` };
+  void drainHeld(); // darbar just answered: worth clearing any backlog before we even use this response
   const j = f.json as { error?: string } & Partial<RecallResult>;
   if (j.error) return { ok: false, message: j.error };
   return { ok: true, result: { nodes: j.nodes ?? [], edges: j.edges ?? [] } };
@@ -181,6 +269,7 @@ export const memoryTool = betaMemoryTool({
       const id = holdWrite('remember', p, body, f.detail);
       return `darbar was unreachable (${f.detail}), so this was held locally (hold id ${id}) instead of lost. it is NOT yet in memory — say so, and try again once darbar is back.`;
     }
+    void drainHeld(); // darbar just took a write: clear any earlier backlog now rather than wait for the timer
     const j = f.json as { error?: string };
     if (j.error) return j.error;
     return `remembered ${p}`;
@@ -207,6 +296,7 @@ export const memoryTool = betaMemoryTool({
       const id = holdWrite('remember', p, rememberBody, rf.detail);
       return `darbar was unreachable (${rf.detail}), so this correction was held locally (hold id ${id}) instead of lost. it is NOT yet in memory — say so, and try again once darbar is back.`;
     }
+    void drainHeld(); // darbar just took the remember half: clear any earlier backlog now rather than wait for the timer
     const rj = rf.json as { error?: string };
     if (rj.error) return rj.error;
     const supersedeBody = { nodeName: existing.name, by: revisionName, project, source: { harness: 'gabbar' } };
@@ -215,6 +305,7 @@ export const memoryTool = betaMemoryTool({
       const id = holdWrite('supersede', p, supersedeBody, sf.detail);
       return `the new text was saved as ${revisionName}, but darbar was unreachable (${sf.detail}) marking the old one stale, so that half was held locally (hold id ${id}). both versions will show up until it retries.`;
     }
+    void drainHeld();
     const sj = sf.json as { error?: string };
     if (sj.error) return `the new text was saved as ${revisionName}, but marking the old one stale failed: ${sj.error}`;
     return `edited ${p}`;
@@ -231,6 +322,7 @@ export const memoryTool = betaMemoryTool({
       const id = holdWrite('remember', p, body, f.detail);
       return `darbar was unreachable (${f.detail}), so this was held locally (hold id ${id}) instead of lost. it is NOT yet in memory — say so, and try again once darbar is back.`;
     }
+    void drainHeld(); // darbar just took a write: clear any earlier backlog now rather than wait for the timer
     const j = f.json as { error?: string };
     if (j.error) return j.error;
     return `inserted into ${p}`;
