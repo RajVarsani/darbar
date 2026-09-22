@@ -34,12 +34,12 @@ def load(project):
 
 def claude_md(name, role, cfg):
     tier, tools = cfg["tiers"][role["tier"]], cfg["toolsets"][role["toolset"]]
+    names = list(tools["claude"])
+    for m in role["mcp"]:                       # MCP scope = the server's tool names, in `tools`
+        names += cfg.get("mcp", {}).get(m, {}).get("claude_tools", [])
     fm = [f"name: {name}", f"description: {role['description']}", f"model: {tier['claude']}",
           f"effort: {role['effort']}", f"maxTurns: {role['max_turns']}",
-          f"tools: {', '.join(tools['claude'])}"]
-    if role["mcp"]:
-        fm.append("mcpServers:")
-        fm += [f"  - {m}" for m in role["mcp"]]
+          "tools: [" + ", ".join(f'"{t}"' for t in names) + "]"]
     return "---\n" + "\n".join(fm) + "\n---\n" + role["brief"].strip() + "\n"
 
 

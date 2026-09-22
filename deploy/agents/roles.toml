@@ -21,6 +21,12 @@ codex  = "gpt-5.6-sol"
 claude = "inherit"
 codex  = "gpt-6-astra"
 
+# MCP servers a role may name in `mcp`. Claude Code scopes MCP per agent by listing the tool
+# names in `tools`, so each server declares which of its tools a worker gets; Codex takes the
+# server name in mcp_servers.
+[mcp.darbar]
+claude_tools = ["mcp__darbar__get_task", "mcp__darbar__update_task", "mcp__darbar__get_project_context", "mcp__darbar__get_board", "mcp__darbar__create_task"]
+
 # tool presets, per harness. Claude Code takes tool names; Codex takes a sandbox mode.
 [toolsets.code]
 claude = ["Read", "Edit", "Write", "Bash", "Grep", "Glob"]
