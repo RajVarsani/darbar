@@ -409,3 +409,77 @@ export type ParkedRead = {
   returned: number;
   items: ParkedSummary[];
 };
+
+// ---------- memory graph ----------
+// DAR-274. Agent memory as a first-class store: nodes are entities (a decision, a gotcha, a
+// person, a service, ...), edges are typed, bi-temporal relations between them, and episodes are
+// provenance — the record of what write produced what. Schema borrowed from Graphiti (bi-temporal
+// edges: validAt/invalidAt rather than a mutable "current" flag) and the MCP reference memory
+// server (readable entity/observation shape: a node accumulates observations rather than being
+// overwritten). NOTHING IS EVER DELETED: `supersede` stamps invalidAt on the thing it replaces and
+// ADDS a new SUPERSEDES edge, so a superseded fact stays on the graph, invisible to an ordinary
+// recall() but recoverable with asOf. There is no LLM anywhere in this write path — the caller
+// names the entities and the relation, and the store just holds what it is told.
+export type MemoryNodeType = 'decision' | 'gotcha' | 'person' | 'service' | 'repo' | 'project' | 'preference';
+
+/** one thing observed about a node, appended (never overwritten) by remember() */
+export type MemoryObservation = { text: string; at: Date; source: string };
+
+export type MemoryNode = {
+  _id?: ObjectId;
+  name: string;
+  /** lowercase-kebab of name, unique within a project (or within the global scope when project is null) */
+  slug: string;
+  type: MemoryNodeType;
+  observations: MemoryObservation[];
+  /** null = global/cross-project memory (a gotcha true of the whole machine, a person, ...) */
+  project: ObjectId | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+/**
+ * A common open vocabulary plus room for a caller-named relation — this is deliberately not a
+ * closed union. SUPERSEDES is reserved: it is written only by POST /api/memory/supersede, never
+ * accepted directly from remember()'s edges[].
+ */
+export type MemoryRelation = 'DECIDED_FOR' | 'BLOCKED_ON' | 'OWNS' | 'FIXES' | 'RELATES_TO' | 'SUPERSEDES' | (string & {});
+
+export type MemoryEdgeSource = { session?: string; harness?: string; taskRef?: string };
+
+export type MemoryEdge = {
+  _id?: ObjectId;
+  from: ObjectId;
+  to: ObjectId;
+  relation: MemoryRelation;
+  /** when this edge became true. Set at write time and never moved */
+  validAt: Date;
+  /** null while the edge still holds; stamped by supersede() and never cleared again */
+  invalidAt: Date | null;
+  source: MemoryEdgeSource;
+  /** 0-1; how sure the writer was */
+  confidence: number;
+};
+
+export type MemoryEpisodeKind = 'handoff' | 'feedback' | 'session' | 'manual';
+
+/** provenance for a write: what produced this node/edge, not the node/edge itself */
+export type MemoryEpisode = {
+  _id?: ObjectId;
+  kind: MemoryEpisodeKind;
+  /** what this episode is about — a node slug, an edge id, a task ref; free text, reader's choice */
+  ref: string;
+  at: Date;
+  summary: string;
+};
+
+export const MEMORY_NODE_TYPES: MemoryNodeType[] = ['decision', 'gotcha', 'person', 'service', 'repo', 'project', 'preference'];
+
+/** lowercase kebab of a name, the slug every node is deduped on within its project scope */
+export function slugify(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}

@@ -1,6 +1,6 @@
 import { MongoClient, ObjectId } from 'mongodb';
 import { config } from './config';
-import type { Project, Task, FeedbackDoc, EventDoc } from './types';
+import type { Project, Task, FeedbackDoc, EventDoc, MemoryNode, MemoryEdge, MemoryEpisode } from './types';
 
 const client = new MongoClient(config.mongoUri);
 export const db = client.db(config.dbName);
@@ -9,6 +9,9 @@ export const Projects = db.collection<Project>('projects');
 export const Tasks = db.collection<Task>('tasks');
 export const Feedback = db.collection<FeedbackDoc>('feedback');
 export const Events = db.collection<EventDoc>('events');
+export const MemoryNodes = db.collection<MemoryNode>('memory_nodes');
+export const MemoryEdges = db.collection<MemoryEdge>('memory_edges');
+export const MemoryEpisodes = db.collection<MemoryEpisode>('memory_episodes');
 
 export { ObjectId };
 
@@ -45,6 +48,13 @@ export async function initDb() {
   }
   await Feedback.createIndex({ 'slack.channel': 1, 'slack.ts': 1 });
   await Events.createIndex({ projectId: 1, at: -1 });
+  // DAR-274. recall()'s $text match runs over both the node's name and everything ever observed
+  // about it, so a search for a phrase buried in an old observation still finds the node.
+  await MemoryNodes.createIndex({ name: 'text', 'observations.text': 'text' });
+  await MemoryNodes.createIndex({ project: 1, slug: 1 }, { unique: true });
+  // the two directions recall()'s $graphLookup and supersede() walk edges in
+  await MemoryEdges.createIndex({ from: 1, relation: 1 });
+  await MemoryEdges.createIndex({ to: 1, relation: 1 });
 }
 
 const ALPHA = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

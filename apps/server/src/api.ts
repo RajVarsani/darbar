@@ -3,11 +3,11 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { streamSSE, streamText } from 'hono/streaming';
-import { Projects, Tasks, Feedback, Events, ObjectId, capId, nextShortId } from '@darbar/core';
+import { Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpisodes, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
 import { nudge, waitForNudge } from './inbox';
-import { config, pathPatternError, PATH_PATTERN_FORM, isParkId } from '@darbar/core';
-import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus } from '@darbar/core';
+import { config, pathPatternError, PATH_PATTERN_FORM, isParkId, MEMORY_NODE_TYPES, slugify } from '@darbar/core';
+import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus, MemoryNode, MemoryEdge, MemoryEdgeSource, MemoryNodeType, MemoryObservation } from '@darbar/core';
 
 export const api = new Hono();
 
@@ -3399,4 +3399,247 @@ api.post('/events', async (c) => {
   const task = str(b.taskRef) ? await resolveTaskRef(str(b.taskRef)!) : null;
   await logEvent(p._id!, str(b.text) ?? '', task?._id ?? null);
   return c.json({ ok: true });
+});
+
+// ---------- memory graph (DAR-274) ----------
+// Nodes/edges/episodes; shapes and the never-delete rule are documented on the types in
+// packages/core/src/types.ts. Same three verbs over MCP: apps/mcp/src/server.ts.
+
+const MEMORY_RELATION_MAX_LEN = 64;
+
+// project is OPTIONAL scope for memory (null = global). Distinct from resolveProject's 404, which
+// always means "the ref you gave does not exist"; an absent ref here means "global", not an error.
+async function resolveMemoryScope(ref: string | undefined): Promise<{ id: ObjectId | null } | { error: string }> {
+  if (!ref) return { id: null };
+  const p = await resolveProject(ref);
+  return p ? { id: p._id! } : { error: `project ${JSON.stringify(ref)} not found` };
+}
+
+function observationFrom(raw: unknown, now: Date): MemoryObservation | null {
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    return text ? { text, at: now, source: 'unknown' } : null;
+  }
+  if (raw && typeof raw === 'object' && typeof (raw as Record<string, unknown>).text === 'string') {
+    const o = raw as Record<string, unknown>;
+    const text = (o.text as string).trim();
+    return text ? { text, at: now, source: (typeof o.source === 'string' && o.source) || 'unknown' } : null;
+  }
+  return null;
+}
+
+api.post('/memory/remember', async (c) => {
+  const b = await readBody(c);
+  if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const node = b.node && typeof b.node === 'object' ? (b.node as Record<string, unknown>) : null;
+  if (!node) return c.json({ error: 'node {name, type, project?} required' }, 400);
+  const name = str(node.name)?.trim();
+  if (!name) return c.json({ error: 'node.name (non-empty string) required' }, 400);
+  const type = str(node.type);
+  if (!type || !MEMORY_NODE_TYPES.includes(type as MemoryNodeType)) {
+    return c.json({ error: `node.type must be one of ${MEMORY_NODE_TYPES.join(', ')} (got ${JSON.stringify(node.type)})` }, 400);
+  }
+  const projectRef = str(node.project);
+  const scope = await resolveMemoryScope(projectRef);
+  if ('error' in scope) return c.json({ error: scope.error }, 404);
+  const slug = slugify(name);
+  if (!slug) return c.json({ error: `node.name ${JSON.stringify(name)} has no addressable slug once lowercased and kebabbed` }, 400);
+
+  const now = new Date();
+  const rawObs = Array.isArray(b.observations) ? b.observations : [];
+  const obs = rawObs.map((o) => observationFrom(o, now)).filter((o): o is MemoryObservation => o !== null);
+
+  // resolve every edge target BEFORE writing anything: a bad edge name refuses the whole call
+  // rather than leaving a node remembered with half its edges
+  type PendingEdge = { toId: ObjectId; relation: string; confidence: number; source: MemoryEdgeSource };
+  const rawEdges = Array.isArray(b.edges) ? b.edges : [];
+  const pending: PendingEdge[] = [];
+  for (const raw of rawEdges) {
+    if (!raw || typeof raw !== 'object') return c.json({ error: 'each edge must be an object {to, relation}' }, 400);
+    const e = raw as Record<string, unknown>;
+    const toName = str(e.to)?.trim();
+    const relation = str(e.relation)?.trim();
+    if (!toName || !relation) return c.json({ error: 'edge.to and edge.relation (non-empty strings) required' }, 400);
+    if (relation.length > MEMORY_RELATION_MAX_LEN) {
+      return c.json({ error: `edge.relation ${JSON.stringify(relation)} is longer than ${MEMORY_RELATION_MAX_LEN} chars` }, 400);
+    }
+    if (relation === 'SUPERSEDES') {
+      return c.json({ error: 'relation "SUPERSEDES" is written only by POST /api/memory/supersede, never by remember' }, 400);
+    }
+    const toNode = await MemoryNodes.findOne({ project: scope.id, slug: slugify(toName) });
+    if (!toNode) {
+      return c.json({ error: `no node named ${JSON.stringify(toName)} in ${projectRef ?? 'the global scope'}: remember it first, then link it` }, 404);
+    }
+    const confidence = typeof e.confidence === 'number' ? Math.max(0, Math.min(1, e.confidence)) : 1;
+    const source = e.source && typeof e.source === 'object' ? (e.source as MemoryEdgeSource) : {};
+    pending.push({ toId: toNode._id!, relation, confidence, source });
+  }
+
+  // ---------- dedupe by slug within project: append observations, never overwrite ----------
+  const existing = await MemoryNodes.findOne({ project: scope.id, slug });
+  let nodeId: ObjectId;
+  if (existing) {
+    if (obs.length) {
+      await MemoryNodes.updateOne({ _id: existing._id }, { $push: { observations: { $each: obs } }, $set: { updatedAt: now } });
+    }
+    nodeId = existing._id!;
+  } else {
+    const doc: MemoryNode = { name, slug, type: type as MemoryNodeType, observations: obs, project: scope.id, createdAt: now, updatedAt: now };
+    nodeId = (await MemoryNodes.insertOne(doc)).insertedId;
+  }
+  const nodeDoc = await MemoryNodes.findOne({ _id: nodeId });
+
+  // ---------- upsert edges: one currently-valid edge per (from, to, relation) triple ----------
+  const edgesOut: MemoryEdge[] = [];
+  for (const e of pending) {
+    const already = await MemoryEdges.findOne({ from: nodeId, to: e.toId, relation: e.relation, invalidAt: null });
+    if (already) {
+      await MemoryEdges.updateOne({ _id: already._id }, { $set: { confidence: e.confidence, source: e.source } });
+      edgesOut.push({ ...already, confidence: e.confidence, source: e.source } as MemoryEdge);
+    } else {
+      const edgeDoc: MemoryEdge = { from: nodeId, to: e.toId, relation: e.relation, validAt: now, invalidAt: null, source: e.source, confidence: e.confidence };
+      const insertedId = (await MemoryEdges.insertOne(edgeDoc)).insertedId;
+      edgesOut.push({ ...edgeDoc, _id: insertedId });
+    }
+  }
+
+  await MemoryEpisodes.insertOne({
+    kind: 'manual', ref: slug, at: now,
+    summary: `remembered ${obs.length} observation(s) on ${JSON.stringify(name)}${edgesOut.length ? ` + ${edgesOut.length} edge(s)` : ''}`,
+  });
+
+  return c.json({ node: nodeDoc, edges: edgesOut });
+});
+
+api.get('/memory/recall', async (c) => {
+  const q = c.req.query('q')?.trim();
+  if (!q) return c.json({ error: 'q (search text) required' }, 400);
+  const projectRef = c.req.query('project');
+  const scope = projectRef !== undefined ? await resolveMemoryScope(projectRef) : null;
+  if (scope && 'error' in scope) return c.json({ error: scope.error }, 404);
+  const type = c.req.query('type');
+  if (type && !MEMORY_NODE_TYPES.includes(type as MemoryNodeType)) {
+    return c.json({ error: `type must be one of ${MEMORY_NODE_TYPES.join(', ')} (got ${JSON.stringify(type)})` }, 400);
+  }
+  const hopsRaw = c.req.query('hops');
+  if (hopsRaw !== undefined && hopsRaw !== '1' && hopsRaw !== '2') {
+    return c.json({ error: `hops must be 1 or 2 (got ${JSON.stringify(hopsRaw)})` }, 400);
+  }
+  const hops = hopsRaw === '2' ? 2 : 1;
+  const asOfRaw = c.req.query('asOf');
+  let asOf: Date | null = null;
+  if (asOfRaw) {
+    const d = new Date(asOfRaw);
+    if (Number.isNaN(d.getTime())) return c.json({ error: `asOf is not a valid date: ${JSON.stringify(asOfRaw)}` }, 400);
+    asOf = d;
+  }
+
+  const match: Record<string, unknown> = { $text: { $search: q } };
+  if (scope) match.project = scope.id;
+  if (type) match.type = type;
+  // the bi-temporal filter: an ordinary recall only ever walks edges that still hold (invalidAt
+  // null); asOf asks what held AS OF a past moment instead, which a superseded edge still answers
+  // for as long as its validAt is not itself after that moment
+  const edgeFilter = asOf ? { validAt: { $lte: asOf } } : { invalidAt: null };
+
+  type Hit = MemoryNode & { _id: ObjectId; score: number; walked: (MemoryEdge & { _id: ObjectId; depth: number })[] };
+  const hits = (await MemoryNodes.aggregate([
+    { $match: match },
+    { $addFields: { score: { $meta: 'textScore' } } },
+    { $sort: { score: -1 } },
+    { $limit: 20 },
+    {
+      $graphLookup: {
+        from: 'memory_edges',
+        startWith: '$_id',
+        connectFromField: 'to',
+        connectToField: 'from',
+        as: 'walked',
+        maxDepth: hops - 1,
+        depthField: 'depth',
+        restrictSearchWithMatch: edgeFilter,
+      },
+    },
+  ]).toArray()) as Hit[];
+
+  // ranked node set: primary text hits at depth 0, plus every node reached by an edge, ranked by
+  // (the originating hit's text score, then hop depth). A node reached more than once keeps its
+  // best occurrence (highest score, then shallowest depth).
+  const ranked = new Map<string, { id: ObjectId; score: number; depth: number }>();
+  const walkedEdges: { from: ObjectId; to: ObjectId; relation: string; validAt: Date; invalidAt: Date | null; confidence: number; depth: number }[] = [];
+  const touch = (id: ObjectId, score: number, depth: number) => {
+    const key = id.toHexString();
+    const cur = ranked.get(key);
+    if (!cur || score > cur.score || (score === cur.score && depth < cur.depth)) ranked.set(key, { id, score, depth });
+  };
+  for (const hit of hits) {
+    touch(hit._id, hit.score, 0);
+    for (const edge of hit.walked) {
+      touch(edge.to, hit.score, edge.depth + 1);
+      walkedEdges.push({ from: edge.from, to: edge.to, relation: edge.relation, validAt: edge.validAt, invalidAt: edge.invalidAt, confidence: edge.confidence, depth: edge.depth });
+    }
+  }
+
+  const ids = [...ranked.values()].map((r) => r.id);
+  const nodeDocs = ids.length ? await MemoryNodes.find({ _id: { $in: ids } }).toArray() : [];
+  const byId = new Map(nodeDocs.map((n) => [n._id!.toHexString(), n]));
+
+  const nodes = [...ranked.entries()]
+    .map(([key, r]) => {
+      const doc = byId.get(key);
+      return doc ? { name: doc.name, type: doc.type, project: doc.project, observations: doc.observations, score: r.score, depth: r.depth } : null;
+    })
+    .filter((n): n is NonNullable<typeof n> => n !== null)
+    .sort((a, b) => b.score - a.score || a.depth - b.depth);
+
+  // only the edges actually walked, named by the nodes on each end, not the body of everything
+  const edges = walkedEdges.map((e) => ({
+    from: byId.get(e.from.toHexString())?.name ?? null,
+    to: byId.get(e.to.toHexString())?.name ?? null,
+    relation: e.relation, validAt: e.validAt, invalidAt: e.invalidAt, confidence: e.confidence, depth: e.depth,
+  }));
+
+  return c.json({ q, hops, asOf: asOf ? asOf.toISOString() : null, nodes, edges });
+});
+
+api.post('/memory/supersede', async (c) => {
+  const b = await readBody(c);
+  if (!b) return c.json({ error: 'invalid json body' }, 400);
+  const edgeId = str(b.edgeId)?.trim();
+  const nodeName = str(b.nodeName)?.trim();
+  if ((edgeId && nodeName) || (!edgeId && !nodeName)) {
+    return c.json({ error: 'exactly one of edgeId or nodeName required' }, 400);
+  }
+  const by = str(b.by)?.trim();
+  if (!by) return c.json({ error: 'by (name of the replacement node) required' }, 400);
+  const projectRef = str(b.project);
+  const scope = await resolveMemoryScope(projectRef);
+  if ('error' in scope) return c.json({ error: scope.error }, 404);
+  const byNode = await MemoryNodes.findOne({ project: scope.id, slug: slugify(by) });
+  if (!byNode) return c.json({ error: `no node named ${JSON.stringify(by)} in ${projectRef ?? 'the global scope'}: remember it first, then supersede with it` }, 404);
+  const source = b.source && typeof b.source === 'object' ? (b.source as MemoryEdgeSource) : {};
+  const now = new Date();
+
+  if (edgeId) {
+    if (!ObjectId.isValid(edgeId)) return c.json({ error: `edgeId ${JSON.stringify(edgeId)} is not a valid id` }, 400);
+    const edge = await MemoryEdges.findOne({ _id: new ObjectId(edgeId) });
+    if (!edge) return c.json({ error: `no edge ${edgeId}` }, 404);
+    if (edge.invalidAt) return c.json({ error: `edge ${edgeId} was already superseded at ${new Date(edge.invalidAt).toISOString()}` }, 409);
+    // never deleted: the edge stays in the collection, only invalidAt is stamped. The new
+    // SUPERSEDES edge runs from the replacement to the node that made the now-invalid assertion.
+    await MemoryEdges.updateOne({ _id: edge._id }, { $set: { invalidAt: now } });
+    const supersedesDoc: MemoryEdge = { from: byNode._id!, to: edge.from, relation: 'SUPERSEDES', validAt: now, invalidAt: null, source, confidence: 1 };
+    const insertedId = (await MemoryEdges.insertOne(supersedesDoc)).insertedId;
+    await MemoryEpisodes.insertOne({ kind: 'manual', ref: edgeId, at: now, summary: `${by} supersedes edge ${edgeId} (${edge.relation})` });
+    return c.json({ invalidated: { ...edge, invalidAt: now }, supersedes: { ...supersedesDoc, _id: insertedId } });
+  }
+
+  const node = await MemoryNodes.findOne({ project: scope.id, slug: slugify(nodeName!) });
+  if (!node) return c.json({ error: `no node named ${JSON.stringify(nodeName)} in ${projectRef ?? 'the global scope'}` }, 404);
+  const live = await MemoryEdges.find({ from: node._id, invalidAt: null }).toArray();
+  if (live.length) await MemoryEdges.updateMany({ from: node._id, invalidAt: null }, { $set: { invalidAt: now } });
+  const supersedesDoc: MemoryEdge = { from: byNode._id!, to: node._id!, relation: 'SUPERSEDES', validAt: now, invalidAt: null, source, confidence: 1 };
+  const insertedId = (await MemoryEdges.insertOne(supersedesDoc)).insertedId;
+  await MemoryEpisodes.insertOne({ kind: 'manual', ref: node.slug, at: now, summary: `${by} supersedes ${nodeName} (${live.length} outgoing edge(s) invalidated)` });
+  return c.json({ invalidatedEdges: live.map((e) => ({ ...e, invalidAt: now })), supersedes: { ...supersedesDoc, _id: insertedId } });
 });

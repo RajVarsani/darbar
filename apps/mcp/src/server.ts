@@ -344,4 +344,73 @@ server.tool('log_event', 'Append to the project event log (the resume trail).',
   { project: z.string(), taskRef: z.string().optional(), text: z.string() },
   (args) => call('/events', 'POST', args));
 
+// ---------- memory graph (DAR-274) ----------
+// A graph, not a bag of notes: NODES are entities (a decision, a gotcha, a person, a service, a
+// repo, a project, a preference), EDGES are typed relations between two nodes with a validity
+// window (validAt, and invalidAt once superseded), and EPISODES are provenance — a record of what
+// write produced what, not a node or edge themselves. Scoped by project, or left global (a gotcha
+// true of the whole machine, a person who spans projects) by omitting project on remember.
+//
+// NOTHING IS EVER DELETED. remember() only ever inserts a node or appends an observation to one
+// that already exists (deduped by the lowercase-kebab slug of its name, within the same project
+// scope); it upserts edges the same way, one currently-valid edge per (from, to, relation) triple.
+// supersede() is the only way an edge stops being current, and even then it is not removed: its
+// invalidAt is stamped and it stays in the collection forever, while a new SUPERSEDES edge records
+// what replaced it. recall() only walks edges with invalidAt:null by default, so a superseded fact
+// quietly stops showing up — asOf is how you look at the graph as it stood at a past moment instead,
+// which a superseded edge can still answer for, as long as it was valid at that moment.
+//
+// recall() is TEXT SEARCH plus a bounded graph walk, not semantic search and not an LLM anywhere in
+// this path: it $text-matches node names and observations, then follows edges outward from each
+// match up to `hops` (1 or 2) deep, and returns node names + observations + the edges it actually
+// walked — never the full graph and never node bodies you did not ask for.
+const MEMORY_TYPE = z.enum(['decision', 'gotcha', 'person', 'service', 'repo', 'project', 'preference']);
+
+server.tool('remember', 'Write to the memory graph: create or update ONE node, and optionally link it to nodes that already exist. DEDUPES BY SLUG (lowercase-kebab of the name) within the project scope (or the global scope when project is omitted): calling this again for a node you already remembered does NOT overwrite it, it APPENDS your new observations to the ones already there and leaves the rest of the node untouched, exactly like the reference MCP memory server\'s entity/observation model. This is the only write door for a node\'s content; there is no edit or delete anywhere in this API. `edges` link this node to OTHER nodes that must already exist (created by an earlier remember call, in the SAME project scope) — a `to` name that is not found is a 404 telling you to remember it first, nothing here silently creates a stub on the other end. Each edge is upserted: sending the same (to, relation) pair again updates its confidence/source rather than creating a duplicate live edge. `SUPERSEDES` is a reserved relation name written only by the supersede tool and is refused here. There is no LLM in this path: you name the entity, the type and the relation, and the store holds exactly what you send.',
+  {
+    node: z.object({
+      name: z.string().describe('the entity\'s name; slugified (lowercase-kebab) for dedup, so "Mars flag precedence" and "mars-flag-precedence" address the same node'),
+      type: MEMORY_TYPE,
+      project: z.string().optional().describe('prefix, name, or capId to scope this node to one project; omit for a GLOBAL node (a person, a gotcha true of the whole machine) visible from every project\'s recall'),
+    }),
+    observations: z.array(z.union([
+      z.string(),
+      z.object({ text: z.string(), source: z.string().optional() }),
+    ])).optional().describe('things learned about this node, appended (never overwritten) to what is already stored. A bare string is stored with source "unknown"; send {text, source} to say where it came from (a session id, a task ref, a person)'),
+    edges: z.array(z.object({
+      to: z.string().describe('name of an EXISTING node in the same project scope to link to (404 if it does not exist yet)'),
+      relation: z.string().describe('e.g. DECIDED_FOR, BLOCKED_ON, OWNS, FIXES, RELATES_TO — open vocabulary, but not "SUPERSEDES" (reserved for the supersede tool)'),
+      confidence: z.number().min(0).max(1).optional().describe('how sure you are, 0-1; default 1'),
+      source: z.object({ session: z.string().optional(), harness: z.string().optional(), taskRef: z.string().optional() }).optional(),
+    })).optional().describe('relations FROM this node to others that already exist'),
+  },
+  (args) => call('/memory/remember', 'POST', args));
+
+server.tool('recall', 'Search the memory graph: $text-match node names and observations against `q`, then walk outward along edges up to `hops` deep (1 or 2, default 1), and return the node names + observations + the edges actually walked — not the whole graph, not full bodies of everything reachable. Only CURRENTLY VALID edges are walked by default (a superseded one is invisible here, on purpose); pass `asOf` to see the graph as it stood at a past moment instead, which a since-superseded edge can still answer for. Results are ranked by text-match score first, then by how many hops away a related node is. Scope with `project` to search one project\'s memory plus anything global; omit it to search the global scope only. `type` narrows the PRIMARY text match to one node type (decision, gotcha, person, service, repo, project, preference) — nodes reached by a walked edge are returned regardless of their type.',
+  {
+    q: z.string().describe('search text, matched against node names and every observation ever recorded on them'),
+    project: z.string().optional().describe('prefix, name, or capId; omit to search only the global scope'),
+    type: MEMORY_TYPE.optional(),
+    hops: z.union([z.literal(1), z.literal(2)]).optional().describe('graph walk depth from each text match, 1 or 2 (default 1). Never more than 2'),
+    asOf: z.string().optional().describe('ISO timestamp; walk edges as they stood at this moment instead of the current graph, so a since-superseded edge that was valid then is still walked'),
+  },
+  ({ q, project, type, hops, asOf }) => {
+    const qs = new URLSearchParams({ q });
+    if (project) qs.set('project', project);
+    if (type) qs.set('type', type);
+    if (hops) qs.set('hops', String(hops));
+    if (asOf) qs.set('asOf', asOf);
+    return call(`/memory/recall?${qs}`);
+  });
+
+server.tool('supersede', 'Replace a fact on the memory graph WITHOUT deleting anything. Exactly one of `edgeId` (supersede one specific relation) or `nodeName` (supersede everything this node currently asserts, i.e. every currently-valid edge FROM it) is required. Either way this: (1) stamps `invalidAt` on what is being replaced — the edge itself is never removed, it just stops being walked by an ordinary recall; and (2) inserts a NEW edge, relation SUPERSEDES, from `by` (a node that must already exist — remember it first) to the node whose assertion was just invalidated. Use `edgeId` when you know exactly which relation is wrong (get it from a prior recall\'s edge list, or the id remember returned). Use `nodeName` for "this whole node\'s current facts are stale, here is what replaced them" — every currently-valid outgoing edge on it is invalidated in one call, not just one. Nothing is ever deleted anywhere in this path: a superseded edge, and the node it came from, both remain in the graph forever and are reachable again with recall\'s `asOf`.',
+  {
+    edgeId: z.string().optional().describe('the edge to supersede, e.g. from a recall result or remember\'s response. Mutually exclusive with nodeName'),
+    nodeName: z.string().optional().describe('supersede every currently-valid edge FROM this node. Mutually exclusive with edgeId'),
+    by: z.string().describe('name of the EXISTING node that replaces what is being superseded (must already be remembered)'),
+    project: z.string().optional().describe('scope both the target and `by` are looked up in; omit for the global scope'),
+    source: z.object({ session: z.string().optional(), harness: z.string().optional(), taskRef: z.string().optional() }).optional(),
+  },
+  (args) => call('/memory/supersede', 'POST', args));
+
 await server.connect(new StdioServerTransport());

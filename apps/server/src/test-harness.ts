@@ -26,6 +26,7 @@ type AnyDoc = Record<string, unknown>;
 type AnyColl = {
   deleteMany(filter: AnyDoc): Promise<unknown>;
   findOneAndUpdate(filter: AnyDoc, update: AnyDoc, opts: AnyDoc): Promise<AnyDoc | null>;
+  createIndex(spec: AnyDoc, opts?: AnyDoc): Promise<unknown>;
 };
 type AnyDb = { databaseName: string; collection(name: string): AnyColl; dropDatabase(): Promise<unknown> };
 type AnyClient = { db(name: string): AnyDb; connect(): Promise<unknown>; close(): Promise<unknown> };
@@ -46,6 +47,9 @@ const Projects = scratch.collection('projects');
 const Tasks = scratch.collection('tasks');
 const Feedback = scratch.collection('feedback');
 const Events = scratch.collection('events');
+const MemoryNodes = scratch.collection('memory_nodes');
+const MemoryEdges = scratch.collection('memory_edges');
+const MemoryEpisodes = scratch.collection('memory_episodes');
 
 // verbatim copy of packages/core/src/db.ts, pointed at the scratch collection. See the note above.
 async function nextShortId(projectId: unknown, kind: 'task' | 'feedback'): Promise<string> {
@@ -59,7 +63,9 @@ async function nextShortId(projectId: unknown, kind: 'task' | 'feedback'): Promi
   return kind === 'task' ? `${doc.prefix}-${n}` : `${doc.prefix}-FB-${n}`;
 }
 
-mock.module('@darbar/core', () => ({ ...core, db: scratch, Projects, Tasks, Feedback, Events, nextShortId }));
+mock.module('@darbar/core', () => ({
+  ...core, db: scratch, Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpisodes, nextShortId,
+}));
 
 await client.connect();
 await scratch.dropDatabase();
@@ -83,7 +89,13 @@ export async function req<T = AnyDoc>(method: string, path: string, body?: unkno
 
 /** every collection emptied; call it in beforeEach so one test's rows can never explain another's */
 export async function reset() {
-  for (const coll of [Projects, Tasks, Feedback, Events]) await coll.deleteMany({});
+  for (const coll of [Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpisodes]) await coll.deleteMany({});
+  // SCRATCH is one pid-scoped database SHARED by every test file in this bun run, and teardown()
+  // (dropDatabase) from a file that finishes before this one starts drops it out from under an
+  // index created only once at module load. recall()'s $text query needs this index to exist, so
+  // it is recreated here on every reset rather than once — createIndex is a no-op once it already
+  // matches, so this costs nothing on the common path.
+  await MemoryNodes.createIndex({ name: 'text', 'observations.text': 'text' });
 }
 
 let torn = false;

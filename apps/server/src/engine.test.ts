@@ -1381,3 +1381,118 @@ test('the round-trippable project GET carries linearUrl and its echo is a legal 
   const echo = await req('PATCH', `/projects/${p.prefix}`, body);
   expect(echo.status).toBe(200);
 });
+
+// ---------- memory graph (DAR-274) ----------
+
+type MemNode = { _id: string; name: string; observations: { text: string; source: string }[] };
+type MemEdge = { _id: string; relation: string; invalidAt: string | null };
+type Remembered = { node: MemNode; edges: MemEdge[] };
+type Recalled = { nodes: (MemNode & { depth: number })[]; edges: { relation: string; from: string | null; to: string | null }[] };
+
+test('remember dedupes by slug within a project and appends observations rather than overwriting', async () => {
+  const p = await project();
+  const first = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Mars flag precedence', type: 'gotcha', project: p.prefix },
+    observations: ['employee flag beats firm flag'],
+  });
+  expect(first.status).toBe(200);
+  const nodeId = first.body.node._id;
+
+  // same node addressed via its already-kebab slug, different casing/spacing does not matter
+  const second = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'mars-flag-precedence', type: 'gotcha', project: p.prefix },
+    observations: [{ text: 'keys off meetingNote.CreatedByID', source: 'DAR-999' }],
+  });
+  expect(second.status).toBe(200);
+  expect(second.body.node._id).toBe(nodeId); // same node, not a second one
+  expect(second.body.node.observations).toHaveLength(2);
+  expect(second.body.node.observations[0]!.text).toBe('employee flag beats firm flag');
+  expect(second.body.node.observations[1]!.text).toBe('keys off meetingNote.CreatedByID');
+  expect(second.body.node.observations[1]!.source).toBe('DAR-999');
+
+  const found = await req<Recalled>('GET', `/memory/recall?q=${encodeURIComponent('mars flag precedence')}&project=${p.prefix}`);
+  expect(found.status).toBe(200);
+  const hits = found.body.nodes.filter((n) => n.name.toLowerCase().includes('mars flag'));
+  expect(hits).toHaveLength(1); // deduped, not two nodes on the board
+});
+
+test('supersede stamps invalidAt and adds a SUPERSEDES edge, never deleting the old one', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Old Choice', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'New Choice', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Widget Service', type: 'service', project: p.prefix } });
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Widget Service', type: 'service', project: p.prefix },
+    edges: [{ to: 'Old Choice', relation: 'DECIDED_FOR' }],
+  });
+  expect(linked.status).toBe(200);
+  const edgeId = linked.body.edges[0]!._id;
+
+  const sup = await req<{ invalidated: MemEdge; supersedes: MemEdge }>('POST', '/memory/supersede', { edgeId, by: 'New Choice', project: p.prefix });
+  expect(sup.status).toBe(200);
+  expect(sup.body.invalidated.invalidAt).not.toBeNull();
+  expect(sup.body.supersedes.relation).toBe('SUPERSEDES');
+
+  // an ordinary recall no longer walks the invalidated edge
+  const now = await req<Recalled>('GET', `/memory/recall?q=Widget+Service&project=${p.prefix}`);
+  expect(now.body.edges.map((e) => e.relation)).not.toContain('DECIDED_FOR');
+  // the replacement edge IS walked, from the node that superseded it
+  const supersedesView = await req<Recalled>('GET', `/memory/recall?q=New+Choice&project=${p.prefix}`);
+  expect(supersedesView.body.edges.map((e) => e.relation)).toContain('SUPERSEDES');
+
+  // the old node itself is still on the graph — nothing about superseding an edge touches it
+  const oldStill = await req<Recalled>('GET', `/memory/recall?q=Old+Choice&project=${p.prefix}`);
+  expect(oldStill.body.nodes.map((n) => n.name)).toContain('Old Choice');
+
+  // superseding the same edge twice is refused, not silently repeated
+  const again = await req('POST', '/memory/supersede', { edgeId, by: 'New Choice', project: p.prefix });
+  expect(again.status).toBe(409);
+});
+
+test('recall walks two hops when asked and stops at one otherwise', async () => {
+  const p = await project();
+  for (const name of ['Alpha', 'Beta', 'Gamma']) {
+    await req('POST', '/memory/remember', { node: { name, type: 'service', project: p.prefix } });
+  }
+  await req('POST', '/memory/remember', {
+    node: { name: 'Alpha', type: 'service', project: p.prefix },
+    edges: [{ to: 'Beta', relation: 'RELATES_TO' }],
+  });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Beta', type: 'service', project: p.prefix },
+    edges: [{ to: 'Gamma', relation: 'RELATES_TO' }],
+  });
+
+  const oneHop = await req<Recalled>('GET', `/memory/recall?q=Alpha&project=${p.prefix}&hops=1`);
+  const oneNames = oneHop.body.nodes.map((n) => n.name);
+  expect(oneNames).toContain('Alpha');
+  expect(oneNames).toContain('Beta');
+  expect(oneNames).not.toContain('Gamma');
+
+  const twoHop = await req<Recalled>('GET', `/memory/recall?q=Alpha&project=${p.prefix}&hops=2`);
+  const twoNames = twoHop.body.nodes.map((n) => n.name);
+  expect(twoNames).toContain('Alpha');
+  expect(twoNames).toContain('Beta');
+  expect(twoNames).toContain('Gamma');
+  expect(twoHop.body.nodes.find((n) => n.name === 'Gamma')!.depth).toBe(2);
+});
+
+test('asOf recall sees a relation as it stood at a past moment, after it has since been superseded', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Old Pick', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'New Pick', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Gadget', type: 'service', project: p.prefix } });
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Gadget', type: 'service', project: p.prefix },
+    edges: [{ to: 'Old Pick', relation: 'DECIDED_FOR' }],
+  });
+  const asOf = new Date().toISOString();
+  await new Promise((r) => setTimeout(r, 5)); // the supersede below must land strictly after `asOf`
+  await req('POST', '/memory/supersede', { edgeId: linked.body.edges[0]!._id, by: 'New Pick', project: p.prefix });
+
+  const past = await req<Recalled>('GET', `/memory/recall?q=Gadget&project=${p.prefix}&asOf=${encodeURIComponent(asOf)}`);
+  expect(past.body.edges.map((e) => e.relation)).toContain('DECIDED_FOR');
+
+  const present = await req<Recalled>('GET', `/memory/recall?q=Gadget&project=${p.prefix}`);
+  expect(present.body.edges.map((e) => e.relation)).not.toContain('DECIDED_FOR');
+});
