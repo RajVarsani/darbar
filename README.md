@@ -73,6 +73,17 @@ the API and the console 403 through it. See [docs/front-door.md](docs/front-door
 } } }
 ```
 
+### Give the orchestrator its workers
+
+```bash
+./deploy/agents/install.py            # darbar-builder / -reviewer / -researcher, for Claude Code and Codex
+./deploy/agents/install.py --project . # plus a project's own .darbar/roles.toml overrides
+```
+
+Roles name a tier, tiers map to a model per harness (`deploy/agents/roles.toml`). An
+orchestrator dispatches by role and never chooses a model, so a worker cannot inherit the
+most expensive one by accident, and each role carries only the tools it needs.
+
 ## Docs
 
 | | |
