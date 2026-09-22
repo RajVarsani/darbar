@@ -1656,3 +1656,91 @@ test('DAR-279 #10: edge.source rejects unknown keys, and recall limit is a valid
   expect(limitOk.status).toBe(200);
   expect(limitOk.body.limit).toBe(1);
 });
+
+// ---------- memory index + export (DAR-280) ----------
+
+test('memory index caps its output under 24,000 bytes and ends with the omitted-node count', async () => {
+  const p = await project();
+  for (let i = 0; i < 400; i++) {
+    await req('POST', '/memory/remember', {
+      node: { name: `Bulk Node ${i}`, type: 'gotcha', project: p.prefix },
+      observations: [`observation text padding out this line to something realistic for node ${i}, so the index has real bytes to cap`],
+    });
+  }
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  expect(r.status).toBe(200);
+  expect(r.headers.get('content-type')).toContain('text/markdown');
+  const text = await r.text();
+  expect(new TextEncoder().encode(text).length).toBeLessThan(24000);
+  expect(text).toMatch(/\d+ node\(s\) omitted/);
+});
+
+test('memory index excludes a superseded node', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Old Index Pick', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'New Index Pick', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/supersede', { nodeName: 'Old Index Pick', by: 'New Index Pick', project: p.prefix });
+
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  expect(r.status).toBe(200);
+  const text = await r.text();
+  expect(text).not.toContain('Old Index Pick');
+  expect(text).toContain('New Index Pick');
+});
+
+test('both memory routes are local-only', async () => {
+  const p = await project();
+  const headers = { 'x-forwarded-host': 'darbar.ngrok.app' };
+  const idx = await api.request(`/memory/index?project=${p.prefix}`, { headers });
+  expect(idx.status).toBe(403);
+  expect(await idx.text()).toContain('local-only');
+  const exp = await api.request(`/memory/export?project=${p.prefix}`, { headers });
+  expect(exp.status).toBe(403);
+  expect(await exp.text()).toContain('local-only');
+});
+
+// minimal store-only zip reader: enough to read back what buildZip (api.ts) writes, without a
+// dependency neither this file nor api.ts otherwise needs.
+function readZipEntries(buf: Uint8Array): Map<string, string> {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const decoder = new TextDecoder();
+  // walk from the end for the end-of-central-directory record (fixed 22-byte tail, no comment used)
+  const eocdOffset = buf.length - 22;
+  const centralCount = dv.getUint16(eocdOffset + 10, true);
+  let centralOffset = dv.getUint32(eocdOffset + 16, true);
+  const out = new Map<string, string>();
+  for (let i = 0; i < centralCount; i++) {
+    const nameLen = dv.getUint16(centralOffset + 28, true);
+    const localHeaderOffset = dv.getUint32(centralOffset + 42, true);
+    const name = decoder.decode(buf.subarray(centralOffset + 46, centralOffset + 46 + nameLen));
+    const localNameLen = dv.getUint16(localHeaderOffset + 26, true);
+    const localExtraLen = dv.getUint16(localHeaderOffset + 28, true);
+    const size = dv.getUint32(localHeaderOffset + 18, true);
+    const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+    out.set(name, decoder.decode(buf.subarray(dataStart, dataStart + size)));
+    centralOffset += 46 + nameLen;
+  }
+  return out;
+}
+
+test('memory export streams a zip with one file per node, a README, and a wikilink for an edge', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Export From', type: 'service', project: p.prefix }, observations: ['seen once'] });
+  await req('POST', '/memory/remember', { node: { name: 'Export To', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Export From', type: 'service', project: p.prefix },
+    edges: [{ to: 'Export To', relation: 'RELATES_TO' }],
+  });
+
+  const r = await api.request(`/memory/export?project=${p.prefix}`);
+  expect(r.status).toBe(200);
+  expect(r.headers.get('content-type')).toContain('application/zip');
+  const buf = new Uint8Array(await r.arrayBuffer());
+  const entries = readZipEntries(buf);
+  expect(entries.has('README.md')).toBe(true);
+  expect(entries.get('README.md')).toContain('NO IMPORT PATH');
+  expect(entries.has('export-from.md')).toBe(true);
+  expect(entries.has('export-to.md')).toBe(true);
+  expect(entries.get('export-from.md')).toContain('[[export-to]]');
+  expect(entries.get('export-from.md')).toContain('RELATES_TO');
+});

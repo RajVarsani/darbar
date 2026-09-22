@@ -3786,3 +3786,294 @@ api.post('/memory/supersede', async (c) => {
     supersedes: { ...supersedesDoc, _id: insertedId },
   });
 });
+
+// ---------- memory index + export (DAR-280) ----------
+//
+// LOCAL ONLY, same boundary and the same reasoning as /parked above: x-forwarded-host is set by our
+// own proxy on every request it judged public and stripped from every request it judged local, so
+// this asserts the proxy's own decision rather than re-deriving one. routes.json's public allowlist
+// (`/p/`, `/api/p/`, `/files/`) is the first layer and never includes this prefix; this check is the
+// second. Whatever else changes here, these two routes must never move under `/api/p/` and this
+// check must not come out.
+const MEMORY_LOCAL_ONLY_WHY = 'the memory index/export routes are local-only: they render the whole graph for a project, which is a wider surface than any share link is meant to carry';
+function requireLocal(c: Context): Response | null {
+  if (c.req.header('x-forwarded-host')) return c.text(MEMORY_LOCAL_ONLY_WHY, 403);
+  return null;
+}
+
+const MEMORY_INDEX_QUERY = ['project'] as const;
+// decision/gotcha/preference first, then person/service/repo/project — the spec's literal ordering,
+// used both as the group-heading order and as the type-priority factor in the ranking score.
+const MEMORY_INDEX_TYPE_ORDER: MemoryNodeType[] = ['decision', 'gotcha', 'preference', 'person', 'service', 'repo', 'project'];
+const MEMORY_INDEX_BYTE_CAP = 24000;
+const MEMORY_INDEX_OBS_TRUNCATE = 140;
+
+function truncateObs(text: string): string {
+  const t = text.trim();
+  return t.length > MEMORY_INDEX_OBS_TRUNCATE ? `${t.slice(0, MEMORY_INDEX_OBS_TRUNCATE).trimEnd()}…` : t;
+}
+const byteLen = (s: string): number => new TextEncoder().encode(s).length;
+
+api.get('/memory/index', async (c) => {
+  const local = requireLocal(c);
+  if (local) return local;
+  const badQuery = closedBody(c.req.query() as Record<string, unknown>, MEMORY_INDEX_QUERY, 'memory/index');
+  if (badQuery) return c.json({ error: badQuery }, 400);
+  const projectRef = c.req.query('project');
+  const scope = await resolveMemoryScope(projectRef);
+  if ('error' in scope) return c.json({ error: scope.error }, 404);
+
+  // same scope rule as recall: omitting project searches the global scope only; giving one searches
+  // that project PLUS whatever is global.
+  const match: Record<string, unknown> = { invalidAt: null };
+  match.project = projectRef !== undefined ? { $in: [scope.id, null] } : null;
+  const nodes = await MemoryNodes.find(match).toArray();
+
+  const inboundCounts = new Map<string, number>();
+  if (nodes.length) {
+    const rows = (await MemoryEdges.aggregate([
+      { $match: { invalidAt: null, to: { $in: nodes.map((n) => n._id!) } } },
+      { $group: { _id: '$to', n: { $sum: 1 } } },
+    ]).toArray()) as { _id: ObjectId; n: number }[];
+    for (const r of rows) inboundCounts.set(r._id.toHexString(), r.n);
+  }
+
+  const now = Date.now();
+  type Ranked = { node: MemoryNode & { _id: ObjectId }; score: number; line: string };
+  const ranked: Ranked[] = nodes.map((n) => {
+    const typeIdx = MEMORY_INDEX_TYPE_ORDER.indexOf(n.type);
+    const typeWeight = MEMORY_INDEX_TYPE_ORDER.length - (typeIdx === -1 ? MEMORY_INDEX_TYPE_ORDER.length : typeIdx);
+    const ageDays = Math.max(0, (now - new Date(n.updatedAt).getTime()) / 86400000);
+    const recencyWeight = 1 / (1 + ageDays / 30);
+    const inbound = inboundCounts.get(n._id!.toHexString()) ?? 0;
+    const score = recencyWeight * typeWeight * (1 + inbound);
+    const firstObs = n.observations[0]?.text;
+    const line = `- **${n.name}** (${n.type}) — ${firstObs ? truncateObs(firstObs) : '(no observations)'}`;
+    return { node: n as MemoryNode & { _id: ObjectId }, score, line };
+  });
+
+  // group by type in the fixed order above, each group internally ranked highest score first
+  const byType = new Map<MemoryNodeType, Ranked[]>();
+  for (const r of ranked) {
+    const list = byType.get(r.node.type) ?? [];
+    list.push(r);
+    byType.set(r.node.type, list);
+  }
+  for (const list of byType.values()) list.sort((a, b) => b.score - a.score);
+  const order = [...MEMORY_INDEX_TYPE_ORDER, ...[...byType.keys()].filter((t) => !MEMORY_INDEX_TYPE_ORDER.includes(t))];
+
+  // global lowest-first drop order, used only to decide what falls off the cap
+  const dropOrder = [...ranked].sort((a, b) => a.score - b.score);
+  const dropped = new Set<Ranked>();
+
+  const render = (omittedCount: number): string => {
+    const parts: string[] = [`# Memory index${projectRef ? ` — ${projectRef}` : ' — global'}`, ''];
+    for (const type of order) {
+      const list = (byType.get(type) ?? []).filter((r) => !dropped.has(r));
+      if (!list.length) continue;
+      parts.push(`## ${type}`);
+      for (const r of list) parts.push(r.line);
+      parts.push('');
+    }
+    parts.push(`${omittedCount} node(s) omitted for space.`);
+    return parts.join('\n');
+  };
+
+  let text = render(0);
+  let dropIdx = 0;
+  while (byteLen(text) >= MEMORY_INDEX_BYTE_CAP && dropIdx < dropOrder.length) {
+    dropped.add(dropOrder[dropIdx]!);
+    dropIdx++;
+    text = render(dropIdx);
+  }
+
+  return c.body(text, 200, { 'content-type': 'text/markdown; charset=utf-8' });
+});
+
+// ---------- crc32 + a minimal store-only zip writer ----------
+// No compression library is in the tree and this needs none: export is a report, not a hot path, and
+// "store" (uncompressed) entries are still a valid, universally-readable .zip. Small and self
+// contained rather than pulling in a dependency for one route.
+const CRC32_TABLE = ((): Uint32Array => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? (0xedb88320 ^ (c >>> 1)) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(buf: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC32_TABLE[(c ^ buf[i]!) & 0xff]! ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+type ZipEntry = { name: string; data: Uint8Array };
+function buildZip(entries: ZipEntry[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const nameBytes = encoder.encode(entry.name);
+    const crc = crc32(entry.data);
+    const size = entry.data.length;
+
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0, true);
+    local.setUint16(8, 0, true); // compression method: 0 = store
+    local.setUint16(10, 0, true);
+    local.setUint16(12, 0, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, size, true);
+    local.setUint32(22, size, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);
+    const localHeader = new Uint8Array(local.buffer);
+    localParts.push(localHeader, nameBytes, entry.data);
+
+    const central = new DataView(new ArrayBuffer(46));
+    central.setUint32(0, 0x02014b50, true);
+    central.setUint16(4, 20, true);
+    central.setUint16(6, 20, true);
+    central.setUint16(8, 0, true);
+    central.setUint16(10, 0, true);
+    central.setUint16(12, 0, true);
+    central.setUint16(14, 0, true);
+    central.setUint32(16, crc, true);
+    central.setUint32(20, size, true);
+    central.setUint32(24, size, true);
+    central.setUint16(28, nameBytes.length, true);
+    central.setUint16(30, 0, true);
+    central.setUint16(32, 0, true);
+    central.setUint16(34, 0, true);
+    central.setUint16(36, 0, true);
+    central.setUint32(38, 0, true);
+    central.setUint32(42, offset, true);
+    const centralHeader = new Uint8Array(central.buffer);
+    centralParts.push(centralHeader, nameBytes);
+
+    offset += localHeader.length + nameBytes.length + size;
+  }
+  const centralStart = offset;
+  const centralSize = centralParts.reduce((n, p) => n + p.length, 0);
+
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(4, 0, true);
+  end.setUint16(6, 0, true);
+  end.setUint16(8, entries.length, true);
+  end.setUint16(10, entries.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, centralStart, true);
+  end.setUint16(20, 0, true);
+
+  const all = [...localParts, ...centralParts, new Uint8Array(end.buffer)];
+  const total = all.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const p of all) { out.set(p, pos); pos += p.length; }
+  return out;
+}
+
+const MEMORY_EXPORT_README = `# Memory export
+
+This zip is a READ-ONLY report, generated for browsing in Obsidian (or any other tool that reads a
+folder of markdown with YAML frontmatter and [[wikilinks]]).
+
+There is NO IMPORT PATH: editing these files, or copying them back in, writes nothing to darbar's
+memory graph. The graph is written only through POST /api/memory/remember and
+POST /api/memory/supersede. Treat this export as a snapshot, not a store.
+`;
+
+const MEMORY_EXPORT_QUERY = ['project'] as const;
+
+api.get('/memory/export', async (c) => {
+  const local = requireLocal(c);
+  if (local) return local;
+  const badQuery = closedBody(c.req.query() as Record<string, unknown>, MEMORY_EXPORT_QUERY, 'memory/export');
+  if (badQuery) return c.json({ error: badQuery }, 400);
+  const projectRef = c.req.query('project');
+  const scope = await resolveMemoryScope(projectRef);
+  if ('error' in scope) return c.json({ error: scope.error }, 404);
+
+  // every node in scope, including superseded ones (this is a report of the whole history, not just
+  // what recall would currently return — a node's own frontmatter carries supersededBy)
+  const match: Record<string, unknown> = {};
+  match.project = projectRef !== undefined ? { $in: [scope.id, null] } : null;
+  const nodes = await MemoryNodes.find(match).toArray();
+  const nodeById = new Map(nodes.map((n) => [n._id!.toHexString(), n]));
+  const slugById = new Map(nodes.map((n) => [n._id!.toHexString(), n.slug]));
+
+  // supersededBy / edge endpoints can point outside the exported scope (rare, but not impossible),
+  // so those are resolved with a second lookup rather than shown as a broken link
+  const missingIds = new Set<string>();
+  for (const n of nodes) {
+    if (n.supersededBy && !slugById.has(n.supersededBy.toHexString())) missingIds.add(n.supersededBy.toHexString());
+  }
+  const nodeIds = nodes.map((n) => n._id!);
+  const edges = nodeIds.length
+    ? await MemoryEdges.find({ invalidAt: null, $or: [{ from: { $in: nodeIds } }, { to: { $in: nodeIds } }] }).toArray()
+    : [];
+  for (const e of edges) {
+    if (!slugById.has(e.from.toHexString())) missingIds.add(e.from.toHexString());
+    if (!slugById.has(e.to.toHexString())) missingIds.add(e.to.toHexString());
+  }
+  if (missingIds.size) {
+    for (const n of await MemoryNodes.find({ _id: { $in: [...missingIds].map((id) => new ObjectId(id)) } }).toArray()) {
+      slugById.set(n._id!.toHexString(), n.slug);
+    }
+  }
+  const slugOf = (id: ObjectId): string => slugById.get(id.toHexString()) ?? id.toHexString();
+
+  const projectLabel = new Map<string, string>();
+  if (projectRef !== undefined) {
+    const projDoc = scope.id ? await Projects.findOne({ _id: scope.id }) : null;
+    if (scope.id) projectLabel.set(scope.id.toHexString(), (projDoc as { prefix?: string } | null)?.prefix ?? projectRef);
+  }
+  const projectLabelOf = (id: ObjectId | null): string => (id === null ? 'global' : (projectLabel.get(id.toHexString()) ?? id.toHexString()));
+
+  const outByNode = new Map<string, string[]>();
+  const inByNode = new Map<string, string[]>();
+  for (const e of edges) {
+    const fromKey = e.from.toHexString();
+    const toKey = e.to.toHexString();
+    if (nodeById.has(fromKey)) outByNode.set(fromKey, [...(outByNode.get(fromKey) ?? []), `- ${e.relation} -> [[${slugOf(e.to)}]]`]);
+    if (nodeById.has(toKey)) inByNode.set(toKey, [...(inByNode.get(toKey) ?? []), `- [[${slugOf(e.from)}]] ${e.relation} -> (this node)`]);
+  }
+
+  const entries: ZipEntry[] = [{ name: 'README.md', data: new TextEncoder().encode(MEMORY_EXPORT_README) }];
+  for (const n of nodes) {
+    const key = n._id!.toHexString();
+    const fm = [
+      '---',
+      `name: ${JSON.stringify(n.name)}`,
+      `type: ${n.type}`,
+      `project: ${JSON.stringify(projectLabelOf(n.project))}`,
+      `createdAt: ${new Date(n.createdAt).toISOString()}`,
+      `updatedAt: ${new Date(n.updatedAt).toISOString()}`,
+      `supersededBy: ${n.supersededBy ? JSON.stringify(slugOf(n.supersededBy)) : 'null'}`,
+      '---',
+      '',
+    ];
+    const obs = ['## Observations', ''];
+    if (n.observations.length) {
+      for (const o of n.observations) obs.push(`- ${new Date(o.at).toISOString().slice(0, 10)}: ${o.text} (source: ${o.source})`);
+    } else {
+      obs.push('_(none)_');
+    }
+    const links = ['', '## Links', ''];
+    const linkLines = [...(outByNode.get(key) ?? []), ...(inByNode.get(key) ?? [])];
+    links.push(...(linkLines.length ? linkLines : ['_(none)_']));
+    const md = [...fm, ...obs, ...links, ''].join('\n');
+    entries.push({ name: `${n.slug}.md`, data: new TextEncoder().encode(md) });
+  }
+
+  const zip = buildZip(entries);
+  return c.body(zip.buffer as ArrayBuffer, 200, {
+    'content-type': 'application/zip',
+    'content-disposition': `attachment; filename="memory-export${projectRef ? `-${projectRef}` : ''}.zip"`,
+  });
+});
