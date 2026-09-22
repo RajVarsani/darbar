@@ -45,7 +45,11 @@ codex  = "read-only"
 [roles.builder]
 tier        = "cheap"
 effort      = "medium"
-max_turns   = 80
+# 120, not 80: a rework folds EVERY accepted review finding into one builder (doctrine), so
+# reworks are the largest jobs this role gets. The first ten-finding rework across six files
+# hit an 80-turn cap with 385 lines uncommitted and no report (22 Sep). A cap is there to bound
+# a runaway, not to truncate the doctrine's own largest case.
+max_turns   = 120
 toolset     = "code"
 mcp         = ["darbar"]     # the only server a builder needs: its own board row
 description = "Implements ONE darbar task row exactly as briefed. Specified work with mechanical verification (tests, typecheck). No browser, no design judgment, no scope growth."
