@@ -561,6 +561,33 @@
     .scrim.on{opacity:1;pointer-events:auto}
   }
   @media (min-width:1081px){ .scrim{display:none} }
+
+  /* ---------- memory tab (DAR-283) ---------- */
+  .meminput{display:flex;align-items:center;gap:8px;border:2px solid var(--ink);padding:5px 10px;color:var(--ink-soft)}
+  .meminput svg{flex:none}
+  .meminput input{border:none;outline:none;background:none;width:180px;font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+  .meminput input::placeholder{color:var(--ink-faint)}
+  .memtypes{flex-wrap:wrap}
+  .mrow{display:grid;grid-template-columns:160px 90px minmax(0,1fr) 70px auto;gap:12px;align-items:center;
+    padding:10px 14px;border-bottom:2px solid var(--ink);cursor:pointer}
+  .mrow:hover{background:var(--beige-2)}
+  .mrow:last-child{border-bottom:none}
+  .mrow .mname{font-family:var(--mono);font-weight:800;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mrow .mobs{color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mrow .medges{font-family:var(--mono);font-size:11px;color:var(--ink-soft);text-align:right}
+  .medgegrp{margin:10px 0}
+  .medgegrp .rel{font-family:var(--mono);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;
+    color:var(--ink-soft);margin-bottom:4px}
+  .medgerow{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:8px;align-items:center;padding:5px 0}
+  .medgerow a{font-weight:700}
+  .mobsrow{border:2px solid var(--ink);background:var(--beige-2);padding:10px 12px;margin-bottom:8px}
+  .mobsrow .t{white-space:pre-wrap;word-break:break-word}
+  .mobsrow .meta{font-family:var(--mono);font-size:10px;color:var(--ink-soft);margin-top:6px}
+  .mform{border:2px solid var(--ink);background:#fff;padding:10px 12px;margin-top:8px}
+  .mform textarea,.mform input[type=text]{width:100%;border:2px solid var(--ink);padding:7px 9px;font-family:var(--sans);
+    font-size:13px;background:var(--beige-2);color:var(--ink);resize:vertical}
+  .mform textarea{min-height:56px}
+  .mform .mformrow{display:flex;gap:8px;margin-top:8px;align-items:center}
 </style>
 </head>
 <body data-view="board">
@@ -652,7 +679,13 @@ const state = {
   parkedRaw: '',           // last payload, verbatim: a poll that changed nothing must not re-render
   parkOpen: new Set(),     // parkIds expanded in place; a held card never opens the drawer
   parkArm: null,           // the one parkId whose remedy button is armed; transient, never persisted
+  // memory tab (DAR-283): list state. forbidden mirrors state.parked's null-means-unavailable
+  // shape — a 403 here means "not allowed to look", never "nothing found"
+  mem: {q:'', type:'', includeSuperseded:false, loading:false, forbidden:false, error:null, nodes:[], edges:[]},
+  memNode: null,           // open node drawer: {name, loading, forbidden, error, node, out[], in[], armSupersede, superBy, superBusy}
 };
+// mirrors packages/core/src/types.ts MEMORY_NODE_TYPES — read-only client copy for the filter chips
+const MEMORY_NODE_TYPES = ['decision','gotcha','person','service','repo','project','preference'];
 
 // tolerates a missing/non-string name: roster entries come from unvalidated project config
 const initials = n => String(n ?? '').split(/[\s-]+/).filter(Boolean).map(w=>w[0]).join('').slice(0,2).toUpperCase();
@@ -1226,6 +1259,7 @@ const ICONS = {
   feedback: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.6 8.6 0 0 1-3.5-.7L3 21l1.8-4.4a8.4 8.4 0 1 1 16.2-5.1z"/></svg>',
   activity: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>',
   lane: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m9 11 3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>',
+  memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="6" cy="6" r="2.6"/><circle cx="18" cy="6" r="2.6"/><circle cx="12" cy="18" r="2.6"/><path d="M8.2 7.4 10.5 16M15.8 7.4 13.5 16M8.6 6H15.4"/></svg>',
 };
 
 function renderTopNav(){
@@ -1245,6 +1279,9 @@ function renderTopNav(){
     // reason the band does: an addition was not "not filed", it was never added to the row it names.
     {id:'feedback', label:'Feedback', n: openFbN, icon:'feedback', held: heldN() ? heldCount() : 0,
      title:`${openFbN} open feedback${heldN()?` · ${heldTabWhy()}${heldPartial()?` — and that is a floor: ${heldUnread()} more file${heldUnread()===1?'':'s'} in the parking lot were never opened`:''}`:''}`},
+    // no cheap "how many nodes" count exists (recall requires a search query), so this carries no
+    // badge — same choice as Activity, which is also a log rather than a queue to clear
+    {id:'memory', label:'Memory', n: null, icon:'memory', title:'project memory graph · local-only, never on a share link'},
     {id:'activity', label:'Activity', n: null, icon:'activity', title:'project event log'},
   ];
   $('views').innerHTML = views.map(v =>
@@ -1780,6 +1817,208 @@ function heldBandHtml(){
     ${overflow?`<div class="heldmore">and ${overflow} more held, not listed here. the oldest are shown first · the whole set is <code>GET /api/parked?project=${esc(state.data?.project?.prefix ?? '')}</code></div>`:''}</div>`;
 }
 
+// ---------- memory tab (DAR-283) ----------
+function memEdgeCount(name){
+  return state.mem.edges.filter(e=>e.from===name||e.to===name).length;
+}
+function memRowHtml(n){
+  const firstObs = n.observations?.[0]?.text || '';
+  return `<div class="mrow" data-mem-row="${esc(n.name)}">
+    <span class="mname">${esc(n.name)}</span>
+    <span class="chip">${esc(n.type)}</span>
+    <span class="mobs">${esc(firstObs) || '<span style="color:var(--ink-faint)">no observations</span>'}</span>
+    <span class="medges">${memEdgeCount(n.name)} edge${memEdgeCount(n.name)===1?'':'s'}</span>
+    ${n.supersededBy?`<span class="badge off" title="superseded by ${esc(n.supersededBy)}">SUPERSEDED</span>`:''}
+  </div>`;
+}
+function renderMemResults(){
+  if (state.mem.forbidden) return '<div class="empty">memory is local-only — this board is open through a share link, which never carries it</div>';
+  if (state.mem.error) return `<div class="empty">${esc(state.mem.error)}</div>`;
+  if (!state.mem.q.trim()) return '<div class="empty">search this project’s memory graph — decisions, gotchas, people, services, repos and preferences it has recorded</div>';
+  if (state.mem.loading) return '<div class="empty">searching…</div>';
+  if (!state.mem.nodes.length) return `<div class="empty">no matches for “${esc(state.mem.q)}”${state.mem.type?` in ${esc(state.mem.type)}`:''}</div>`;
+  return state.mem.nodes.map(memRowHtml).join('');
+}
+let memT = null;
+function scheduleMemory(){ clearTimeout(memT); memT = setTimeout(loadMemory, 300); }
+async function loadMemory(){
+  const q = state.mem.q.trim();
+  if (!q){ state.mem.nodes=[]; state.mem.edges=[]; state.mem.error=null; state.mem.forbidden=false; if(state.view==='memory') renderContent(); return; }
+  const prefix = state.data?.project?.prefix;
+  state.mem.loading = true;
+  if (state.view==='memory') renderContent();
+  try {
+    const params = new URLSearchParams({q, limit:'50', includeSuperseded:String(state.mem.includeSuperseded)});
+    if (prefix) params.set('project', prefix);
+    if (state.mem.type) params.set('type', state.mem.type);
+    const r = await fetch(`/api/memory/recall?${params}`);
+    if (r.status===403){ state.mem.forbidden = true; state.mem.nodes=[]; state.mem.edges=[]; }
+    else {
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok){ state.mem.error = j.error || `recall failed (http ${r.status})`; state.mem.nodes=[]; state.mem.edges=[]; }
+      else { state.mem.forbidden=false; state.mem.error=null; state.mem.nodes=j.nodes||[]; state.mem.edges=j.edges||[]; }
+    }
+  } catch { state.mem.error = 'could not reach the memory API: network'; }
+  state.mem.loading = false;
+  if (state.view==='memory') renderContent();
+}
+
+// node drawer: q=exact name always returns that node itself at depth 0 (its own name is in its own
+// text index) plus every currently-valid edge touching it at depth 1 — confirmed against the live
+// API before relying on it here, not assumed
+function openMemNode(name){
+  state.sel = {kind:'mem', id:name};
+  state.memNode = {name, loading:true, forbidden:false, error:null, node:null, out:[], in:[], armSupersede:false, superBy:'', superBusy:false, superOptions:[]};
+  renderDrawer();
+  loadMemNode(name);
+}
+async function loadMemNode(name){
+  const prefix = state.data?.project?.prefix;
+  const mn = state.memNode; if (!mn || mn.name!==name) return;
+  try {
+    const params = new URLSearchParams({q:name, limit:'50', includeSuperseded:'true', hops:'1'});
+    if (prefix) params.set('project', prefix);
+    const r = await fetch(`/api/memory/recall?${params}`);
+    if (state.memNode !== mn) return; // superseded by a newer navigation while this was in flight
+    if (r.status===403){ mn.forbidden = true; mn.loading=false; return renderDrawer(); }
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok){ mn.error = j.error || `lookup failed (http ${r.status})`; mn.loading=false; return renderDrawer(); }
+    const node = (j.nodes||[]).find(n=>n.name===name) || null;
+    if (!node){ mn.error = `${name} was not found (it may have been superseded and dropped out of recall)`; mn.loading=false; return renderDrawer(); }
+    mn.node = node;
+    mn.out = (j.edges||[]).filter(e=>e.from===name);
+    mn.in = (j.edges||[]).filter(e=>e.to===name && e.from!==name);
+    mn.loading = false;
+    renderDrawer();
+  } catch { if (state.memNode===mn){ mn.error='network error'; mn.loading=false; renderDrawer(); } }
+}
+let memSupT = null;
+function scheduleMemSupSearch(text){ clearTimeout(memSupT); memSupT = setTimeout(()=>memSupSearch(text), 250); }
+// updates only the <datalist>, never the whole drawer: rebuilding the drawer while someone is
+// mid-keystroke in the #memsupby input next to it would drop focus and the caret
+async function memSupSearch(text){
+  const mn = state.memNode; if (!mn) return;
+  const q = text.trim();
+  const applyOptions = opts => {
+    mn.superOptions = opts;
+    const dl = document.getElementById('memnodeoptions');
+    if (dl) dl.innerHTML = opts.filter(o=>o!==mn.node?.name).map(o=>`<option value="${esc(o)}">`).join('');
+  };
+  if (!q){ applyOptions([]); return; }
+  const prefix = state.data?.project?.prefix;
+  try {
+    const params = new URLSearchParams({q, limit:'10'});
+    if (prefix) params.set('project', prefix);
+    const r = await fetch(`/api/memory/recall?${params}`);
+    if (state.memNode !== mn || !r.ok) return;
+    const j = await r.json().catch(()=>({}));
+    applyOptions((j.nodes||[]).map(x=>x.name));
+  } catch {}
+}
+function memEdgeGroups(list){
+  const by = new Map();
+  for (const e of list){ if (!by.has(e.relation)) by.set(e.relation, []); by.get(e.relation).push(e); }
+  return by;
+}
+async function addMemObservation(name, text){
+  const t = text.trim(); if (!t) return;
+  const mn = state.memNode; if (!mn) return;
+  mn.superBusy = true; renderDrawer();
+  try {
+    const body = {node:{name, type:mn.node?.type || 'decision', project: state.data?.project?.prefix}, observations:[t]};
+    const r = await fetch('/api/memory/remember', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
+    if (!r.ok){
+      const j = await r.json().catch(()=>({}));
+      toast(j.error || (r.status===403 ? 'memory is local-only — not writable through a share link' : `could not add that (http ${r.status})`));
+    } else { toast('observation added'); loadMemNode(name); if (state.view==='memory') loadMemory(); }
+  } catch { toast('could not add that: network'); }
+  mn.superBusy = false; renderDrawer();
+}
+async function confirmMemSupersede(name){
+  const mn = state.memNode; if (!mn) return;
+  const by = mn.superBy.trim();
+  if (!by) return toast('name the node that replaces this one first');
+  mn.superBusy = true; renderDrawer();
+  try {
+    const r = await fetch('/api/memory/supersede', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({nodeName:name, by, project: state.data?.project?.prefix}),
+    });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok) toast(j.error || (r.status===403 ? 'memory is local-only — not writable through a share link' : `supersede failed (http ${r.status})`));
+    else { toast(`${name} superseded by ${by}`); mn.armSupersede=false; mn.superBy=''; loadMemNode(name); if (state.view==='memory') loadMemory(); }
+  } catch { toast('supersede failed: network'); }
+  mn.superBusy = false; renderDrawer();
+}
+async function exportMemory(){
+  const prefix = state.data?.project?.prefix;
+  if (!prefix) return;
+  try {
+    const r = await fetch(`/api/memory/export?project=${encodeURIComponent(prefix)}`);
+    if (r.status===404) return toast('export is not available yet');
+    if (r.status===403) return toast('memory is local-only — not available through a share link');
+    if (!r.ok) return toast(`export failed (http ${r.status})`);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${prefix}-memory.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+  } catch { toast('export failed: network'); }
+}
+
+function renderMemDrawer(dr, backBtn, closeBtn){
+  const mn = state.memNode;
+  const head = `<div class="dhead"><span class="id">MEMORY</span><span class="grow"></span>${closeBtn}</div>`;
+  if (!mn){ state.sel = null; return renderDrawer(); }
+  if (mn.forbidden){
+    dr.innerHTML = `${head}<div class="dbody"><div class="note">memory is local-only — this board is open through a share link, which never carries it</div></div>`;
+    return;
+  }
+  if (mn.loading && !mn.node){
+    dr.innerHTML = `${head}<div class="dbody"><div class="note">loading…</div></div>`;
+    return;
+  }
+  if (mn.error && !mn.node){
+    dr.innerHTML = `${head}<div class="dbody"><div class="note">${esc(mn.error)}</div></div>`;
+    return;
+  }
+  const n = mn.node;
+  const edgeRow = (e, otherName) => `<div class="medgerow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+    <a href="#" data-mem-row="${esc(otherName)}">${esc(otherName)}</a>
+    <span class="time" title="valid since ${new Date(e.validAt).toLocaleString('en-GB')}">${relTime(e.validAt)}${e.confidence!=null?` · ${Math.round(e.confidence*100)}%`:''}</span></div>`;
+  const edgeSec = (title, list, otherOf) => {
+    if (!list.length) return `<div class="dsec"><h3>${esc(title)} · 0</h3><div class="note">none</div></div>`;
+    const groups = memEdgeGroups(list);
+    return `<div class="dsec"><h3>${esc(title)} · ${list.length}</h3>
+      ${[...groups.entries()].map(([rel, es])=>`<div class="medgegrp"><div class="rel">${esc(rel)}</div>${es.map(e=>edgeRow(e, otherOf(e))).join('')}</div>`).join('')}</div>`;
+  };
+  const obsHtml = (n.observations||[]).slice().reverse().map(o=>`<div class="mobsrow"><div class="t">${esc(o.text)}</div>
+    <div class="meta">${new Date(o.at).toLocaleString('en-GB')} · source: ${esc(o.source||'unknown')}</div></div>`).join('') || '<div class="note">none recorded</div>';
+  const addObsHtml = `<div class="mform"><div class="rel" style="font-family:var(--mono);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft)">Add observation</div>
+    <textarea id="memobstext" placeholder="what did you learn?"></textarea>
+    <div class="mformrow"><button class="pbtn" type="button" id="memobsadd" ${mn.superBusy?'disabled':''}>add</button></div></div>`;
+  const superHtml = n.supersededBy
+    ? `<div class="note">superseded by <a href="#" data-mem-row="${esc(n.supersededBy)}">${esc(n.supersededBy)}</a></div>`
+    : (!mn.armSupersede
+      ? `<button class="pbtn" type="button" id="memsuparm" style="margin-top:8px">supersede…</button>`
+      : `<div class="mform"><input type="text" id="memsupby" placeholder="replacement node name" value="${esc(mn.superBy)}" list="memnodeoptions" autocomplete="off">
+          <datalist id="memnodeoptions">${(mn.superOptions||[]).filter(o=>o!==n.name).map(o=>`<option value="${esc(o)}">`).join('')}</datalist>
+          <div class="mformrow">
+            <button class="pbtn" type="button" id="memsupconfirm" ${mn.superBusy?'disabled':''}>confirm supersede</button>
+            <button class="pbtn" type="button" id="memsupcancel">cancel</button>
+          </div>
+          <div class="note">never deletes: ${esc(n.name)} stays on record, marked superseded by whatever you name here</div></div>`);
+  dr.innerHTML = `${head}<div class="dbody">
+    <div class="dbadges"><span class="chip">${esc(n.type)}</span>${n.supersededBy?'<span class="badge off">SUPERSEDED</span>':''}</div>
+    <div class="dtitle">${esc(n.name)}</div>
+    <div class="dsec"><h3>Observations · ${(n.observations||[]).length}</h3>${obsHtml}${addObsHtml}</div>
+    ${edgeSec('Outgoing edges', mn.out, e=>e.to)}
+    ${edgeSec('Incoming edges', mn.in, e=>e.from)}
+    <div class="dsec"><h3>Supersede</h3>${superHtml}</div>
+  </div>`;
+}
+
 function renderContent(){
   const board = state.view==='board';
   $('kanban').hidden = !board;
@@ -1836,6 +2075,25 @@ function renderContent(){
           <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span></span>
       </div>`;}).join('') || `<div class="empty">${state.fbFilter==='open'?'inbox clear, nothing open':'no feedback here yet'}${heldN()?`<br>${heldCount()} held above, ${heldEmptyTail()}`:''}</div>`);
+  }
+  else if (state.view==='memory'){
+    // the search input keeps its own DOM node across re-renders (typing must not lose focus, and an
+    // SSE tick can call renderContent() mid-keystroke) — the shell is built once per tab-entry and
+    // only the results below it are rewritten each time state.mem changes
+    if (!vb.querySelector('#memq')){
+      vb.innerHTML = `<span class="vtitle">Memory</span><span class="vn" id="memvn"></span>
+        <label class="meminput"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="memq" placeholder="search memory…" autocomplete="off" value="${esc(state.mem.q)}"></label>
+        <div class="filters memtypes" id="memtypes"></div>
+        <button class="pbtn" type="button" id="memsup"></button>
+        <button class="pbtn" type="button" id="memexport">Export .md</button>`;
+    }
+    $('memvn').textContent = state.mem.nodes.length;
+    $('memtypes').innerHTML = ['', ...MEMORY_NODE_TYPES].map(t=>
+      `<button class="seg ${state.mem.type===t?'on':''}" data-mem-type="${esc(t)}">${esc(t||'all')}</button>`).join('');
+    $('memsup').textContent = (state.mem.includeSuperseded?'✓ ':'') + 'superseded';
+    $('memsup').setAttribute('aria-pressed', String(state.mem.includeSuperseded));
+    el.innerHTML = renderMemResults();
   }
   else {
     vb.innerHTML = `<span class="vtitle">Activity</span>`;
@@ -1967,6 +2225,8 @@ function renderDrawer(){
         ${t.commits?.length?`<div class="dsec"><h3>Commits</h3><div class="commits">${t.commits.map(c=>`<span>· ${esc(c)}</span>`).join('')}</div></div>`:''}
         ${evs.length?`<div class="dsec"><h3>History</h3><div class="devents">${evs.map(e=>`<div><div class="t">${new Date(e.at).toLocaleString('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</div>${esc(e.text)}</div>`).join('')}</div></div>`:''}
       </div>`;
+  } else if (state.sel.kind==='mem'){
+    return renderMemDrawer(dr, backBtn, closeBtn);
   } else {
     const f = fbByShort(state.sel.id); if(!f){ state.sel=null; return renderDrawer(); }
     const t = f.taskId ? tasks().find(x=>x._id===f.taskId) : null;
@@ -2202,11 +2462,31 @@ document.addEventListener('click', e=>{
   // the shared link is meant to be handed to someone: confirm in place, and re-render safely
   const cp = e.target.closest('[data-copy]');
   if (cp){ copyLink(cp); return; }
+  // ---------- memory tab (DAR-283) ----------
+  const memRow = e.target.closest('[data-mem-row]');
+  if (memRow){ e.preventDefault(); openMemNode(memRow.dataset.memRow); return; }
+  const memType = e.target.closest('[data-mem-type]');
+  if (memType){ state.mem.type = memType.dataset.memType; renderContent(); loadMemory(); return; }
+  if (e.target.closest('#memsup')){ state.mem.includeSuperseded = !state.mem.includeSuperseded; renderContent(); loadMemory(); return; }
+  if (e.target.closest('#memexport')){ exportMemory(); return; }
+  if (e.target.closest('#memobsadd')){
+    const ta = $('memobstext'); if (ta && state.memNode) addMemObservation(state.memNode.name, ta.value);
+    return;
+  }
+  if (e.target.closest('#memsuparm')){ if (state.memNode){ state.memNode.armSupersede = true; renderDrawer(); } return; }
+  if (e.target.closest('#memsupcancel')){ if (state.memNode){ state.memNode.armSupersede = false; state.memNode.superBy=''; renderDrawer(); } return; }
+  if (e.target.closest('#memsupconfirm')){ if (state.memNode) confirmMemSupersede(state.memNode.name); return; }
   if (e.target.closest('#dback')) return goBack();
   if (e.target.closest('#dclose')) return clearSel();
   if (e.target.id==='scrim') return clearSel();
 });
 $('palq').addEventListener('input', e=>{ state.pal.q = e.target.value.trim().toLowerCase(); state.pal.sel = 0; renderPal(); });
+// delegated: #memq and #memsupby are built and torn down with the memory view/drawer, so a static
+// listener like palq's would miss them after the first rebuild
+document.addEventListener('input', e=>{
+  if (e.target.id==='memq'){ state.mem.q = e.target.value; scheduleMemory(); return; }
+  if (e.target.id==='memsupby'){ if (state.memNode){ state.memNode.superBy = e.target.value; scheduleMemSupSearch(e.target.value); } return; }
+});
 document.addEventListener('keydown', e=>{
   if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); state.pal.open ? closePal() : openPal(); return; }
   if (state.pal.open){
