@@ -51,16 +51,16 @@ CLAUDE_DIR = Path(
 GABBAR_DIR = Path("/Users/raj/fafo/darbar/data/memory")
 REPO_DIR = Path("/Users/raj/all-things-saturn/saturn-agent-memory")
 
-MEMORY_NODE_TYPES = ("decision", "gotcha", "person", "service", "repo", "project", "preference")
+MEMORY_NODE_TYPES = ("decision", "gotcha", "person", "service", "repo", "project", "preference", "reference")
 
-# source frontmatter type -> graph node type. "reference" has no direct match in
-# MEMORY_NODE_TYPES; these are researched/decided technical write-ups, so "decision" is the
-# closest fit (documented above, and again at the one place it's used, per code-comments-be-terse).
+# source frontmatter type -> graph node type. DAR-284: "reference" now has a direct match in
+# MEMORY_NODE_TYPES (a URL/dashboard/ticket is not a decision). Anything not in this map is
+# skipped by the call sites below (logged into plan.unparsed) rather than written under a guess.
 TYPE_MAP = {
     "user": "preference",
     "feedback": "gotcha",
     "project": "project",
-    "reference": "decision",
+    "reference": "reference",
 }
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")

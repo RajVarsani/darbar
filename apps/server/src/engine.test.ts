@@ -23,6 +23,9 @@ import { api, children, feedback, project, req, reset, task, teardown } from './
 // config object api.ts reads (the mock spreads it by reference), so tests can stub the slack fields
 import { config } from '@darbar/core';
 import { echoedUnchanged } from './api';
+import { writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 afterAll(teardown);
 beforeEach(reset);
@@ -1699,6 +1702,102 @@ test('both memory routes are local-only', async () => {
   expect(await exp.text()).toContain('local-only');
 });
 
+// MEDIUM (DAR-286 rework): remember/recall/supersede get the same requireLocal guard as
+// index/export — the graph carries colleague names and personal notes, so this is a second
+// fail-closed layer behind routes.json's own allowlist, not a substitute for it.
+test('remember, recall and supersede are all local-only too', async () => {
+  const p = await project();
+  const headers = { 'content-type': 'application/json', 'x-forwarded-host': 'darbar.ngrok.app' };
+  const remember = await api.request('/memory/remember', {
+    method: 'POST', headers, body: JSON.stringify({ node: { name: 'Blocked Node', type: 'decision', project: p.prefix } }),
+  });
+  expect(remember.status).toBe(403);
+  expect(await remember.text()).toContain('local-only');
+
+  const recall = await api.request(`/memory/recall?q=blocked&project=${p.prefix}`, { headers });
+  expect(recall.status).toBe(403);
+  expect(await recall.text()).toContain('local-only');
+
+  const supersede = await api.request('/memory/supersede', {
+    method: 'POST', headers, body: JSON.stringify({ nodeName: 'a', by: 'b', project: p.prefix }),
+  });
+  expect(supersede.status).toBe(403);
+  expect(await supersede.text()).toContain('local-only');
+});
+
+// MEDIUM (DAR-286 rework): identical observation text on the same node is not appended twice —
+// a re-drained inbox file or a rewritten topic file must not pile up duplicates.
+test('remember does not duplicate an identical observation on the same node', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', {
+    node: { name: 'Dedup Node', type: 'gotcha', project: p.prefix },
+    observations: ['the exact same text'],
+  });
+  const second = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Dedup Node', type: 'gotcha', project: p.prefix },
+    observations: ['the exact same text', 'a genuinely new one'],
+  });
+  expect(second.status).toBe(200);
+  expect(second.body.node.observations).toHaveLength(2);
+  expect(second.body.node.observations.map((o) => o.text)).toEqual(['the exact same text', 'a genuinely new one']);
+});
+
+// MEDIUM (DAR-286 rework): a type mismatch on an existing node is a 409 naming the existing type
+// and slug; omitting type entirely on an existing node silently adopts what is already stored.
+test('remember refuses a type change with 409, but adopts the existing type when type is omitted', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Typed Node', type: 'decision', project: p.prefix } });
+
+  const conflict = await req('POST', '/memory/remember', { node: { name: 'Typed Node', type: 'gotcha', project: p.prefix } });
+  expect(conflict.status).toBe(409);
+  expect(conflict.error).toContain('decision');
+  expect(conflict.error).toContain('typed-node');
+
+  const omitted = await req('POST', '/memory/remember', {
+    node: { name: 'Typed Node', project: p.prefix } as unknown as { name: string; type: string; project: string },
+    observations: ['adopted the existing type'],
+  });
+  expect(omitted.status).toBe(200);
+  const found = await req<Recalled>('GET', `/memory/recall?q=Typed+Node&project=${p.prefix}`);
+  const hit = found.body.nodes.find((n) => n.name === 'Typed Node') as unknown as { type: string } | undefined;
+  expect(hit?.type).toBe('decision');
+});
+
+// HIGH (DAR-286 rework): the index line rendered observations[0] (oldest, since remember $push-es),
+// so it went stale on exactly the nodes re-remembered most. Must render the newest instead.
+test('memory index renders the NEWEST observation, not the oldest', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', {
+    node: { name: 'Evolving Fact', type: 'decision', project: p.prefix },
+    observations: ['stale first observation'],
+  });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Evolving Fact', type: 'decision', project: p.prefix },
+    observations: ['the current, correct observation'],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  expect(text).toContain('the current, correct observation');
+  expect(text).not.toContain('stale first observation');
+});
+
+// DAR-284: reference is accepted as a node type and renders after decision (and every other
+// type) in the index, per MEMORY_INDEX_TYPE_ORDER ranking it lowest.
+test('a reference node is accepted and renders after decision nodes in the index', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'A Real Decision', type: 'decision', project: p.prefix } });
+  const ref = await req('POST', '/memory/remember', { node: { name: 'Metabase Dashboard', type: 'reference', project: p.prefix } });
+  expect(ref.status).toBe(200);
+
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const decisionIdx = text.indexOf('## decision');
+  const referenceIdx = text.indexOf('## reference');
+  expect(decisionIdx).toBeGreaterThanOrEqual(0);
+  expect(referenceIdx).toBeGreaterThan(decisionIdx);
+  expect(text).toContain('Metabase Dashboard');
+});
+
 // minimal store-only zip reader: enough to read back what buildZip (api.ts) writes, without a
 // dependency neither this file nor api.ts otherwise needs.
 function readZipEntries(buf: Uint8Array): Map<string, string> {
@@ -1739,8 +1838,46 @@ test('memory export streams a zip with one file per node, a README, and a wikili
   const entries = readZipEntries(buf);
   expect(entries.has('README.md')).toBe(true);
   expect(entries.get('README.md')).toContain('NO IMPORT PATH');
-  expect(entries.has('export-from.md')).toBe(true);
-  expect(entries.has('export-to.md')).toBe(true);
-  expect(entries.get('export-from.md')).toContain('[[export-to]]');
-  expect(entries.get('export-from.md')).toContain('RELATES_TO');
+  // HIGH (DAR-286 rework): entries are laid out one folder per scope now: <PREFIX>/<slug>.md
+  expect(entries.has(`${p.prefix}/export-from.md`)).toBe(true);
+  expect(entries.has(`${p.prefix}/export-to.md`)).toBe(true);
+  expect(entries.get(`${p.prefix}/export-from.md`)).toContain(`[[${p.prefix}/export-to]]`);
+  expect(entries.get(`${p.prefix}/export-from.md`)).toContain('RELATES_TO');
+});
+
+// HIGH (DAR-286 rework): a project-scoped export can carry a global node whose slug collides
+// with a project node's slug — the old flat `${slug}.md` layout wrote two identical entries and
+// one silently clobbered the other on extract. Prefixed paths (global/<slug> vs <PREFIX>/<slug>)
+// must produce two DISTINCT entries.
+test('export gives a same-slug project node and global node two distinct zip entries', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Shared Name', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Shared Name', type: 'person' } }); // no project = global
+
+  const r = await api.request(`/memory/export?project=${p.prefix}`);
+  expect(r.status).toBe(200);
+  const buf = new Uint8Array(await r.arrayBuffer());
+  const entries = readZipEntries(buf);
+  expect(entries.has(`${p.prefix}/shared-name.md`)).toBe(true);
+  expect(entries.has('global/shared-name.md')).toBe(true);
+  expect(entries.get(`${p.prefix}/shared-name.md`)).not.toBe(entries.get('global/shared-name.md'));
+
+  // TEST GAP (DAR-286 rework): round-trip through a REAL zip reader, not just the hand-rolled
+  // one above — shell out to unzip -l (central directory listing) when the binary exists.
+  const tmp = path.join(tmpdir(), `darbar-export-test-${process.pid}-${Date.now()}.zip`);
+  writeFileSync(tmp, buf);
+  try {
+    const which = Bun.spawnSync(['which', 'unzip']);
+    if (which.exitCode === 0) {
+      const list = Bun.spawnSync(['unzip', '-l', tmp]);
+      const out = list.stdout.toString();
+      expect(out).toContain(`${p.prefix}/shared-name.md`);
+      expect(out).toContain('global/shared-name.md');
+
+      const test = Bun.spawnSync(['unzip', '-t', tmp]);
+      expect(test.exitCode).toBe(0);
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
 });

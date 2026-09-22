@@ -33,15 +33,13 @@ const MEMORY_INDEX_FILE = 'MEMORY.md';
 //   user      -> preference  (a standing fact about how Raj/the user wants things done)
 //   feedback  -> gotcha      (a lesson learned from something going wrong)
 //   project   -> project     (exact match)
-//   reference -> decision    (closest available: a settled fact/consideration worth recording,
-//                             same as a decision node once it's written down — there is no
-//                             'reference' or 'note' type in MEMORY_NODE_TYPES)
-// Anything else unrecognized falls back to the same 'decision' bucket as reference, logged.
+//   reference -> reference   (DAR-284: a URL/dashboard/ticket is not a decision, exact match)
+// Anything else unrecognized falls back to 'decision', logged.
 const AUTO_MEMORY_TYPE_MAP: Record<string, string> = {
   user: 'preference',
   feedback: 'gotcha',
   project: 'project',
-  reference: 'decision',
+  reference: 'reference',
 };
 const AUTO_MEMORY_TYPE_FALLBACK = 'decision';
 
@@ -51,6 +49,7 @@ interface ParsedMemoryFile {
   type: string;
   project: string | undefined;
   body: string;
+  incomplete: boolean;
 }
 
 // ---------- minimal frontmatter parser ----------
@@ -61,19 +60,24 @@ interface ParsedMemoryFile {
 function stripQuotes(v: string): string {
   const t = v.trim();
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
-    return t.slice(1, -1);
+    return t.slice(1, -1).replace(/\\(["\\])/g, '$1');
   }
   return t;
 }
 
-function parseFrontmatter(raw: string): { top: Record<string, string>; meta: Record<string, string>; body: string } {
+// `incomplete: true` means the file OPENED a frontmatter fence ('---' on line 1) but never
+// found the closing one — the exact shape of a file caught mid-write, since the writer emits
+// the opening fence first. This is deliberately a DIFFERENT return path from "no frontmatter at
+// all" (incomplete: false, top/meta empty): the caller must never ingest an incomplete file, but
+// a file with no frontmatter block at all is a legitimate (if minimal) memory file.
+function parseFrontmatter(raw: string): { top: Record<string, string>; meta: Record<string, string>; body: string; incomplete: boolean } {
   const lines = raw.split('\n');
-  if (lines[0]?.trim() !== '---') return { top: {}, meta: {}, body: raw };
+  if (lines[0]?.trim() !== '---') return { top: {}, meta: {}, body: raw, incomplete: false };
   let end = -1;
   for (let i = 1; i < lines.length; i++) {
     if (lines[i]?.trim() === '---') { end = i; break; }
   }
-  if (end === -1) return { top: {}, meta: {}, body: raw };
+  if (end === -1) return { top: {}, meta: {}, body: raw, incomplete: true };
 
   const top: Record<string, string> = {};
   const meta: Record<string, string> = {};
@@ -96,16 +100,16 @@ function parseFrontmatter(raw: string): { top: Record<string, string>; meta: Rec
     }
   }
   const body = lines.slice(end + 1).join('\n').trim();
-  return { top, meta, body };
+  return { top, meta, body, incomplete: false };
 }
 
 function parseMemoryFile(raw: string, fallbackName: string): ParsedMemoryFile {
-  const { top, meta, body } = parseFrontmatter(raw);
+  const { top, meta, body, incomplete } = parseFrontmatter(raw);
   const name = top.name || fallbackName;
   const description = top.description || '';
   const type = meta.type || top.type || '';
   const project = meta.project || top.project || undefined;
-  return { name, description, type, project, body };
+  return { name, description, type, project, body, incomplete };
 }
 
 function mapType(rawType: string, log: (msg: string) => void): string {
@@ -168,8 +172,18 @@ export async function drainFile(filePath: string, deps: DrainDeps): Promise<bool
 
   const fallbackName = base.replace(/\.md$/i, '');
   const parsed = parseMemoryFile(raw, fallbackName);
-  const type = mapType(parsed.type, log);
   const text = [parsed.description, parsed.body].filter((s) => s && s.trim().length).join('\n\n');
+
+  // BLOCKER (DAR-286 rework): an opening '---' with no closing one is the exact shape of a file
+  // caught mid-write (the writer emits frontmatter first) — never ingest it, never delete it, just
+  // retry next tick. An empty description+body is the same failure mode one step later in the
+  // write (frontmatter closed, body not yet flushed), so it gets the same treatment.
+  if (parsed.incomplete || !text.trim().length) {
+    log(`memory-inbox: ${base} looks incomplete (mid-write?), leaving it for the next scan`);
+    return false;
+  }
+
+  const type = mapType(parsed.type, log);
 
   const node: Record<string, unknown> = { name: parsed.name, type };
   if (parsed.project) node.project = parsed.project;
@@ -217,11 +231,16 @@ async function safeRemember(
 function listMdFiles(dir: string): string[] {
   try {
     return fs.readdirSync(dir)
-      .filter((f) => f.toLowerCase().endsWith('.md') && f !== MEMORY_INDEX_FILE);
+      .filter((f) => f.toLowerCase().endsWith('.md') && f.toLowerCase() !== MEMORY_INDEX_FILE.toLowerCase());
   } catch {
     return [];
   }
 }
+
+// A file's mtime inside the last 2s is treated as "still being written" and skipped entirely for
+// this tick, without even opening it — the cheap first line of defence against a mid-write read,
+// ahead of (not instead of) the frontmatter-completeness check inside drainFile.
+const MIN_AGE_MS = 2000;
 
 /**
  * Scan the inbox directory once: drain every *.md file present (except MEMORY.md), deleting
@@ -232,6 +251,13 @@ export async function scanOnce(dir: string, deps: DrainDeps): Promise<void> {
   for (const f of listMdFiles(dir)) {
     const full = path.join(dir, f);
     if (!fs.existsSync(full)) continue; // raced with a delete between listing and draining
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue; // raced with a delete between existsSync and statSync
+    }
+    if (Date.now() - stat.mtimeMs < MIN_AGE_MS) continue; // too fresh; retry next tick
     const ok = await drainFile(full, deps);
     if (ok) {
       try { fs.unlinkSync(full); } catch (e) { (deps.log ?? console.error)(`memory-inbox: drained ${f} but could not delete it: ${String(e)}`); }

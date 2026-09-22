@@ -3470,6 +3470,8 @@ const MEMORY_NODE_FIELDS = ['name', 'type', 'project'] as const;
 const MEMORY_EDGE_FIELDS = ['to', 'relation', 'confidence', 'source'] as const;
 
 api.post('/memory/remember', async (c) => {
+  const local = requireLocal(c);
+  if (local) return local;
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
   const badTop = closedBody(b, MEMORY_REMEMBER_FIELDS, 'remember');
@@ -3485,8 +3487,11 @@ api.post('/memory/remember', async (c) => {
   if (name.length > MEMORY_NAME_MAX_LEN) {
     return c.json({ error: `node.name is ${name.length} chars, over the ${MEMORY_NAME_MAX_LEN}-char cap` }, 400);
   }
+  // type is REQUIRED for a brand-new node, but a call that omits it for a node that already
+  // exists just adopts whatever type is already stored (DAR-286 rework MEDIUM #2) — the caller
+  // resending the same node to append an observation should not have to also know its type.
   const type = str(node.type);
-  if (!type || !MEMORY_NODE_TYPES.includes(type as MemoryNodeType)) {
+  if (type !== undefined && !MEMORY_NODE_TYPES.includes(type as MemoryNodeType)) {
     return c.json({ error: `node.type must be one of ${MEMORY_NODE_TYPES.join(', ')} (got ${JSON.stringify(node.type)})` }, 400);
   }
   const projectRef = str(node.project);
@@ -3494,6 +3499,22 @@ api.post('/memory/remember', async (c) => {
   if ('error' in scope) return c.json({ error: scope.error }, 404);
   const slug = slugify(name);
   if (!slug) return c.json({ error: `node.name ${JSON.stringify(name)} has no addressable slug once lowercased and kebabbed` }, 400);
+
+  // looked up here (rather than only at write time below) so a type conflict, or an omitted type
+  // on a brand-new node, refuses the WHOLE call before any edge is resolved or written.
+  const existingForType = await MemoryNodes.findOne({ project: scope.id, slug });
+  let resolvedType: MemoryNodeType;
+  if (existingForType) {
+    if (type !== undefined && type !== existingForType.type) {
+      return c.json({
+        error: `node ${JSON.stringify(name)} (slug ${JSON.stringify(slug)}) already exists with type ${JSON.stringify(existingForType.type)}; omit node.type to keep it, or pass the existing type`,
+      }, 409);
+    }
+    resolvedType = existingForType.type;
+  } else {
+    if (!type) return c.json({ error: 'node.type required for a new node' }, 400);
+    resolvedType = type as MemoryNodeType;
+  }
 
   if (b.observations !== undefined && !Array.isArray(b.observations)) {
     return c.json({ error: `observations must be an array (got ${JSON.stringify(b.observations)})` }, 400);
@@ -3539,15 +3560,27 @@ api.post('/memory/remember', async (c) => {
   }
 
   // ---------- dedupe by slug within project: append observations, never overwrite ----------
-  const existing = await MemoryNodes.findOne({ project: scope.id, slug });
+  // existingForType was looked up above (before the type check) rather than re-fetched here, so
+  // this reads the exact row the 409/adopt decision was made against.
+  const existing = existingForType;
   let nodeId: ObjectId;
   if (existing) {
-    if (obs.length) {
-      await MemoryNodes.updateOne({ _id: existing._id }, { $push: { observations: { $each: obs } }, $set: { updatedAt: now } });
+    // MEDIUM #1 (DAR-286 rework): dedupe observations WITHIN the node by exact text, so a
+    // re-drained inbox file or a rewritten topic file cannot pile up the same observation twice.
+    // Within-batch duplicates are collapsed the same way.
+    const seenTexts = new Set(existing.observations.map((o) => o.text));
+    const newObs: MemoryObservation[] = [];
+    for (const o of obs) {
+      if (seenTexts.has(o.text)) continue;
+      seenTexts.add(o.text);
+      newObs.push(o);
+    }
+    if (newObs.length) {
+      await MemoryNodes.updateOne({ _id: existing._id }, { $push: { observations: { $each: newObs } }, $set: { updatedAt: now } });
     }
     nodeId = existing._id!;
   } else {
-    const doc: MemoryNode = { name, slug, type: type as MemoryNodeType, observations: obs, project: scope.id, invalidAt: null, supersededBy: null, createdAt: now, updatedAt: now };
+    const doc: MemoryNode = { name, slug, type: resolvedType, observations: obs, project: scope.id, invalidAt: null, supersededBy: null, createdAt: now, updatedAt: now };
     nodeId = (await MemoryNodes.insertOne(doc)).insertedId;
   }
   const nodeDoc = await MemoryNodes.findOne({ _id: nodeId });
@@ -3592,6 +3625,8 @@ const MEMORY_RECALL_LIMIT_DEFAULT = 20;
 const MEMORY_RECALL_LIMIT_MAX = 50;
 
 api.get('/memory/recall', async (c) => {
+  const local = requireLocal(c);
+  if (local) return local;
   const badQuery = closedBody(c.req.query() as Record<string, unknown>, MEMORY_RECALL_QUERY, 'recall');
   if (badQuery) return c.json({ error: badQuery }, 400);
   const q = c.req.query('q')?.trim();
@@ -3733,6 +3768,8 @@ api.get('/memory/recall', async (c) => {
 const MEMORY_SUPERSEDE_FIELDS = ['edgeId', 'nodeName', 'by', 'project', 'source'] as const;
 
 api.post('/memory/supersede', async (c) => {
+  const local = requireLocal(c);
+  if (local) return local;
   const b = await readBody(c);
   if (!b) return c.json({ error: 'invalid json body' }, 400);
   const badTop = closedBody(b, MEMORY_SUPERSEDE_FIELDS, 'supersede');
@@ -3804,7 +3841,9 @@ function requireLocal(c: Context): Response | null {
 const MEMORY_INDEX_QUERY = ['project'] as const;
 // decision/gotcha/preference first, then person/service/repo/project — the spec's literal ordering,
 // used both as the group-heading order and as the type-priority factor in the ranking score.
-const MEMORY_INDEX_TYPE_ORDER: MemoryNodeType[] = ['decision', 'gotcha', 'preference', 'person', 'service', 'repo', 'project'];
+// DAR-284: reference ranks LOWEST of all — a URL/dashboard/ticket is not a decision, and it is
+// also the type callers reach for least when deciding what belongs at the top of the index.
+const MEMORY_INDEX_TYPE_ORDER: MemoryNodeType[] = ['decision', 'gotcha', 'preference', 'person', 'service', 'repo', 'project', 'reference'];
 const MEMORY_INDEX_BYTE_CAP = 24000;
 const MEMORY_INDEX_OBS_TRUNCATE = 140;
 
@@ -3847,8 +3886,11 @@ api.get('/memory/index', async (c) => {
     const recencyWeight = 1 / (1 + ageDays / 30);
     const inbound = inboundCounts.get(n._id!.toHexString()) ?? 0;
     const score = recencyWeight * typeWeight * (1 + inbound);
-    const firstObs = n.observations[0]?.text;
-    const line = `- **${n.name}** (${n.type}) — ${firstObs ? truncateObs(firstObs) : '(no observations)'}`;
+    // HIGH (DAR-286 rework): remember() APPENDS via $push, so observations[0] is the OLDEST thing
+    // ever written about this node — a fresh session reading the index at start saw stale text
+    // forever, worst on exactly the nodes re-remembered most. The newest is the last element.
+    const lastObs = n.observations[n.observations.length - 1]?.text;
+    const line = `- **${n.name}** (${n.type}) — ${lastObs ? truncateObs(lastObs) : '(no observations)'}`;
     return { node: n as MemoryNode & { _id: ObjectId }, score, line };
   });
 
@@ -4005,28 +4047,32 @@ api.get('/memory/export', async (c) => {
   match.project = projectRef !== undefined ? { $in: [scope.id, null] } : null;
   const nodes = await MemoryNodes.find(match).toArray();
   const nodeById = new Map(nodes.map((n) => [n._id!.toHexString(), n]));
-  const slugById = new Map(nodes.map((n) => [n._id!.toHexString(), n.slug]));
+  // slug + owning project per node id, so a link can be resolved to both a name AND a scope
+  // (HIGH DAR-286 rework: same slug in two different scopes must not collide, see pathOf below)
+  const nodeInfoById = new Map<string, { slug: string; project: ObjectId | null }>(
+    nodes.map((n) => [n._id!.toHexString(), { slug: n.slug, project: n.project }]),
+  );
 
   // supersededBy / edge endpoints can point outside the exported scope (rare, but not impossible),
   // so those are resolved with a second lookup rather than shown as a broken link
   const missingIds = new Set<string>();
   for (const n of nodes) {
-    if (n.supersededBy && !slugById.has(n.supersededBy.toHexString())) missingIds.add(n.supersededBy.toHexString());
+    if (n.supersededBy && !nodeInfoById.has(n.supersededBy.toHexString())) missingIds.add(n.supersededBy.toHexString());
   }
   const nodeIds = nodes.map((n) => n._id!);
   const edges = nodeIds.length
     ? await MemoryEdges.find({ invalidAt: null, $or: [{ from: { $in: nodeIds } }, { to: { $in: nodeIds } }] }).toArray()
     : [];
   for (const e of edges) {
-    if (!slugById.has(e.from.toHexString())) missingIds.add(e.from.toHexString());
-    if (!slugById.has(e.to.toHexString())) missingIds.add(e.to.toHexString());
+    if (!nodeInfoById.has(e.from.toHexString())) missingIds.add(e.from.toHexString());
+    if (!nodeInfoById.has(e.to.toHexString())) missingIds.add(e.to.toHexString());
   }
   if (missingIds.size) {
     for (const n of await MemoryNodes.find({ _id: { $in: [...missingIds].map((id) => new ObjectId(id)) } }).toArray()) {
-      slugById.set(n._id!.toHexString(), n.slug);
+      nodeInfoById.set(n._id!.toHexString(), { slug: n.slug, project: n.project });
     }
   }
-  const slugOf = (id: ObjectId): string => slugById.get(id.toHexString()) ?? id.toHexString();
+  const slugOf = (id: ObjectId): string => nodeInfoById.get(id.toHexString())?.slug ?? id.toHexString();
 
   const projectLabel = new Map<string, string>();
   if (projectRef !== undefined) {
@@ -4035,13 +4081,24 @@ api.get('/memory/export', async (c) => {
   }
   const projectLabelOf = (id: ObjectId | null): string => (id === null ? 'global' : (projectLabel.get(id.toHexString()) ?? id.toHexString()));
 
+  // HIGH (DAR-286 rework): entries used to be a flat `${slug}.md`, but slug is only unique
+  // WITHIN a scope (project, or global) — a project export containing a global node with the
+  // same slug wrote two identical zip entries and one silently overwrote the other on extract.
+  // One folder per scope fixes both the entry name and every [[wikilink]] that points at it:
+  // `<PREFIX>/<slug>.md` for a project node, `global/<slug>.md` for a global one.
+  const pathOf = (id: ObjectId): string => {
+    const info = nodeInfoById.get(id.toHexString());
+    if (!info) return id.toHexString();
+    return `${projectLabelOf(info.project)}/${info.slug}`;
+  };
+
   const outByNode = new Map<string, string[]>();
   const inByNode = new Map<string, string[]>();
   for (const e of edges) {
     const fromKey = e.from.toHexString();
     const toKey = e.to.toHexString();
-    if (nodeById.has(fromKey)) outByNode.set(fromKey, [...(outByNode.get(fromKey) ?? []), `- ${e.relation} -> [[${slugOf(e.to)}]]`]);
-    if (nodeById.has(toKey)) inByNode.set(toKey, [...(inByNode.get(toKey) ?? []), `- [[${slugOf(e.from)}]] ${e.relation} -> (this node)`]);
+    if (nodeById.has(fromKey)) outByNode.set(fromKey, [...(outByNode.get(fromKey) ?? []), `- ${e.relation} -> [[${pathOf(e.to)}]]`]);
+    if (nodeById.has(toKey)) inByNode.set(toKey, [...(inByNode.get(toKey) ?? []), `- [[${pathOf(e.from)}]] ${e.relation} -> (this node)`]);
   }
 
   const entries: ZipEntry[] = [{ name: 'README.md', data: new TextEncoder().encode(MEMORY_EXPORT_README) }];
@@ -4068,7 +4125,7 @@ api.get('/memory/export', async (c) => {
     const linkLines = [...(outByNode.get(key) ?? []), ...(inByNode.get(key) ?? [])];
     links.push(...(linkLines.length ? linkLines : ['_(none)_']));
     const md = [...fm, ...obs, ...links, ''].join('\n');
-    entries.push({ name: `${n.slug}.md`, data: new TextEncoder().encode(md) });
+    entries.push({ name: `${projectLabelOf(n.project)}/${n.slug}.md`, data: new TextEncoder().encode(md) });
   }
 
   const zip = buildZip(entries);

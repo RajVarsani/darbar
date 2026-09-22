@@ -420,7 +420,7 @@ export type ParkedRead = {
 // ADDS a new SUPERSEDES edge, so a superseded fact stays on the graph, invisible to an ordinary
 // recall() but recoverable with asOf. There is no LLM anywhere in this write path — the caller
 // names the entities and the relation, and the store just holds what it is told.
-export type MemoryNodeType = 'decision' | 'gotcha' | 'person' | 'service' | 'repo' | 'project' | 'preference';
+export type MemoryNodeType = 'decision' | 'gotcha' | 'person' | 'service' | 'repo' | 'project' | 'preference' | 'reference';
 
 /** one thing observed about a node, appended (never overwritten) by remember() */
 export type MemoryObservation = { text: string; at: Date; source: string };
@@ -481,7 +481,7 @@ export type MemoryEpisode = {
   summary: string;
 };
 
-export const MEMORY_NODE_TYPES: MemoryNodeType[] = ['decision', 'gotcha', 'person', 'service', 'repo', 'project', 'preference'];
+export const MEMORY_NODE_TYPES: MemoryNodeType[] = ['decision', 'gotcha', 'person', 'service', 'repo', 'project', 'preference', 'reference'];
 
 /** lowercase kebab of a name, the slug every node is deduped on within its project scope */
 export function slugify(name: string): string {
