@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { api, reconcileAllProxies } from './api';
+import { startMemoryInboxWatcher } from './memory-inbox';
 import { initDb, config, db } from '@darbar/core';
 
 const app = new Hono();
@@ -85,6 +86,10 @@ const server = Bun.serve({
   reusePort: true,
 });
 console.log(`darbar listening on ${config.bindHost}:${config.port} (pid ${process.pid})`);
+
+// DAR-276: drain Claude's autoMemoryDirectory drop zone into the graph. Started only after the
+// port above is bound, since the drain talks to /api/memory/remember on this same server.
+startMemoryInboxWatcher();
 
 // Bare SIGTERM with no handler kills immediately and drops in-flight requests (verified).
 // server.stop() drains: stops taking new connections, finishes what's in flight, then resolves.

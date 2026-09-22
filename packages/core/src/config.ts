@@ -14,6 +14,10 @@ export const config = {
   dbName: env.DB_NAME || 'mission_control',
   filesDir: env.FILES_DIR || new URL('../../../data/files/', import.meta.url).pathname,
   memoryDir: env.MEMORY_DIR || new URL('../../../data/memory', import.meta.url).pathname,
+  // DAR-276: Claude's autoMemoryDirectory drop zone. apps/server/src/memory-inbox.ts watches this,
+  // POSTs each file to this server's own /api/memory/remember, then deletes it — nothing may ever
+  // read this directory as a source of truth. Created at boot if missing.
+  memoryInboxDir: env.MEMORY_INBOX_DIR || new URL('../../../data/memory-inbox', import.meta.url).pathname,
   // reports Gabbar's stakeholder gate refused, one JSON per slack message. Gabbar writes it and
   // resolves the same env var itself (apps/gabbar/src/parked.ts); the server only ever reads it.
   parkedDir: env.PARKED_DIR || new URL('../../../data/parked/', import.meta.url).pathname,
