@@ -91,11 +91,12 @@ export async function req<T = AnyDoc>(method: string, path: string, body?: unkno
 export async function reset() {
   for (const coll of [Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpisodes]) await coll.deleteMany({});
   // SCRATCH is one pid-scoped database SHARED by every test file in this bun run, and teardown()
-  // (dropDatabase) from a file that finishes before this one starts drops it out from under an
-  // index created only once at module load. recall()'s $text query needs this index to exist, so
-  // it is recreated here on every reset rather than once — createIndex is a no-op once it already
-  // matches, so this costs nothing on the common path.
-  await MemoryNodes.createIndex({ name: 'text', 'observations.text': 'text' });
+  // (dropDatabase) from a file that finishes before this one starts drops EVERY index out from
+  // under it, not just the memory text index a first cut of this patched back in alone. The real
+  // fix (DAR-279 #8) is the same index-set initDb() runs, called here too, so whichever file's
+  // teardown ran first leaves every collection re-indexed for the one still running — createIndex
+  // is a no-op once it already matches, so this costs nothing on the common path.
+  await core.ensureIndexes({ Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges } as never);
 }
 
 let torn = false;

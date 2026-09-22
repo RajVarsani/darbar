@@ -1,4 +1,5 @@
 import { MongoClient, ObjectId } from 'mongodb';
+import type { Collection } from 'mongodb';
 import { config } from './config';
 import type { Project, Task, FeedbackDoc, EventDoc, MemoryNode, MemoryEdge, MemoryEpisode } from './types';
 
@@ -15,24 +16,36 @@ export const MemoryEpisodes = db.collection<MemoryEpisode>('memory_episodes');
 
 export { ObjectId };
 
-export async function initDb() {
-  await client.connect();
-  await Projects.createIndex({ capId: 1 }, { unique: true });
-  await Projects.createIndex({ prefix: 1 }, { unique: true });
+// The full index set, as one function rather than inlined in initDb: the test harness runs against
+// a scratch database whose teardown() drops indexes a still-running test file needs (DAR-279 #8),
+// and re-running THIS is the real fix, not a one-off recreate of whichever index a test happened to
+// hit. Takes the collections as arguments so it works unchanged against either the live bindings
+// above or the harness's scratch ones.
+export async function ensureIndexes(colls: {
+  Projects: Collection<Project>;
+  Tasks: Collection<Task>;
+  Feedback: Collection<FeedbackDoc>;
+  Events: Collection<EventDoc>;
+  MemoryNodes: Collection<MemoryNode>;
+  MemoryEdges: Collection<MemoryEdge>;
+}) {
+  const { Projects: P, Tasks: T, Feedback: F, Events: E, MemoryNodes: MN, MemoryEdges: ME } = colls;
+  await P.createIndex({ capId: 1 }, { unique: true });
+  await P.createIndex({ prefix: 1 }, { unique: true });
   // proxy.prefix is the routing key. The API's read-then-write collision check is advisory (two
   // concurrent PATCHes both pass it), so uniqueness is backed here. Partial so the vast majority of
   // projects — which have no proxy at all — are not all colliding on a missing field.
   // A pre-existing duplicate must not brick boot: log it, the advisory check still applies.
   try {
-    await Projects.createIndex({ 'proxy.prefix': 1 }, { unique: true, partialFilterExpression: { 'proxy.prefix': { $type: 'string' } } });
+    await P.createIndex({ 'proxy.prefix': 1 }, { unique: true, partialFilterExpression: { 'proxy.prefix': { $type: 'string' } } });
   } catch (e) {
     console.error(`unique index on proxy.prefix NOT created (${String(e)}) — prefix uniqueness is advisory only until this is resolved`);
   }
-  await Tasks.createIndex({ projectId: 1 });
-  await Tasks.createIndex({ shortId: 1 }, { unique: true });
-  await Feedback.createIndex({ projectId: 1, status: 1 });
-  await Feedback.createIndex({ status: 1, createdAt: 1 });
-  await Feedback.createIndex({ shortId: 1 }, { unique: true });
+  await T.createIndex({ projectId: 1 });
+  await T.createIndex({ shortId: 1 }, { unique: true });
+  await F.createIndex({ projectId: 1, status: 1 });
+  await F.createIndex({ status: 1, createdAt: 1 });
+  await F.createIndex({ shortId: 1 }, { unique: true });
   // DAR-241. POST /feedback's idempotency check is read-then-insert, so two callers presenting one
   // key can both miss it and both file. Reachable, not theoretical: the sweep builds the key from
   // the HELD item's original message, so two messages from the same sender in flight at once sweep
@@ -42,19 +55,24 @@ export async function initDb() {
   // plain unique index would collide them all on a missing value.
   // A pre-existing duplicate must not brick boot: log it, the read-then-insert check still applies.
   try {
-    await Feedback.createIndex({ projectId: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
+    await F.createIndex({ projectId: 1, idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: 'string' } } });
   } catch (e) {
     console.error(`unique index on {projectId, idempotencyKey} NOT created (${String(e)}) — feedback idempotency is advisory only until this is resolved`);
   }
-  await Feedback.createIndex({ 'slack.channel': 1, 'slack.ts': 1 });
-  await Events.createIndex({ projectId: 1, at: -1 });
+  await F.createIndex({ 'slack.channel': 1, 'slack.ts': 1 });
+  await E.createIndex({ projectId: 1, at: -1 });
   // DAR-274. recall()'s $text match runs over both the node's name and everything ever observed
   // about it, so a search for a phrase buried in an old observation still finds the node.
-  await MemoryNodes.createIndex({ name: 'text', 'observations.text': 'text' });
-  await MemoryNodes.createIndex({ project: 1, slug: 1 }, { unique: true });
+  await MN.createIndex({ name: 'text', 'observations.text': 'text' });
+  await MN.createIndex({ project: 1, slug: 1 }, { unique: true });
   // the two directions recall()'s $graphLookup and supersede() walk edges in
-  await MemoryEdges.createIndex({ from: 1, relation: 1 });
-  await MemoryEdges.createIndex({ to: 1, relation: 1 });
+  await ME.createIndex({ from: 1, relation: 1 });
+  await ME.createIndex({ to: 1, relation: 1 });
+}
+
+export async function initDb() {
+  await client.connect();
+  await ensureIndexes({ Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges });
 }
 
 const ALPHA = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

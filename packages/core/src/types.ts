@@ -434,6 +434,10 @@ export type MemoryNode = {
   observations: MemoryObservation[];
   /** null = global/cross-project memory (a gotcha true of the whole machine, a person, ...) */
   project: ObjectId | null;
+  /** stamped by supersede({nodeName}); null while the node's own assertions still hold */
+  invalidAt?: Date | null;
+  /** the node that replaced this one, set alongside invalidAt */
+  supersededBy?: ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -456,8 +460,12 @@ export type MemoryEdge = {
   validAt: Date;
   /** null while the edge still holds; stamped by supersede() and never cleared again */
   invalidAt: Date | null;
+  /** the most recent source; kept for compatibility with readers that only want "the" source */
   source: MemoryEdgeSource;
-  /** 0-1; how sure the writer was */
+  /** every source a re-remember of this edge has ever cited, oldest first. Never overwritten:
+   * a re-remember with no source leaves this (and `source` above) untouched */
+  sources?: MemoryEdgeSource[];
+  /** 0-1; how sure the writer was. A re-remember only ever raises this, never lowers it */
   confidence: number;
 };
 

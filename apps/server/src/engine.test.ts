@@ -1496,3 +1496,163 @@ test('asOf recall sees a relation as it stood at a past moment, after it has sin
   const present = await req<Recalled>('GET', `/memory/recall?q=Gadget&project=${p.prefix}`);
   expect(present.body.edges.map((e) => e.relation)).not.toContain('DECIDED_FOR');
 });
+
+// ---------- DAR-279 rework: the ten proven findings, one test each ----------
+
+test('DAR-279 #1: asOf excludes an edge already superseded by that moment, includes it before', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Port A', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Port B', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Server', type: 'service', project: p.prefix } });
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Server', type: 'service', project: p.prefix },
+    edges: [{ to: 'Port A', relation: 'DECIDED_FOR' }],
+  });
+  await new Promise((r) => setTimeout(r, 5));
+  const midway = new Date().toISOString(); // strictly between the edge's validAt (T0) and its supersede (T1)
+  await new Promise((r) => setTimeout(r, 5));
+  await req('POST', '/memory/supersede', { edgeId: linked.body.edges[0]!._id, by: 'Port B', project: p.prefix });
+  await new Promise((r) => setTimeout(r, 5));
+  const afterSupersede = new Date().toISOString(); // T2, strictly after the supersede (T1)
+
+  const between = await req<Recalled>('GET', `/memory/recall?q=Server&project=${p.prefix}&asOf=${encodeURIComponent(midway)}`);
+  expect(between.body.edges.map((e) => e.relation)).toContain('DECIDED_FOR'); // valid at T0..T1, midway is inside that window
+
+  const after = await req<Recalled>('GET', `/memory/recall?q=Server&project=${p.prefix}&asOf=${encodeURIComponent(afterSupersede)}`);
+  expect(after.body.edges.map((e) => e.relation)).not.toContain('DECIDED_FOR'); // T2 > T1: already dead by then
+});
+
+test('DAR-279 #2: re-remembering an edge with no source/confidence never overwrites either, and confidence only ever rises', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'From Node', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'To Node', type: 'service', project: p.prefix } });
+  const first = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'From Node', type: 'service', project: p.prefix },
+    edges: [{ to: 'To Node', relation: 'RELATES_TO', confidence: 0.9, source: { session: 's1', taskRef: 'DAR-1' } }],
+  });
+  expect(first.status).toBe(200);
+  const edge1 = first.body.edges[0] as MemEdge & { source: Record<string, string>; confidence: number };
+  expect(edge1.source).toEqual({ session: 's1', taskRef: 'DAR-1' });
+  expect(edge1.confidence).toBe(0.9);
+
+  // plain re-remember: no source, no confidence sent at all
+  const second = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'From Node', type: 'service', project: p.prefix },
+    edges: [{ to: 'To Node', relation: 'RELATES_TO' }],
+  });
+  expect(second.status).toBe(200);
+  const edge2 = second.body.edges[0] as MemEdge & { source: Record<string, string>; confidence: number };
+  expect(edge2.source).toEqual({ session: 's1', taskRef: 'DAR-1' }); // NOT blanked to {}
+  expect(edge2.confidence).toBe(0.9); // NOT reset to 1
+
+  // a lower confidence sent explicitly must not lower the stored value
+  const third = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'From Node', type: 'service', project: p.prefix },
+    edges: [{ to: 'To Node', relation: 'RELATES_TO', confidence: 0.3 }],
+  });
+  const edge3 = third.body.edges[0] as MemEdge & { confidence: number };
+  expect(edge3.confidence).toBe(0.9);
+
+  // a higher confidence sent explicitly does raise it
+  const fourth = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'From Node', type: 'service', project: p.prefix },
+    edges: [{ to: 'To Node', relation: 'RELATES_TO', confidence: 0.99 }],
+  });
+  const edge4 = fourth.body.edges[0] as MemEdge & { confidence: number };
+  expect(edge4.confidence).toBe(0.99);
+});
+
+test('DAR-279 #3: an unrecognized/misspelled field on remember is a 400, never a 200 that dropped it', async () => {
+  const p = await project();
+  const r = await req('POST', '/memory/remember', {
+    node: { name: 'Typo Node', type: 'decision', project: p.prefix },
+    observation: ['this key is misspelled'],
+    edgez: [{ to: 'nowhere', relation: 'RELATES_TO' }],
+  });
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('observation');
+  expect(r.error).toContain('edgez');
+
+  // and it must not have been created under the 200 this used to return
+  const found = await req<Recalled>('GET', `/memory/recall?q=Typo+Node&project=${p.prefix}`);
+  expect(found.body.nodes.map((n) => n.name)).not.toContain('Typo Node');
+});
+
+test('DAR-279 #4: recall(project=P) searches P plus global; recall with no project searches global only', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Scoped Widget', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Global Widget', type: 'service' } }); // no project = global
+
+  const scoped = await req<Recalled>('GET', `/memory/recall?q=Widget&project=${p.prefix}`);
+  const scopedNames = scoped.body.nodes.map((n) => n.name);
+  expect(scopedNames).toContain('Scoped Widget');
+  expect(scopedNames).toContain('Global Widget'); // project scope PLUS global
+
+  const globalOnly = await req<Recalled>('GET', `/memory/recall?q=Widget`);
+  const globalNames = globalOnly.body.nodes.map((n) => n.name);
+  expect(globalNames).toContain('Global Widget');
+  expect(globalNames).not.toContain('Scoped Widget'); // omitting project searches GLOBAL only
+});
+
+test('DAR-279 #5: superseding a node hides it from recall by default and returns it with supersededBy when asked', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'port is 8080', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'port is 8081', type: 'decision', project: p.prefix } });
+  const sup = await req('POST', '/memory/supersede', { nodeName: 'port is 8080', by: 'port is 8081', project: p.prefix });
+  expect(sup.status).toBe(200);
+
+  const ordinary = await req<Recalled>('GET', `/memory/recall?q=port&project=${p.prefix}`);
+  const names = ordinary.body.nodes.map((n) => n.name);
+  expect(names).toContain('port is 8081');
+  expect(names).not.toContain('port is 8080'); // excluded by default, asOf-aware
+
+  const withStale = await req<{ nodes: (MemNode & { depth: number; supersededBy?: string | null })[] }>(
+    'GET', `/memory/recall?q=port&project=${p.prefix}&includeSuperseded=true`,
+  );
+  const stale = withStale.body.nodes.find((n) => n.name === 'port is 8080');
+  expect(stale).toBeTruthy();
+  expect(stale!.supersededBy).toBe('port is 8081');
+});
+
+test('DAR-279 #6: traversal is undirected — recall hitting the TO node reaches the FROM node at depth 1', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Gotcha X', type: 'gotcha', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Hub Service', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Gotcha X', type: 'gotcha', project: p.prefix },
+    edges: [{ to: 'Hub Service', relation: 'RELATES_TO' }],
+  });
+
+  // recall matches the HUB (the `to` side of the edge), not the gotcha that points at it
+  const hit = await req<Recalled>('GET', `/memory/recall?q=Hub+Service&project=${p.prefix}`);
+  const names = hit.body.nodes.map((n) => n.name);
+  expect(names).toContain('Hub Service');
+  expect(names).toContain('Gotcha X'); // reached backwards along the edge
+  const gotchaHit = hit.body.nodes.find((n) => n.name === 'Gotcha X') as (MemNode & { depth: number }) | undefined;
+  expect(gotchaHit?.depth).toBe(1);
+});
+
+test('DAR-279 #9: a node name over 200 chars is refused, naming the limit', async () => {
+  const p = await project();
+  const r = await req('POST', '/memory/remember', { node: { name: 'x'.repeat(201), type: 'decision', project: p.prefix } });
+  expect(r.status).toBe(400);
+  expect(r.error).toContain('200');
+});
+
+test('DAR-279 #10: edge.source rejects unknown keys, and recall limit is a validated query param', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Src A', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Src B', type: 'service', project: p.prefix } });
+  const bad = await req('POST', '/memory/remember', {
+    node: { name: 'Src A', type: 'service', project: p.prefix },
+    edges: [{ to: 'Src B', relation: 'RELATES_TO', source: { session: 's1', bogus: 'nope' } }],
+  });
+  expect(bad.status).toBe(400);
+  expect(bad.error).toContain('bogus');
+
+  const limitTooBig = await req('GET', `/memory/recall?q=Src&project=${p.prefix}&limit=51`);
+  expect(limitTooBig.status).toBe(400);
+  const limitOk = await req<Recalled & { limit: number }>('GET', `/memory/recall?q=Src&project=${p.prefix}&limit=1`);
+  expect(limitOk.status).toBe(200);
+  expect(limitOk.body.limit).toBe(1);
+});
