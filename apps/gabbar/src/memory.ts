@@ -1,109 +1,251 @@
-// Filesystem backend for Anthropic's memory tool (memory_20250818).
-// The store is a plain markdown directory (config.memoryDir) — open it in Obsidian,
-// grep it, edit it by hand; Gabbar and you share the same vault.
+// DAR-282 (gabbar half of DAR-276). Exposes Anthropic's memory tool (memory_20250818) to the
+// model, same as before, but the store behind it is no longer a markdown directory: it is darbar's
+// memory graph over HTTP (POST /api/memory/remember, GET /api/memory/recall, POST
+// /api/memory/supersede — shapes in apps/server/src/api.ts, tool prose in apps/mcp/src/server.ts).
 //
-// Security: every model-supplied path is resolved and must stay inside the vault
-// root. Traversal (.., absolute escapes, symlinks out) is rejected.
+// Every call goes through fetchDarbar (agent.ts), never a raw fetch: that is what gives memory
+// writes the same per-request timeout, message budget and reachable/unreachable classification
+// every other darbar call in gabbar gets, and it is what lookups.test.ts's "config.apiUrl appears
+// nowhere outside fetchDarbar" guard enforces across this whole package. Importing fetchDarbar from
+// agent.ts while agent.ts imports memoryTool from here is a circular import, but a safe one: both
+// sides only ever CALL the other's export from inside a function body, never at module-eval time
+// (lookups.ts already does exactly this for the same reason — see its header comment).
+//
+// MEMORY_DIR (packages/core config) is unused from here on. It is left alone rather than removed:
+// removing the env var is a config-surface change outside this file's scope, and a stale MEMORY_DIR
+// in somebody's .env must not crash gabbar. Flagged here for whoever eventually deletes it.
+//
+// PATH MAPPING. The model still addresses memory as /memories/<category>/<name>, because that is
+// the shape already baked into its system prompt and its habits, and DAR-282 asks to keep that
+// interface as close as possible rather than teach it a new one. Underneath, a path is now just:
+//   - node TYPE, inferred from the top-level segment: people/ -> person, projects/ -> project,
+//     preferences/ -> preference, anything else -> gotcha (the catch-all durable-fact bucket)
+//   - node NAME, from the last segment with .md stripped and dashes/underscores turned to spaces
+//   - PROJECT SCOPE, only when the path is itself under projects/<ref>[...]: that segment is the
+//     project ref darbar resolves. Every other path is global, same as the old single shared vault.
+// recall() then searches "global plus the project when the conversation has one" for free: passing
+// `project` to /memory/recall matches that project OR null (see resolveMemoryScope in api.ts), and
+// a path with no projects/ segment simply never sets one, so it searches global only.
+import { config, MEMORY_NODE_TYPES, slugify, type MemoryNodeType } from '@darbar/core';
+import { betaMemoryTool } from '@anthropic-ai/sdk/helpers/beta/memory';
 import fs from 'node:fs';
 import path from 'node:path';
-import { config } from '@darbar/core';
-import { betaMemoryTool } from '@anthropic-ai/sdk/helpers/beta/memory';
+import { fetchDarbar } from './agent';
 
-const ROOT = path.resolve(config.memoryDir);
+void MEMORY_NODE_TYPES; // kept imported for readers checking the type list matches typeForSegments below
 
-function resolveSafe(p: string): string {
-  // the tool addresses everything under /memories
-  const rel = p.replace(/^\/memories\/?/, '');
-  const abs = path.resolve(ROOT, rel);
-  if (abs !== ROOT && !abs.startsWith(ROOT + path.sep)) {
-    throw new Error(`path escapes the memory directory: ${p}`);
-  }
-  return abs;
+// tolerate a stale MEMORY_DIR rather than crash on it; nothing here reads it
+void config.memoryDir;
+
+// ---------- path -> (type, name, project) ----------
+
+function segmentsOf(p: string): string[] {
+  return p
+    .replace(/^\/?memories\/?/, '')
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-function listDir(abs: string, prefix = ''): string[] {
-  const out: string[] = [];
-  for (const entry of fs.readdirSync(abs, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (entry.name.startsWith('.')) continue;
-    if (entry.isDirectory()) {
-      out.push(`${prefix}${entry.name}/`);
-      out.push(...listDir(path.join(abs, entry.name), `${prefix}${entry.name}/`));
-    } else {
-      out.push(`${prefix}${entry.name}`);
-    }
-  }
-  return out;
-}
-
-// injected into the system prompt so the agent knows what exists without a tool call
-export function memoryTree(): string {
-  try {
-    const entries = listDir(ROOT);
-    return entries.length ? entries.map((e) => `/memories/${e}`).join('\n') : '(empty)';
-  } catch {
-    return '(empty)';
+function typeForSegments(segments: string[]): MemoryNodeType {
+  switch (segments[0]) {
+    case 'people':
+      return 'person';
+    case 'projects':
+      return 'project';
+    case 'preferences':
+      return 'preference';
+    default:
+      return 'gotcha';
   }
 }
 
-// stakeholders get their own people-file as read-only context, nothing else
-export function readPersonFile(name: string): string | null {
-  try {
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const abs = resolveSafe(`/memories/people/${slug}.md`);
-    return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
-  } catch {
-    return null;
-  }
+function nameForSegments(segments: string[]): string {
+  const last = segments[segments.length - 1] ?? '';
+  const base = last.replace(/\.md$/i, '').replace(/[-_]+/g, ' ').trim();
+  return base || 'notes';
 }
+
+function projectRefForSegments(segments: string[]): string | undefined {
+  if (segments[0] === 'projects' && segments[1]) {
+    return segments[1].replace(/\.md$/i, '');
+  }
+  return undefined;
+}
+
+function parsePath(p: string): { segments: string[]; type: MemoryNodeType; name: string; project: string | undefined } {
+  const segments = segmentsOf(p);
+  return { segments, type: typeForSegments(segments), name: nameForSegments(segments), project: projectRefForSegments(segments) };
+}
+
+// ---------- held writes: darbar outage must not lose what the model wanted to remember ----------
+//
+// Same shape as parked.ts's hold (mkdir + write-to-.tmp + rename, so a crash mid-write never leaves
+// a half-written file), deliberately not shared code with it: parked.ts's ParkedItem carries a
+// slack-message identity and a promotion/sweep lifecycle that a memory write has no use for. This
+// is the minimum that satisfies the same invariant — an unreachable darbar holds the words instead
+// of dropping them — without inventing a sweep nothing here calls.
+const holdRoot = (): string =>
+  path.resolve(process.env.MEMORY_HOLD_DIR || new URL('../../../data/memory-hold/', import.meta.url).pathname);
+
+function holdWrite(kind: 'remember' | 'supersede', originalPath: string, body: Record<string, unknown>, detail: string): string {
+  const dir = holdRoot();
+  fs.mkdirSync(dir, { recursive: true });
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const file = path.join(dir, `${id}.json`);
+  const tmp = `${file}.tmp`;
+  const record = { id, kind, path: originalPath, body, detail, at: new Date().toISOString() };
+  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
+  fs.renameSync(tmp, file); // never leave a half-written hold behind
+  return id;
+}
+
+// ---------- recall ----------
+
+type RecallNode = {
+  name: string;
+  type: MemoryNodeType;
+  project: string | null;
+  observations: Array<{ text: string; at: string; source: string }>;
+  supersededBy?: string | null;
+};
+type RecallResult = { nodes: RecallNode[]; edges: Array<{ from: string | null; to: string | null; relation: string }> };
+
+async function recall(
+  q: string,
+  opts: { project?: string; type?: MemoryNodeType; limit?: number } = {},
+): Promise<{ ok: true; result: RecallResult } | { ok: false; message: string }> {
+  const qs = new URLSearchParams({ q });
+  if (opts.project) qs.set('project', opts.project);
+  if (opts.type) qs.set('type', opts.type);
+  qs.set('limit', String(opts.limit ?? 20));
+  const f = await fetchDarbar(`/memory/recall?${qs.toString()}`);
+  if (!f.reachable) return { ok: false, message: `memory unreachable: ${f.detail}` };
+  const j = f.json as { error?: string } & Partial<RecallResult>;
+  if (j.error) return { ok: false, message: j.error };
+  return { ok: true, result: { nodes: j.nodes ?? [], edges: j.edges ?? [] } };
+}
+
+function formatNode(n: RecallNode): string {
+  const lines = n.observations.map((o, i) => `${i + 1}: ${o.text}`);
+  return lines.length ? lines.join('\n') : '(no observations yet)';
+}
+
+function formatListing(nodes: RecallNode[]): string {
+  return nodes.length ? nodes.map((n) => `${n.type}/${n.name}`).join('\n') : '(no matches)';
+}
+
+// injected into the system prompt so the agent knows how to use its memory without a tool call.
+// No live listing here on purpose: recall requires actual search text (a bare "list everything" is
+// not an operation the graph API has), so a real directory tree would need one HTTP call per turn
+// for a page that is mostly static guidance anyway.
+export async function memoryTree(): Promise<string> {
+  return [
+    "memory is darbar's memory graph now, not a browsable directory — there is no static file list.",
+    'search it: view a specific name/topic to recall it (people/<name>, projects/<ref>, preferences/<topic>, or anything else for a durable fact/gotcha).',
+    'create saves a new fact under that path; str_replace records a correction; nothing is ever deleted.',
+  ].join('\n');
+}
+
+// stakeholders get their own people-file as read-only context, nothing else — same restriction as
+// before, just served from recall instead of a file read.
+export async function readPersonFile(name: string): Promise<string | null> {
+  const r = await recall(name, { type: 'person', limit: 1 });
+  if (!r.ok) return null;
+  const hit = r.result.nodes.find((n) => n.type === 'person' && slugify(n.name) === slugify(name));
+  return hit ? formatNode(hit) : null;
+}
+
+// ---------- the memory tool the model calls ----------
 
 export const memoryTool = betaMemoryTool({
-  async view({ path: p, view_range }) {
-    const abs = resolveSafe(p);
-    if (!fs.existsSync(abs)) return `${p} does not exist`;
-    if (fs.statSync(abs).isDirectory()) {
-      const entries = listDir(abs);
-      return entries.length ? entries.join('\n') : '(empty directory)';
-    }
-    const lines = fs.readFileSync(abs, 'utf-8').split('\n');
-    const [start = 1, end = lines.length] = view_range ?? [];
-    return lines
-      .slice(Math.max(0, start - 1), end)
-      .map((l, i) => `${start + i}: ${l}`)
-      .join('\n');
+  async view({ path: p }) {
+    const { segments, type, name, project } = parsePath(p);
+    if (!segments.length) return await memoryTree();
+    const r = await recall(name, { project, type, limit: 10 });
+    if (!r.ok) return r.message;
+    const exact = r.result.nodes.find((n) => n.type === type && slugify(n.name) === slugify(name));
+    if (exact) return formatNode(exact);
+    // no exact match on this type+name: show whatever recall() found under that search text instead
+    // of a bare "does not exist", since a fuzzy hit is more useful than nothing to a model deciding
+    // whether to create() or look elsewhere.
+    return r.result.nodes.length ? formatListing(r.result.nodes) : `${p} does not exist`;
   },
+
   async create({ path: p, file_text }) {
-    const abs = resolveSafe(p);
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, file_text);
-    return `created ${p}`;
+    const { segments, type, name, project } = parsePath(p);
+    if (!segments.length) return 'cannot create at the memory root; give it a category, e.g. /memories/people/<name>';
+    const body = { node: { name, type, project }, observations: [{ text: file_text, source: 'gabbar' }] };
+    const f = await fetchDarbar('/memory/remember', 'POST', body);
+    if (!f.reachable) {
+      const id = holdWrite('remember', p, body, f.detail);
+      return `darbar was unreachable (${f.detail}), so this was held locally (hold id ${id}) instead of lost. it is NOT yet in memory — say so, and try again once darbar is back.`;
+    }
+    const j = f.json as { error?: string };
+    if (j.error) return j.error;
+    return `remembered ${p}`;
   },
-  async str_replace({ path: p, old_str, new_str }) {
-    const abs = resolveSafe(p);
-    const content = fs.readFileSync(abs, 'utf-8');
-    const count = content.split(old_str).length - 1;
-    if (count === 0) return `old_str not found in ${p}`;
-    if (count > 1) return `old_str matches ${count} times in ${p}; make it unique`;
-    fs.writeFileSync(abs, content.replace(old_str, new_str ?? ''));
+
+  // Corrections don't mutate: they append the new fact to the same node (remember() only ever
+  // inserts or appends, same as create) and then retire the STALE version by superseding it with a
+  // fresh node that carries the correction, so recall stops surfacing the wrong text by default
+  // while the old one stays reachable forever via includeSuperseded/asOf. A self-supersede (marking
+  // the SAME node both the new content and the thing being replaced) was considered and rejected: it
+  // stamps the node itself invalidAt, which would hide the correction we just wrote right along with
+  // the stale text it was meant to fix.
+  async str_replace({ path: p, new_str }) {
+    const { segments, type, name, project } = parsePath(p);
+    if (!segments.length) return 'cannot edit the memory root';
+    const found = await recall(name, { project, type, limit: 5 });
+    if (!found.ok) return found.message;
+    const existing = found.result.nodes.find((n) => n.type === type && slugify(n.name) === slugify(name));
+    if (!existing) return `${p} does not exist`;
+    const revisionName = `${existing.name} (rev ${Date.now()})`;
+    const rememberBody = { node: { name: revisionName, type, project }, observations: [{ text: new_str, source: 'gabbar' }] };
+    const rf = await fetchDarbar('/memory/remember', 'POST', rememberBody);
+    if (!rf.reachable) {
+      const id = holdWrite('remember', p, rememberBody, rf.detail);
+      return `darbar was unreachable (${rf.detail}), so this correction was held locally (hold id ${id}) instead of lost. it is NOT yet in memory — say so, and try again once darbar is back.`;
+    }
+    const rj = rf.json as { error?: string };
+    if (rj.error) return rj.error;
+    const supersedeBody = { nodeName: existing.name, by: revisionName, project, source: { harness: 'gabbar' } };
+    const sf = await fetchDarbar('/memory/supersede', 'POST', supersedeBody);
+    if (!sf.reachable) {
+      const id = holdWrite('supersede', p, supersedeBody, sf.detail);
+      return `the new text was saved as ${revisionName}, but darbar was unreachable (${sf.detail}) marking the old one stale, so that half was held locally (hold id ${id}). both versions will show up until it retries.`;
+    }
+    const sj = sf.json as { error?: string };
+    if (sj.error) return `the new text was saved as ${revisionName}, but marking the old one stale failed: ${sj.error}`;
     return `edited ${p}`;
   },
-  async insert({ path: p, insert_line, insert_text }) {
-    const abs = resolveSafe(p);
-    const lines = fs.readFileSync(abs, 'utf-8').split('\n');
-    lines.splice(insert_line, 0, insert_text);
-    fs.writeFileSync(abs, lines.join('\n'));
+
+  // insert had a line-position in the directory store; an observation log has no positions to
+  // insert between, so this is the same append remember() always is, insert_line notwithstanding.
+  async insert({ path: p, insert_text }) {
+    const { segments, type, name, project } = parsePath(p);
+    if (!segments.length) return 'cannot insert at the memory root';
+    const body = { node: { name, type, project }, observations: [{ text: insert_text, source: 'gabbar' }] };
+    const f = await fetchDarbar('/memory/remember', 'POST', body);
+    if (!f.reachable) {
+      const id = holdWrite('remember', p, body, f.detail);
+      return `darbar was unreachable (${f.detail}), so this was held locally (hold id ${id}) instead of lost. it is NOT yet in memory — say so, and try again once darbar is back.`;
+    }
+    const j = f.json as { error?: string };
+    if (j.error) return j.error;
     return `inserted into ${p}`;
   },
-  async delete({ path: p }) {
-    const abs = resolveSafe(p);
-    if (abs === ROOT) return 'refusing to delete the memory root';
-    fs.rmSync(abs, { recursive: true, force: true });
-    return `deleted ${p}`;
+
+  // nothing deletes. Ever. There is no door in the graph API that removes a node or an
+  // observation, on purpose (DAR-274's whole point), so this refuses rather than pretending.
+  async delete() {
+    return 'memory never deletes anything, on purpose — nothing was removed. if a fact is stale, str_replace it instead so the correction is on record.';
   },
-  async rename({ old_path, new_path }) {
-    const from = resolveSafe(old_path);
-    const to = resolveSafe(new_path);
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.renameSync(from, to);
-    return `renamed ${old_path} -> ${new_path}`;
+
+  // no move/rename primitive exists on the graph (remember only ever targets one name). Refuse
+  // rather than fabricate a rename by duplicating content under a new name and leaving the old node
+  // untouched and undiscoverable-as-renamed.
+  async rename() {
+    return 'memory has no rename — create the content under the new path and leave a note on the old one if it matters that they are related.';
   },
 });

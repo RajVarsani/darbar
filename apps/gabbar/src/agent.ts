@@ -881,11 +881,12 @@ what you do with your tools:
   original reporter wrote, it adds their words under their name
 - reopen feedback when someone replies in a thread that an issue isn't actually fixed
   (reopen_feedback — only works as a reply in the original feedback thread)
-- maintain your memory: a markdown vault at /memories (raj can read it in obsidian).
-  when raj tells you something durable about a person, project, or preference, save it
-  — one topic per file (people/<name>.md, projects/<prefix>.md, workspace.md), short
-  bullets, update existing files instead of duplicating. check memory when context
-  about a person or project would improve your answer.
+- maintain your memory: darbar's memory graph, addressed the same /memories way you're
+  used to (people/<name>, projects/<prefix>, or a topic for anything else). when raj
+  tells you something durable about a person, project, or preference, save it — one
+  topic per path, short bullets, str_replace to correct something instead of
+  duplicating. check memory when context about a person or project would improve your
+  answer.
 - or just talk — not every message is a ticket. greetings, questions about you, and
   chit-chat get a normal reply and NO tool calls
 
@@ -1562,8 +1563,11 @@ async function respond(
     // cheap reply failed — fall through to the full path rather than drop the message
   }
   const memoryContext = ctx.isOwner
-    ? `## your memory vault (tool: memory)\ncurrent files:\n${memoryTree()}`
-    : (() => { const f = readPersonFile(ctx.senderName); return f ? `## what you know about this sender (from memory, read-only)\n${f}` : ''; })();
+    ? `## your memory vault (tool: memory)\n${await memoryTree()}`
+    : await (async () => {
+        const f = await readPersonFile(ctx.senderName);
+        return f ? `## what you know about this sender (from memory, read-only)\n${f}` : '';
+      })();
   const system = [PERSONALITY, SECURITY, memoryContext, contextBlock(ctx, notices)].filter(Boolean).join('\n\n');
 
   // the attachments as pixels, not filenames. Images first, then the sender's line, so the
