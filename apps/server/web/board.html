@@ -73,6 +73,8 @@
   .crumb{font-family:var(--mono);font-weight:700;font-size:14px;white-space:nowrap;display:flex;align-items:center;gap:10px}
   .chip{font-family:var(--mono);font-size:11px;font-weight:700;background:var(--beige);border:2px solid var(--ink);
     padding:1px 7px;letter-spacing:.04em}
+  .chip.linear{background:var(--ink);color:var(--lime);cursor:pointer}
+  .chip.linear:hover{background:var(--lime);color:var(--ink)}
   /* an exposed dev server is the one project fact with a consequence outside the tracker, so it
      is stated on the board surface next to the prefix — not only inside a panel you must open */
   .expomark{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;font-weight:800;
@@ -596,6 +598,7 @@
     <!-- D tile is the home/brand mark; the wordmark is gone so the top bar names the project once -->
     <div class="brand"><span class="dot" title="Darbar">D</span></div>
     <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span>
+      <span class="chip linear" id="plinear" role="link" tabindex="0" title="open in Linear" hidden>LINEAR</span>
       <button class="expomark" id="expomark" type="button" data-open-config hidden
         title="this project is configured to expose a dev server to anyone with the link · open project config">shared</button></div>
     <div class="searchwrap">
@@ -1238,6 +1241,11 @@ function render(){
   document.title = `${d.project.name} · Darbar`;
   $('pname').textContent = d.project.name;
   $('pprefix').textContent = d.project.prefix;
+  const pl = $('plinear');
+  pl.hidden = !d.project.linearUrl;
+  pl.onclick = d.project.linearUrl
+    ? () => window.open(d.project.linearUrl, '_blank', 'noopener')
+    : null;
   $('ptitle').textContent = d.project.name;
   $('psub').textContent = (d.project.repos||[]).join(' · ');
   // exposure is stated on the board surface, not only inside a panel you have to already suspect
@@ -2535,6 +2543,22 @@ async function load(){
   state.rev = state.data.rev ?? 0;
   render();
   loadParked(); // second request on purpose; see state.parked
+  loadLinear(); // linearUrl is not on the public board payload; fetched separately and re-rendered
+}
+
+// GET /api/p/:capId (boardProject) never sends linearUrl — it is config, not board state — so the
+// LINEAR chip is filled in from GET /api/projects/:ref, same shape home.html already reads it from.
+async function loadLinear(){
+  const prefix = state.data?.project?.prefix;
+  if (!prefix) return;
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(prefix)}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!state.data?.project) return; // a later load() could have replaced state.data by now
+    state.data.project.linearUrl = j.linearUrl ?? null;
+    render();
+  } catch { /* no chip is a safe failure here */ }
 }
 
 // Held reports come from a SECOND endpoint, not from the board payload, and that is the whole
