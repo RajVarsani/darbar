@@ -3850,6 +3850,15 @@ api.post('/memory/supersede', async (c) => {
     if (!edge) return c.json({ error: `no edge ${edgeId}` }, 404);
     if (edge.invalidAt) return c.json({ error: `edge ${edgeId} was already superseded at ${new Date(edge.invalidAt).toISOString()}` }, 409);
     const fromNode = await MemoryNodes.findOne({ _id: edge.from });
+    // DAR-297 FB-166: the edge's own project (the project of the node that made the assertion)
+    // was never checked against the caller's scope, so project B could supersede project A's
+    // edge by id and write a SUPERSEDES edge from B into A. Same rule as inCallerScope in
+    // recall above: a global edge (project null) is fair game for anyone, a project edge is
+    // only the caller's own project's business. Checked before any write.
+    const edgeProject = fromNode?.project ?? null;
+    if (edgeProject !== null && !(scope.id !== null && edgeProject.equals(scope.id))) {
+      return c.json({ error: `edge ${edgeId} belongs to a different project than the caller's scope` }, 400);
+    }
     const refused = refuseGlobalOverProject(fromNode?.project ?? null);
     if (refused) return refused;
     // never deleted: the edge stays in the collection, only invalidAt is stamped. The new

@@ -1452,6 +1452,29 @@ test('supersede stamps invalidAt and adds a SUPERSEDES edge, never deleting the 
   expect(again.status).toBe(409);
 });
 
+// DAR-297 FB-166: supersede by edgeId never checked which project the edge belongs to, so
+// project B could invalidate project A's edge and write a SUPERSEDES edge from B into A.
+test('DAR-297: supersede by edgeId refuses when the edge belongs to another project', async () => {
+  const a = await project();
+  const b = await project();
+  await req('POST', '/memory/remember', { node: { name: 'A Old Choice', type: 'decision', project: a.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'A Widget', type: 'service', project: a.prefix } });
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'A Widget', type: 'service', project: a.prefix },
+    edges: [{ to: 'A Old Choice', relation: 'DECIDED_FOR' }],
+  });
+  const edgeId = linked.body.edges[0]!._id;
+  await req('POST', '/memory/remember', { node: { name: 'B Replacement', type: 'decision', project: b.prefix } });
+
+  const sup = await req('POST', '/memory/supersede', { edgeId, by: 'B Replacement', project: b.prefix });
+  expect(sup.status).toBe(400);
+
+  // refused before any write: the edge is still live, not invalidated — recall's walk excludes
+  // invalidated edges entirely, so seeing it still here IS the proof it stayed valid.
+  const stillA = await req<Recalled>('GET', `/memory/recall?q=A+Widget&project=${a.prefix}`);
+  expect(stillA.body.edges.some((e) => e.relation === 'DECIDED_FOR')).toBe(true);
+});
+
 test('remember edge: a project-scoped node can link to a global node', async () => {
   const p = await project();
   await req('POST', '/memory/remember', { node: { name: 'Global Anchor', type: 'service' } }); // no project = global
@@ -1674,13 +1697,17 @@ test('DAR-293: a project node linked to a global hub is not leaked to another pr
   const bNames = fromB.body.nodes.map((n) => n.name);
   expect(bNames).toContain('Mongo Hub');
   expect(bNames).not.toContain('Secret A Thing');
-  expect(fromB.body.edges.some((e) => e.to === 'Secret A Thing' || e.from === 'Secret A Thing')).toBe(false);
+  // DAR-297 FB-165: checking only by name misses a leak where the filter dropped, since the
+  // edge would still come back with the OTHER end nulled out ({from: null, to: 'Mongo Hub'})
+  // rather than absent — asserting the whole list is empty catches that shape too.
+  expect(fromB.body.edges).toEqual([]);
 
   // global recall (no project) must see the hub, never A's node
   const global = await req<Recalled>('GET', `/memory/recall?q=Mongo`);
   const globalNames = global.body.nodes.map((n) => n.name);
   expect(globalNames).toContain('Mongo Hub');
   expect(globalNames).not.toContain('Secret A Thing');
+  expect(global.body.edges).toEqual([]);
 
   // project A's own recall still sees both — the fix scopes OTHER callers, not A itself
   const fromA = await req<Recalled>('GET', `/memory/recall?q=Mongo&project=${a.prefix}`);
