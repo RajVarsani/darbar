@@ -3804,6 +3804,96 @@ api.get('/memory/recall', async (c) => {
   return c.json({ q, hops, asOf: asOf ? asOf.toISOString() : null, limit, includeSuperseded, nodes, edges });
 });
 
+// DAR-303: recall requires q by design (text match, then walk) — that contract stays intact, so
+// browsing the graph with no search text is a separate route rather than an accepted-empty q on
+// recall. Same scope/type/includeSuperseded rules as recall, no walk, no edges, paged.
+const MEMORY_LIST_QUERY = ['project', 'type', 'includeSuperseded', 'limit', 'offset'] as const;
+const MEMORY_LIST_LIMIT_DEFAULT = 50;
+const MEMORY_LIST_LIMIT_MAX = 200;
+
+api.get('/memory/list', async (c) => {
+  const local = requireLocal(c);
+  if (local) return local;
+  const badQuery = closedBody(c.req.query() as Record<string, unknown>, MEMORY_LIST_QUERY, 'memory/list');
+  if (badQuery) return c.json({ error: badQuery }, 400);
+  const projectRef = c.req.query('project');
+  const scope = await resolveMemoryScope(projectRef);
+  if ('error' in scope) return c.json({ error: scope.error }, 404);
+  const type = c.req.query('type');
+  if (type && !MEMORY_NODE_TYPES.includes(type as MemoryNodeType)) {
+    return c.json({ error: `type must be one of ${MEMORY_NODE_TYPES.join(', ')} (got ${JSON.stringify(type)})` }, 400);
+  }
+  const includeSupersededRaw = c.req.query('includeSuperseded');
+  if (includeSupersededRaw !== undefined && includeSupersededRaw !== 'true' && includeSupersededRaw !== 'false') {
+    return c.json({ error: `includeSuperseded must be true or false (got ${JSON.stringify(includeSupersededRaw)})` }, 400);
+  }
+  const includeSuperseded = includeSupersededRaw === 'true';
+  const limitRaw = c.req.query('limit');
+  let limit = MEMORY_LIST_LIMIT_DEFAULT;
+  if (limitRaw !== undefined) {
+    const n = Number(limitRaw);
+    if (!Number.isInteger(n) || n < 1 || n > MEMORY_LIST_LIMIT_MAX) {
+      return c.json({ error: `limit must be an integer 1-${MEMORY_LIST_LIMIT_MAX} (got ${JSON.stringify(limitRaw)}); default ${MEMORY_LIST_LIMIT_DEFAULT}` }, 400);
+    }
+    limit = n;
+  }
+  const offsetRaw = c.req.query('offset');
+  let offset = 0;
+  if (offsetRaw !== undefined) {
+    const n = Number(offsetRaw);
+    if (!Number.isInteger(n) || n < 0) {
+      return c.json({ error: `offset must be a non-negative integer (got ${JSON.stringify(offsetRaw)})` }, 400);
+    }
+    offset = n;
+  }
+
+  // same scope rule as recall/index: omitting project browses the global scope only; giving one
+  // browses that project PLUS whatever is global.
+  const match: Record<string, unknown> = {};
+  match.project = projectRef !== undefined ? { $in: [scope.id, null] } : null;
+  if (type) match.type = type;
+  // includeSuperseded=false excludes superseded nodes outright (list has no asOf to reinstate a
+  // past state with, unlike recall) — filtered in the query itself rather than after fetch, so
+  // `total` never counts a node the page could never show.
+  if (!includeSuperseded) match.invalidAt = null;
+
+  const docs = (await MemoryNodes.find(match).toArray()) as (MemoryNode & { _id: ObjectId })[];
+  const total = docs.length;
+
+  // observations[] is append-only oldest-first (see the index route's comment on the same fact),
+  // so the newest thing observed about a node is its last element.
+  const newestObsAt = (n: MemoryNode): number => {
+    const last = n.observations[n.observations.length - 1];
+    return last ? new Date(last.at).getTime() : 0;
+  };
+  const own = (n: MemoryNode): boolean => scope.id !== null && n.project !== null && scope.id.equals(n.project);
+
+  // a superseded node's replacement (supersededBy) may not be in this page's own doc set (it could
+  // be outside `match`, e.g. a different type) — same fetch-the-missing-name pattern as recall.
+  const byId = new Map(docs.map((n) => [n._id.toHexString(), n]));
+  const missingReplacementIds = includeSuperseded
+    ? docs.filter((n) => n.supersededBy && !byId.has(n.supersededBy.toHexString())).map((n) => n.supersededBy!)
+    : [];
+  if (missingReplacementIds.length) {
+    for (const n of await MemoryNodes.find({ _id: { $in: missingReplacementIds } }).toArray()) byId.set(n._id!.toHexString(), n);
+  }
+
+  // DAR-301-style ordering: own-project nodes first, then newest-observed first within each group.
+  const sorted = [...docs].sort((a, b) => {
+    const ao = own(a), bo = own(b);
+    if (ao !== bo) return ao ? -1 : 1;
+    return newestObsAt(b) - newestObsAt(a);
+  });
+  const page = sorted.slice(offset, offset + limit);
+
+  const nodes = page.map((doc) => ({
+    name: doc.name, type: doc.type, project: doc.project, observations: doc.observations,
+    ...(doc.supersededBy ? { supersededBy: byId.get(doc.supersededBy.toHexString())?.name ?? null } : {}),
+  }));
+
+  return c.json({ nodes, total, limit, offset });
+});
+
 const MEMORY_SUPERSEDE_FIELDS = ['edgeId', 'nodeName', 'by', 'project', 'source'] as const;
 
 api.post('/memory/supersede', async (c) => {

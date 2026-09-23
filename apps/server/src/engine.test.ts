@@ -1824,6 +1824,122 @@ test('DAR-279 #10: edge.source rejects unknown keys, and recall limit is a valid
   expect(limitOk.body.limit).toBe(1);
 });
 
+// ---------- memory list (DAR-303): browse the graph with no query ----------
+
+type Listed = { nodes: (MemNode & { supersededBy?: string | null })[]; total: number; limit: number; offset: number };
+
+test('DAR-303: /memory/list never leaks another project\'s nodes, and omitting project lists global only', async () => {
+  const a = await project();
+  const b = await project();
+  await req('POST', '/memory/remember', { node: { name: 'A Only Node', type: 'gotcha', project: a.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'B Only Node', type: 'gotcha', project: b.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Global Node', type: 'gotcha' } });
+
+  const fromB = await req<Listed>('GET', `/memory/list?project=${b.prefix}`);
+  const bNames = fromB.body.nodes.map((n) => n.name);
+  expect(bNames).toContain('B Only Node');
+  expect(bNames).toContain('Global Node'); // project scope PLUS global
+  expect(bNames).not.toContain('A Only Node'); // never A's node
+
+  const globalOnly = await req<Listed>('GET', '/memory/list');
+  const globalNames = globalOnly.body.nodes.map((n) => n.name);
+  expect(globalNames).toContain('Global Node');
+  expect(globalNames).not.toContain('A Only Node');
+  expect(globalNames).not.toContain('B Only Node'); // omitting project lists GLOBAL only
+});
+
+test('DAR-303: own-project nodes rank ahead of global nodes regardless of recency', async () => {
+  const p = await project();
+  // global node observed LAST (newest by timestamp) still must not outrank the project's own node
+  await req('POST', '/memory/remember', { node: { name: 'Own Node', type: 'gotcha', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Global Node', type: 'gotcha' } });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Global Node', type: 'gotcha' },
+    observations: ['a later observation, making this node newer than the project one'],
+  });
+
+  const r = await req<Listed>('GET', `/memory/list?project=${p.prefix}`);
+  const names = r.body.nodes.map((n) => n.name);
+  expect(names.indexOf('Own Node')).toBeLessThan(names.indexOf('Global Node'));
+});
+
+test('DAR-303: /memory/list pages with limit/offset and reports total across the whole scope', async () => {
+  const p = await project();
+  for (let i = 0; i < 5; i++) {
+    await req('POST', '/memory/remember', { node: { name: `Page Node ${i}`, type: 'gotcha', project: p.prefix } });
+  }
+  const page1 = await req<Listed>('GET', `/memory/list?project=${p.prefix}&limit=2&offset=0`);
+  expect(page1.status).toBe(200);
+  expect(page1.body.nodes).toHaveLength(2);
+  expect(page1.body.total).toBe(5);
+  expect(page1.body.limit).toBe(2);
+  expect(page1.body.offset).toBe(0);
+
+  const page2 = await req<Listed>('GET', `/memory/list?project=${p.prefix}&limit=2&offset=2`);
+  expect(page2.body.nodes).toHaveLength(2);
+  const page3 = await req<Listed>('GET', `/memory/list?project=${p.prefix}&limit=2&offset=4`);
+  expect(page3.body.nodes).toHaveLength(1);
+
+  // no overlap across pages
+  const allNames = [...page1.body.nodes, ...page2.body.nodes, ...page3.body.nodes].map((n) => n.name);
+  expect(new Set(allNames).size).toBe(5);
+});
+
+test('DAR-303: /memory/list honours the type filter', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'A Decision', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'A Gotcha', type: 'gotcha', project: p.prefix } });
+
+  const r = await req<Listed>('GET', `/memory/list?project=${p.prefix}&type=gotcha`);
+  const names = r.body.nodes.map((n) => n.name);
+  expect(names).toContain('A Gotcha');
+  expect(names).not.toContain('A Decision');
+  expect(r.body.total).toBe(1);
+
+  const bad = await req('GET', `/memory/list?project=${p.prefix}&type=nonsense`);
+  expect(bad.status).toBe(400);
+});
+
+test('DAR-303: /memory/list excludes superseded nodes by default and returns them with supersededBy when asked', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'list port 8080', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'list port 8081', type: 'decision', project: p.prefix } });
+  const sup = await req('POST', '/memory/supersede', { nodeName: 'list port 8080', by: 'list port 8081', project: p.prefix });
+  expect(sup.status).toBe(200);
+
+  const ordinary = await req<Listed>('GET', `/memory/list?project=${p.prefix}`);
+  const names = ordinary.body.nodes.map((n) => n.name);
+  expect(names).toContain('list port 8081');
+  expect(names).not.toContain('list port 8080');
+  expect(ordinary.body.total).not.toBe(
+    (await req<Listed>('GET', `/memory/list?project=${p.prefix}&includeSuperseded=true`)).body.total,
+  );
+
+  const withStale = await req<Listed>('GET', `/memory/list?project=${p.prefix}&includeSuperseded=true`);
+  const stale = withStale.body.nodes.find((n) => n.name === 'list port 8080');
+  expect(stale).toBeTruthy();
+  expect(stale!.supersededBy).toBe('list port 8081');
+});
+
+test('DAR-303: /memory/list returns no edges, and rejects an unrecognized query field', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Edgeless Node', type: 'service', project: p.prefix } });
+  const r = await req<Listed & { edges?: unknown }>('GET', `/memory/list?project=${p.prefix}`);
+  expect(r.body.edges).toBeUndefined();
+
+  const bad = await req('GET', `/memory/list?project=${p.prefix}&q=nope`);
+  expect(bad.status).toBe(400);
+  expect(bad.error).toContain('q');
+});
+
+test('/memory/list is local-only, same as recall and index', async () => {
+  const p = await project();
+  const headers = { 'x-forwarded-host': 'darbar.ngrok.app' };
+  const r = await api.request(`/memory/list?project=${p.prefix}`, { headers });
+  expect(r.status).toBe(403);
+  expect(await r.text()).toContain('local-only');
+});
+
 // ---------- memory index + export (DAR-280) ----------
 
 test('memory index caps its output under 24,000 bytes and ends with the omitted-node count', async () => {

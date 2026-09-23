@@ -681,7 +681,7 @@ const state = {
   parkArm: null,           // the one parkId whose remedy button is armed; transient, never persisted
   // memory tab (DAR-283): list state. forbidden mirrors state.parked's null-means-unavailable
   // shape — a 403 here means "not allowed to look", never "nothing found"
-  mem: {q:'', type:'', includeSuperseded:false, loading:false, forbidden:false, error:null, nodes:[], edges:[]},
+  mem: {q:'', type:'', includeSuperseded:false, loading:false, forbidden:false, error:null, nodes:[], edges:[], total:0},
   memNode: null,           // open node drawer: {name, loading, forbidden, error, node, out[], in[], armSupersede, superBy, superBusy}
 };
 // mirrors packages/core/src/types.ts MEMORY_NODE_TYPES — read-only client copy for the filter chips
@@ -1834,29 +1834,49 @@ function memRowHtml(n){
 function renderMemResults(){
   if (state.mem.forbidden) return '<div class="empty">memory is local-only — this board is open through a share link, which never carries it</div>';
   if (state.mem.error) return `<div class="empty">${esc(state.mem.error)}</div>`;
-  if (!state.mem.q.trim()) return '<div class="empty">search this project’s memory graph — decisions, gotchas, people, services, repos and preferences it has recorded</div>';
-  if (state.mem.loading) return '<div class="empty">searching…</div>';
-  if (!state.mem.nodes.length) return `<div class="empty">no matches for “${esc(state.mem.q)}”${state.mem.type?` in ${esc(state.mem.type)}`:''}</div>`;
+  if (state.mem.loading) return `<div class="empty">${state.mem.q.trim()?'searching…':'loading…'}</div>`;
+  if (!state.mem.nodes.length) {
+    const q = state.mem.q.trim();
+    // empty-state text only when the scope truly has zero nodes (or zero of the filtered type) —
+    // a blank query with results just renders the list, same rows a search renders
+    return q
+      ? `<div class="empty">no matches for “${esc(q)}”${state.mem.type?` in ${esc(state.mem.type)}`:''}</div>`
+      : `<div class="empty">nothing in memory yet${state.mem.type?` for type ${esc(state.mem.type)}`:''}</div>`;
+  }
   return state.mem.nodes.map(memRowHtml).join('');
 }
 let memT = null;
 function scheduleMemory(){ clearTimeout(memT); memT = setTimeout(loadMemory, 300); }
+// DAR-303: a blank query browses the graph via /memory/list (recall keeps its q-required contract);
+// typing switches to /memory/recall as before, and clearing the box comes back here.
 async function loadMemory(){
   const q = state.mem.q.trim();
-  if (!q){ state.mem.nodes=[]; state.mem.edges=[]; state.mem.error=null; state.mem.forbidden=false; if(state.view==='memory') renderContent(); return; }
   const prefix = state.data?.project?.prefix;
   state.mem.loading = true;
   if (state.view==='memory') renderContent();
   try {
-    const params = new URLSearchParams({q, limit:'50', includeSuperseded:String(state.mem.includeSuperseded)});
-    if (prefix) params.set('project', prefix);
-    if (state.mem.type) params.set('type', state.mem.type);
-    const r = await fetch(`/api/memory/recall?${params}`);
-    if (r.status===403){ state.mem.forbidden = true; state.mem.nodes=[]; state.mem.edges=[]; }
-    else {
-      const j = await r.json().catch(()=>({}));
-      if (!r.ok){ state.mem.error = j.error || `recall failed (http ${r.status})`; state.mem.nodes=[]; state.mem.edges=[]; }
-      else { state.mem.forbidden=false; state.mem.error=null; state.mem.nodes=j.nodes||[]; state.mem.edges=j.edges||[]; }
+    if (!q){
+      const params = new URLSearchParams({limit:'50', includeSuperseded:String(state.mem.includeSuperseded)});
+      if (prefix) params.set('project', prefix);
+      if (state.mem.type) params.set('type', state.mem.type);
+      const r = await fetch(`/api/memory/list?${params}`);
+      if (r.status===403){ state.mem.forbidden = true; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
+      else {
+        const j = await r.json().catch(()=>({}));
+        if (!r.ok){ state.mem.error = j.error || `list failed (http ${r.status})`; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
+        else { state.mem.forbidden=false; state.mem.error=null; state.mem.nodes=j.nodes||[]; state.mem.edges=[]; state.mem.total=j.total||0; }
+      }
+    } else {
+      const params = new URLSearchParams({q, limit:'50', includeSuperseded:String(state.mem.includeSuperseded)});
+      if (prefix) params.set('project', prefix);
+      if (state.mem.type) params.set('type', state.mem.type);
+      const r = await fetch(`/api/memory/recall?${params}`);
+      if (r.status===403){ state.mem.forbidden = true; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
+      else {
+        const j = await r.json().catch(()=>({}));
+        if (!r.ok){ state.mem.error = j.error || `recall failed (http ${r.status})`; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
+        else { state.mem.forbidden=false; state.mem.error=null; state.mem.nodes=j.nodes||[]; state.mem.edges=j.edges||[]; state.mem.total=j.nodes.length; }
+      }
     }
   } catch { state.mem.error = 'could not reach the memory API: network'; }
   state.mem.loading = false;
@@ -2088,7 +2108,7 @@ function renderContent(){
         <button class="pbtn" type="button" id="memsup"></button>
         <button class="pbtn" type="button" id="memexport">Export .md</button>`;
     }
-    $('memvn').textContent = state.mem.nodes.length;
+    $('memvn').textContent = state.mem.total;
     $('memtypes').innerHTML = ['', ...MEMORY_NODE_TYPES].map(t=>
       `<button class="seg ${state.mem.type===t?'on':''}" data-mem-type="${esc(t)}">${esc(t||'all')}</button>`).join('');
     $('memsup').textContent = (state.mem.includeSuperseded?'✓ ':'') + 'superseded';
@@ -2363,6 +2383,9 @@ function setView(v, lane=null){
   state.view = v; state.lane = lane;
   document.body.dataset.view = v;
   renderTopNav(); renderStats(); renderContent(); renderDrawer();
+  // DAR-303: opening the tab browses the graph (blank q -> /memory/list) instead of sitting on
+  // the empty state until someone types; typing/clearing after that is handled by scheduleMemory
+  if (v==='memory') loadMemory();
 }
 
 // ---------- drag & drop (status moves; server enforces gates, tunnel viewers get 403) ----------
