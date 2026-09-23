@@ -1452,6 +1452,64 @@ test('supersede stamps invalidAt and adds a SUPERSEDES edge, never deleting the 
   expect(again.status).toBe(409);
 });
 
+test('remember edge: a project-scoped node can link to a global node', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Global Anchor', type: 'service' } }); // no project = global
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Project Widget', type: 'service', project: p.prefix },
+    edges: [{ to: 'Global Anchor', relation: 'DEPENDS_ON' }],
+  });
+  expect(linked.status).toBe(200);
+  expect(linked.body.edges).toHaveLength(1);
+});
+
+test('remember edge: a global node cannot link to a project-only node (404)', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Project Only', type: 'service', project: p.prefix } });
+  const linked = await req('POST', '/memory/remember', {
+    node: { name: 'Global Caller', type: 'service' }, // no project = global caller
+    edges: [{ to: 'Project Only', relation: 'DEPENDS_ON' }],
+  });
+  expect(linked.status).toBe(404);
+});
+
+test('remember edge: slug in both scopes resolves to the project node for a project caller', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Shared Name', type: 'service' }, observations: ['global copy'] }); // global
+  const projectTarget = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Shared Name', type: 'service', project: p.prefix },
+    observations: ['project copy'],
+  });
+  expect(projectTarget.status).toBe(200);
+
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Linker', type: 'service', project: p.prefix },
+    edges: [{ to: 'Shared Name', relation: 'DEPENDS_ON' }],
+  });
+  expect(linked.status).toBe(200);
+  const found = await req<Recalled>('GET', `/memory/recall?q=Linker&project=${p.prefix}`);
+  const edgeToShared = found.body.edges.find((e) => e.relation === 'DEPENDS_ON');
+  expect(edgeToShared).toBeDefined();
+  const sharedHit = found.body.nodes.find((n) => n.name === 'Shared Name');
+  // the project node, not the global one: its observations carry "project copy", not "global copy"
+  expect(sharedHit!.observations.map((o) => o.text)).toContain('project copy');
+  expect(sharedHit!.observations.map((o) => o.text)).not.toContain('global copy');
+});
+
+test('supersede by: a project caller can resolve a global replacement node', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Global Replacement', type: 'decision' } }); // global
+  const sup = await req('POST', '/memory/supersede', {
+    nodeName: 'port is 8080', // does not exist — but resolveMemoryScope + `by` lookup happens first
+    by: 'Global Replacement',
+    project: p.prefix,
+  });
+  // by resolves fine (no 404 on `by`); the actual 404 is for the missing nodeName, which proves
+  // `by` itself was found via project-then-global rather than failing first
+  expect(sup.status).toBe(404);
+  expect(sup.error).not.toContain('Global Replacement');
+});
+
 test('recall walks two hops when asked and stops at one otherwise', async () => {
   const p = await project();
   for (const name of ['Alpha', 'Beta', 'Gamma']) {

@@ -3420,6 +3420,23 @@ async function resolveMemoryScope(ref: string | undefined): Promise<{ id: Object
   return p ? { id: p._id! } : { error: `project ${JSON.stringify(ref)} not found` };
 }
 
+// an edge/supersede target resolves in the CALLER's scope first, then global: a project-scoped
+// caller sees its own project plus whatever is global (same rule as recall/index), preferring the
+// project node if the same slug exists in both. A global caller only ever finds global nodes — a
+// global node must not link into a project. Two queries rather than one $in query so "prefer the
+// project one" is a straight fallback, not a sort.
+async function findMemoryTarget(scope: { id: ObjectId | null }, slug: string): Promise<MemoryNode | null> {
+  if (scope.id !== null) {
+    const projectNode = await MemoryNodes.findOne({ project: scope.id, slug });
+    if (projectNode) return projectNode;
+  }
+  return MemoryNodes.findOne({ project: null, slug });
+}
+
+function memoryScopesSearchedDesc(scope: { id: ObjectId | null }, projectRef: string | undefined): string {
+  return scope.id !== null ? `project ${JSON.stringify(projectRef)} or the global scope` : 'the global scope';
+}
+
 function observationFrom(raw: unknown, now: Date): MemoryObservation | null {
   if (typeof raw === 'string') {
     const text = raw.trim();
@@ -3549,9 +3566,9 @@ api.post('/memory/remember', async (c) => {
     if (e.confidence !== undefined && typeof e.confidence !== 'number') {
       return c.json({ error: `edge.confidence must be a number 0-1 (got ${JSON.stringify(e.confidence)})` }, 400);
     }
-    const toNode = await MemoryNodes.findOne({ project: scope.id, slug: slugify(toName) });
+    const toNode = await findMemoryTarget(scope, slugify(toName));
     if (!toNode) {
-      return c.json({ error: `no node named ${JSON.stringify(toName)} in ${projectRef ?? 'the global scope'}: remember it first, then link it` }, 404);
+      return c.json({ error: `no node named ${JSON.stringify(toName)} in ${memoryScopesSearchedDesc(scope, projectRef)}: remember it first, then link it` }, 404);
     }
     const confidence = typeof e.confidence === 'number' ? Math.max(0, Math.min(1, e.confidence)) : undefined;
     const sourceRead = readEdgeSource(e.source);
@@ -3784,8 +3801,8 @@ api.post('/memory/supersede', async (c) => {
   const projectRef = str(b.project);
   const scope = await resolveMemoryScope(projectRef);
   if ('error' in scope) return c.json({ error: scope.error }, 404);
-  const byNode = await MemoryNodes.findOne({ project: scope.id, slug: slugify(by) });
-  if (!byNode) return c.json({ error: `no node named ${JSON.stringify(by)} in ${projectRef ?? 'the global scope'}: remember it first, then supersede with it` }, 404);
+  const byNode = await findMemoryTarget(scope, slugify(by));
+  if (!byNode) return c.json({ error: `no node named ${JSON.stringify(by)} in ${memoryScopesSearchedDesc(scope, projectRef)}: remember it first, then supersede with it` }, 404);
   const sourceRead = readEdgeSource(b.source);
   if ('error' in sourceRead) return c.json({ error: sourceRead.error }, 400);
   const source = sourceRead.source;
