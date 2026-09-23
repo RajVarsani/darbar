@@ -94,6 +94,7 @@ class Plan:
     nodes: list = field(default_factory=list)
     edges: list = field(default_factory=list)  # (from_name, to_name, project)
     unparsed: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
 
 
 # ---------- frontmatter ----------
@@ -166,7 +167,15 @@ def infer_project(name: str, body: str, meta: dict, folder_hint: Optional[str], 
 
 # ---------- source 1: claude memory ----------
 
+CLAUDE_DIRS: list = [CLAUDE_DIR]  # overridden by --claude-dir (repeatable) in main()
+
+
 def load_claude(live_projects: set, plan: Plan) -> None:
+    for d in CLAUDE_DIRS:
+        _load_claude_dir(Path(d), live_projects, plan)
+
+
+def _load_claude_dir(CLAUDE_DIR: Path, live_projects: set, plan: Plan) -> None:
     if not CLAUDE_DIR.is_dir():
         plan.unparsed.append(f"{CLAUDE_DIR} (directory missing)")
         return
@@ -183,8 +192,10 @@ def load_claude(live_projects: set, plan: Plan) -> None:
         description = meta.get("description")
         src_type = meta.get("metadata", {}).get("type")
         if not src_type or src_type not in TYPE_MAP:
-            plan.unparsed.append(f"{f} (unrecognized metadata.type: {src_type!r})")
-            continue
+            # older files carry no metadata.type; skipping them is losing them, so they land as
+            # gotcha (the broadest agent-knowledge type) and the fallback is recorded, not hidden
+            plan.warnings.append(f"{f} (metadata.type {src_type!r} -> gotcha by fallback)")
+            src_type = "feedback"
         node_type = TYPE_MAP[src_type]
         obs = body
         if description and description not in body:
@@ -267,8 +278,8 @@ def load_repo(live_projects: set, plan: Plan) -> None:
             src_type = "reference"
             body = text
         if src_type not in TYPE_MAP:
-            plan.unparsed.append(f"{f} (unrecognized metadata.type: {src_type!r})")
-            continue
+            plan.warnings.append(f"{f} (metadata.type {src_type!r} -> gotcha by fallback)")
+            src_type = "feedback"
         node_type = TYPE_MAP[src_type]
         obs = body
         if description and description not in body:
@@ -369,8 +380,15 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="default; print what would happen, write nothing")
     ap.add_argument("--apply", action="store_true", help="actually write to the memory graph")
     ap.add_argument("--source", choices=["claude", "gabbar", "repo", "all"], default="all")
+    ap.add_argument("--claude-dir", action="append", default=None,
+                    help="a Claude Code auto-memory dir to migrate; repeatable. Default: this project's. "
+                         "Use once per ~/.claude/projects/<slug>/memory to migrate every project.")
+    ap.add_argument("--skip-nodes", action="store_true", help="rerun only the edge pass (nodes already landed)")
     ap.add_argument("--base", default=API_BASE, help=f"API base (default {API_BASE})")
     args = ap.parse_args()
+    if args.claude_dir:
+        global CLAUDE_DIRS
+        CLAUDE_DIRS = [Path(d).expanduser() for d in args.claude_dir]
 
     apply = args.apply
     dry_run = not apply
@@ -398,6 +416,10 @@ def main() -> int:
         if len(nodes) > 10:
             print(f"  ... and {len(nodes) - 10} more")
 
+    if plan.warnings:
+        print(f"\n{len(plan.warnings)} file(s) typed by fallback:")
+        for w in plan.warnings:
+            print(f"  - {w}")
     if plan.unparsed:
         print(f"\ncould not parse {len(plan.unparsed)} file(s):")
         for u in plan.unparsed:
@@ -415,8 +437,10 @@ def main() -> int:
         return 0
 
     # ---------- pass 1: nodes ----------
+    if args.skip_nodes:
+        print("--skip-nodes: pass 1 skipped")
     written_nodes = 0
-    for n in plan.nodes:
+    for n in ([] if args.skip_nodes else plan.nodes):
         already = existing_observation_texts(args.base, n)
         obs = [] if n.observation in already else [n.observation]
         body = {"node": {"name": n.name, "type": n.type, **({"project": n.project} if n.project else {})}}
@@ -427,6 +451,7 @@ def main() -> int:
 
     # ---------- pass 2: edges ----------
     written_edges = 0
+    skipped_edges: list = []
     for n, target in edges:
         body = {
             "node": {"name": n.name, "type": n.type, **({"project": n.project} if n.project else {})},
@@ -438,11 +463,20 @@ def main() -> int:
                 }
             ],
         }
-        api_post("/memory/remember", body, args.base)
-        written_edges += 1
+        try:
+            api_post("/memory/remember", body, args.base)
+            written_edges += 1
+        except RuntimeError as e:
+            # an unresolvable target (scope mismatch, or a link to something that never became a
+            # node) is a line in the report, never a reason to abandon the remaining edges
+            skipped_edges.append(f"{n.name} -> {target}: {str(e)[:160]}")
 
     after = probe_node_count(args.base)
     print(f"\nwrote {written_nodes} node(s), {written_edges} edge(s)")
+    if skipped_edges:
+        print(f"skipped {len(skipped_edges)} edge(s):")
+        for line in skipped_edges:
+            print(f"  - {line}")
     print(f"after (broad-probe node count, lower bound): {after}")
     return 0
 
