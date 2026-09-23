@@ -13,7 +13,8 @@
     "proxy": "bun run --filter @darbar/proxy dev",
     "mcp": "bun --env-file=.env apps/mcp/src/server.ts",
     "tunnel": "sh scripts/tunnel.sh",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "clean-test-dbs": "bun run --filter @darbar/server clean-test-dbs"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",

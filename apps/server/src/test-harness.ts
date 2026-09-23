@@ -99,20 +99,49 @@ export async function reset() {
   await core.ensureIndexes({ Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges } as never);
 }
 
-let torn = false;
+let reverted = false;
 /**
- * Drop the scratch database and give api.ts its real collections back. Register as afterAll in every
- * file that uses this rig.
+ * Drop the scratch database and give api.ts its real collections back. Register as afterAll in
+ * every file that uses this rig.
+ *
+ * The drop below runs on EVERY call, not just the first or the last: tried a `torn`-style guard
+ * around it first (bun runs every file that touches this rig in one process, so SCRATCH is one
+ * pid-scoped db shared by inbox.test.ts and engine.test.ts today, not one per file) and it made
+ * the drop a no-op everywhere but the first afterAll to fire — bun runs one file to completion,
+ * afterAll included, before starting the next, so whichever file happens to go first is never the
+ * one whose writes are actually done, and its sibling's data landed in SCRATCH after that lone
+ * drop with nothing left to remove it. Confirmed against the pre-fix code: a full passing `bun
+ * test` still left darbar_test_<pid> behind (checked with mongosh listDatabases). dropDatabase()
+ * on an empty or already-gone db is one cheap round trip, so calling it from every afterAll,
+ * regardless of run order, is what actually guarantees the last one sticks.
+ *
+ * The mock.module revert stays guarded to run once: field-drop.test.ts (which does not use this
+ * rig) expects @darbar/core back to the real module as soon as ANY harness file finishes, not
+ * after every one of them.
  *
  * The client is deliberately NOT closed: it is the one @darbar/core built, other test files reach
  * live Mongo through it after this file finishes (field-drop.test.ts queries for a project that does
  * not exist), and closing it here turned four of their passes into 500s.
  */
 export async function teardown() {
-  if (torn) return;
-  torn = true;
   await scratch.dropDatabase();
+  if (reverted) return;
+  reverted = true;
   mock.module('@darbar/core', () => core);
+}
+
+// Belt-and-suspenders for a dev hitting Ctrl-C mid-run: afterAll (above) is what bun's test
+// runner actually supports for the normal pass/fail-and-exit path (verified: bun calls an
+// explicit process.exit() at the end, which per Node's own docs skips `beforeExit` entirely, so a
+// `beforeExit` hook here would never fire — tried it, still leaked). SIGINT/SIGTERM are real
+// signals with no such skip, so still worth a direct handler; SIGKILL/OOM cannot be caught by any
+// process code, which is why the startup drop above (`await scratch.dropDatabase()`) exists as
+// the backstop for those — a crashed run's leftover db is emptied by the next run under the same
+// pid.
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    void scratch.dropDatabase().finally(() => process.exit());
+  });
 }
 
 // ---------- fixtures ----------

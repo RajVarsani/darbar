@@ -7,6 +7,7 @@
     "hono": "^4.0.0"
   },
   "scripts": {
-    "dev": "bun --env-file=../../.env src/server.ts"
+    "dev": "bun --env-file=../../.env src/server.ts",
+    "clean-test-dbs": "bun --env-file=../../.env scripts/clean-test-dbs.ts"
   }
 }
