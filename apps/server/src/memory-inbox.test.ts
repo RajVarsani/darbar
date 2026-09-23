@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, utimesSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { drainFile, scanOnce, writeMemoryIndex, type RememberFn, type FetchIndexFn } from './memory-inbox';
+import { drainFile, scanOnce, writeMemoryIndex, startMemoryInboxWatcher, type RememberFn, type FetchIndexFn } from './memory-inbox';
 
 // every scanOnce test in this file that doesn't care about the index write stubs fetchIndex too
 // (no mongo, no real HTTP, no live server, same rule as remember) — otherwise the default hits
@@ -288,4 +288,45 @@ test('writeMemoryIndex itself: a thrown fetchIndex error leaves a pre-existing M
   const written = readFileSync(path.join(RIG, 'MEMORY.md'), 'utf8');
   expect(written).toBe('# untouched\n');
   expect(logs).toBe(1);
+});
+
+// DAR-FB-158: writeMemoryIndex's own MEMORY.md write used to re-trigger fs.watch, which scheduled
+// another scanOnce -> writeMemoryIndex -> write -> watch event, forever. This is the only test in
+// the file that goes through the real fs.watch (startMemoryInboxWatcher), which is the only way to
+// observe that self-triggering loop at all.
+test('startMemoryInboxWatcher does not loop on its own MEMORY.md write', async () => {
+  let fetchCount = 0;
+  const fetchIndex: FetchIndexFn = async () => {
+    fetchCount++;
+    return { ok: true, status: 200, text: '# Memory index — global\n\nstable content\n' };
+  };
+  const remember: RememberFn = async () => ({ ok: true, status: 200, json: {} });
+
+  const handle = startMemoryInboxWatcher(RIG, { remember, fetchIndex, log: () => {} });
+  try {
+    // let the boot scan land, then wait well past several debounce windows (300ms) to see whether
+    // the watcher's own write schedules further scans
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(fetchCount).toBe(1);
+
+    // now prove the watcher still reacts to REAL new content: drop a topic file in and expect
+    // exactly one more drain (and one more index fetch) once fs.watch notices it
+    const full = path.join(RIG, 'topic.md');
+    const old = new Date(Date.now() - 5000);
+    writeFileSync(full, FIXTURE, 'utf8');
+    utimesSync(full, old, old);
+
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(existsSync(full)).toBe(false); // drained and deleted
+    // one scan for the new file's write event plus one more for its own delete (rename) event is
+    // expected and finite; the point of this test is that it settles, not the exact count
+    expect(fetchCount).toBeGreaterThanOrEqual(2);
+    const settledCount = fetchCount;
+
+    // and now the important part: with nothing changing, the count must stay put (no self-loop)
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(fetchCount).toBe(settledCount);
+  } finally {
+    handle.stop();
+  }
 });

@@ -201,9 +201,22 @@ export async function writeMemoryIndex(dir: string, deps: DrainDeps): Promise<vo
   }
 
   const dest = path.join(dir, MEMORY_INDEX_FILE);
+  const contents = `${MEMORY_INDEX_HEADER}${result.text}`;
+
+  // DAR-FB-158: skip the write entirely when the index hasn't changed. Belt-and-braces with the
+  // fs.watch filename filter below — this half also protects against the boot scan re-writing an
+  // identical file (no watch event involved at all) and against any future writer of this
+  // directory that isn't fs.watch (e.g. a network filesystem that coalesces events differently).
+  try {
+    const existing = fs.readFileSync(dest, 'utf8');
+    if (existing === contents) return;
+  } catch {
+    // no existing file (or unreadable) — fall through and write it
+  }
+
   const tmp = path.join(dir, `.${MEMORY_INDEX_FILE}.tmp-${process.pid}-${Date.now()}`);
   try {
-    fs.writeFileSync(tmp, `${MEMORY_INDEX_HEADER}${result.text}`, 'utf8');
+    fs.writeFileSync(tmp, contents, 'utf8');
     fs.renameSync(tmp, dest);
   } catch (e) {
     log(`memory-inbox: failed to write ${MEMORY_INDEX_FILE}: ${String(e)}`);
@@ -350,7 +363,17 @@ export function startMemoryInboxWatcher(dir: string = config.memoryInboxDir, dep
   // boot scan: don't wait on the debounce for files that are already sitting there
   scanOnce(dir, deps).catch((e) => (deps.log ?? console.error)(`memory-inbox: boot scan failed: ${String(e)}`));
 
-  const watcher = fs.watch(dir, { persistent: false }, () => scheduleScan());
+  // DAR-FB-158: writeMemoryIndex's own tmp-write+rename into this same directory fires fs.watch,
+  // which otherwise re-schedules a scan that calls writeMemoryIndex again, forever (measured 17
+  // index fetches in 5s on an empty inbox). Ignore events for MEMORY.md itself and its tmp files
+  // by filename so the watcher never reacts to its own write.
+  const isSelfWrite = (filename: string | null) =>
+    filename !== null &&
+    (filename === MEMORY_INDEX_FILE || filename.startsWith(`.${MEMORY_INDEX_FILE}.tmp-`));
+  const watcher = fs.watch(dir, { persistent: false }, (_eventType, filename) => {
+    if (isSelfWrite(filename)) return;
+    scheduleScan();
+  });
   watcher.on('error', (e) => (deps.log ?? console.error)(`memory-inbox: watcher error: ${String(e)}`));
 
   return {
