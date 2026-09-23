@@ -3745,16 +3745,33 @@ api.get('/memory/recall', async (c) => {
     for (const edge of hit.walkedIn) { touch(edge.from, hit.score, edge.depth + 1); recordEdge(edge); }
   }
 
+  // DAR-293 FB-159: the graph walk above follows edges in BOTH directions with no project
+  // filter on what it reaches — before DAR-289 every edge stayed inside one scope so that
+  // never mattered, but a cross-scope edge (a project node linking to a global hub) now lets
+  // that project's node text come back through another project's recall, or global recall,
+  // via the hub. Filter every node this route is about to return (walked neighbours included,
+  // not just the primary $text hits, which were already scope-matched) to the caller's own
+  // scope: a global caller sees only global nodes, a project caller sees its own project plus
+  // whatever is global — same rule `match.project` above already applies to the primary hits.
+  const inCallerScope = (doc: { project: ObjectId | null }): boolean => {
+    if (doc.project === null) return true;
+    return scope !== null && scope.id !== null && doc.project.equals(scope.id);
+  };
+
   const ids = [...ranked.values()].map((r) => r.id);
-  const nodeDocs = ids.length ? await MemoryNodes.find({ _id: { $in: ids } }).toArray() : [];
+  const nodeDocs = ids.length ? (await MemoryNodes.find({ _id: { $in: ids } }).toArray()).filter(inCallerScope) : [];
   const byId = new Map(nodeDocs.map((n) => [n._id!.toHexString(), n]));
   // includeSuperseded=true can return a node whose replacement was never itself a hit or a walked
   // neighbour, so its name is not in byId yet: fetch those separately rather than showing null.
+  // Scope-filtered the same way — a replacement node outside the caller's scope is not a leak
+  // to fix by showing it, it is exactly the case this fix removes.
   const supersededByIds = includeSuperseded
     ? nodeDocs.filter((n) => n.supersededBy && !byId.has(n.supersededBy.toHexString())).map((n) => n.supersededBy!)
     : [];
   if (supersededByIds.length) {
-    for (const n of await MemoryNodes.find({ _id: { $in: supersededByIds } }).toArray()) byId.set(n._id!.toHexString(), n);
+    for (const n of await MemoryNodes.find({ _id: { $in: supersededByIds } }).toArray()) {
+      if (inCallerScope(n)) byId.set(n._id!.toHexString(), n);
+    }
   }
 
   const nodes = [...ranked.entries()]
@@ -3772,12 +3789,17 @@ api.get('/memory/recall', async (c) => {
     .filter((n): n is NonNullable<typeof n> => n !== null)
     .sort((a, b) => b.score - a.score || a.depth - b.depth);
 
-  // only the edges actually walked, named by the nodes on each end, not the body of everything
-  const edges = [...walkedEdges.values()].map((e) => ({
-    from: byId.get(e.from.toHexString())?.name ?? null,
-    to: byId.get(e.to.toHexString())?.name ?? null,
-    relation: e.relation, validAt: e.validAt, invalidAt: e.invalidAt, confidence: e.confidence, depth: e.depth,
-  }));
+  // only the edges actually walked, named by the nodes on each end, not the body of everything.
+  // DAR-293 FB-159: an edge with either end out of the caller's scope is dropped entirely
+  // (not shown with a null name) — a null-named edge would still confirm to a global caller
+  // that "something" links here, which is the same class of leak as showing the node itself.
+  const edges = [...walkedEdges.values()]
+    .filter((e) => byId.has(e.from.toHexString()) && byId.has(e.to.toHexString()))
+    .map((e) => ({
+      from: byId.get(e.from.toHexString())?.name ?? null,
+      to: byId.get(e.to.toHexString())?.name ?? null,
+      relation: e.relation, validAt: e.validAt, invalidAt: e.invalidAt, confidence: e.confidence, depth: e.depth,
+    }));
 
   return c.json({ q, hops, asOf: asOf ? asOf.toISOString() : null, limit, includeSuperseded, nodes, edges });
 });
@@ -3808,11 +3830,28 @@ api.post('/memory/supersede', async (c) => {
   const source = sourceRead.source;
   const now = new Date();
 
+  // DAR-293 FB-160: findMemoryTarget (6609db3) lets a project caller name a GLOBAL node as
+  // `by`, same as remember does for an edge target — that half is intentional and kept. What
+  // remember never allows, in either direction, is a global node's edges pointing INTO a
+  // project (findMemoryTarget for a global caller only ever resolves other global nodes). A
+  // SUPERSEDES edge running global -> project would be exactly that direction, just made from
+  // the supersede route instead of remember, so it is refused here the same way.
+  const refuseGlobalOverProject = (targetProject: ObjectId | null): Response | null => {
+    if (byNode.project !== null || targetProject === null) return null;
+    return c.json(
+      { error: `${JSON.stringify(by)} is a global node; it cannot supersede a project-scoped node or edge — remember only allows project -> global links, never global -> project` },
+      400,
+    );
+  };
+
   if (edgeId) {
     if (!ObjectId.isValid(edgeId)) return c.json({ error: `edgeId ${JSON.stringify(edgeId)} is not a valid id` }, 400);
     const edge = await MemoryEdges.findOne({ _id: new ObjectId(edgeId) });
     if (!edge) return c.json({ error: `no edge ${edgeId}` }, 404);
     if (edge.invalidAt) return c.json({ error: `edge ${edgeId} was already superseded at ${new Date(edge.invalidAt).toISOString()}` }, 409);
+    const fromNode = await MemoryNodes.findOne({ _id: edge.from });
+    const refused = refuseGlobalOverProject(fromNode?.project ?? null);
+    if (refused) return refused;
     // never deleted: the edge stays in the collection, only invalidAt is stamped. The new
     // SUPERSEDES edge runs from the replacement to the node that made the now-invalid assertion.
     await MemoryEdges.updateOne({ _id: edge._id }, { $set: { invalidAt: now } });
@@ -3824,6 +3863,8 @@ api.post('/memory/supersede', async (c) => {
 
   const node = await MemoryNodes.findOne({ project: scope.id, slug: slugify(nodeName!) });
   if (!node) return c.json({ error: `no node named ${JSON.stringify(nodeName)} in ${projectRef ?? 'the global scope'}` }, 404);
+  const refused = refuseGlobalOverProject(node.project);
+  if (refused) return refused;
   const live = await MemoryEdges.find({ from: node._id, invalidAt: null }).toArray();
   if (live.length) await MemoryEdges.updateMany({ from: node._id, invalidAt: null }, { $set: { invalidAt: now } });
   // DAR-279 #5: supersede{nodeName} used to invalidate only the node's outgoing edges, leaving the
@@ -3855,18 +3896,80 @@ function requireLocal(c: Context): Response | null {
   return null;
 }
 
-const MEMORY_INDEX_QUERY = ['project'] as const;
+const MEMORY_INDEX_QUERY = ['project', 'max'] as const;
 // decision/gotcha/preference first, then person/service/repo/project — the spec's literal ordering,
 // used both as the group-heading order and as the type-priority factor in the ranking score.
 // DAR-284: reference ranks LOWEST of all — a URL/dashboard/ticket is not a decision, and it is
 // also the type callers reach for least when deciding what belongs at the top of the index.
 const MEMORY_INDEX_TYPE_ORDER: MemoryNodeType[] = ['decision', 'gotcha', 'preference', 'person', 'service', 'repo', 'project', 'reference'];
-const MEMORY_INDEX_BYTE_CAP = 24000;
+// DAR-292: 24,000 was picked for Claude's MEMORY.md load limit, not for hook stdout — the
+// SessionStart hook injects this into a much smaller display budget, so the cap is now a
+// caller-chosen ?max=<bytes> clamped to a sane range, defaulting to the old constant so every
+// existing caller (inbox MEMORY.md) is unaffected.
+const MEMORY_INDEX_BYTE_CAP_DEFAULT = 24000;
+const MEMORY_INDEX_BYTE_CAP_MIN = 1000;
+const MEMORY_INDEX_BYTE_CAP_MAX = 24000;
 const MEMORY_INDEX_OBS_TRUNCATE = 140;
+
+// DAR-291: migrated notes can carry a whole markdown body as "the observation" — a leading H1
+// title, a YAML-ish frontmatter block, `## Context` subheadings — and rendering that verbatim
+// put stray `## …` lines inside an index group, which look exactly like the `## <type>` group
+// headings the renderer itself emits. flattenObs turns any observation body into ONE line: no
+// heading markers, no newlines, safe to sit inside a group.
+function flattenObs(text: string): string {
+  let lines = text.split(/\r?\n/);
+  // strip a YAML-ish frontmatter block delimited by --- ... --- at the very top, if present.
+  // DAR-291 FB-164 LOW: a leading "---\n---\n" pair that is really two markdown thematic
+  // breaks (not frontmatter) used to drop whatever paragraph sat between them. Only treat it
+  // as frontmatter when the enclosed lines actually look like YAML (at least one `key: value`
+  // line) — a real frontmatter block always has one, a pair of horizontal rules never does.
+  if (lines.length && /^---\s*$/.test((lines[0] ?? '').trim())) {
+    const closeIdx = lines.slice(1).findIndex((l) => /^---\s*$/.test(l.trim()));
+    if (closeIdx !== -1) {
+      const inner = lines.slice(1, closeIdx + 1);
+      const looksLikeYaml = inner.some((l) => /^[A-Za-z0-9_-]+:\s/.test(l.trim()));
+      if (looksLikeYaml) lines = lines.slice(closeIdx + 2);
+    }
+  }
+  let i = 0;
+  let lastHeadingText = '';
+  while (i < lines.length) {
+    const l = (lines[i] ?? '').trim();
+    if (l === '') { i++; continue; }
+    const heading = /^#{1,6}\s*(.*)$/.exec(l);
+    if (heading) { lastHeadingText = (heading[1] ?? '').trim(); i++; continue; }
+    break;
+  }
+  const body = lines.slice(i).join(' ');
+  let collapsed = body.replace(/\s+/g, ' ').trim();
+  // strip markdown emphasis markers (bold/italic/code), keeping the inner text.
+  // DAR-291 FB-164 LOW: `__x__` was included alongside `**x**` as a bold delimiter, which
+  // mangled dunder identifiers like `__init__.py` into `init.py` — a double-underscore pair
+  // immediately butted against more identifier text is far more often a Python dunder than
+  // prose bold in this codebase's notes, so only `**`/`***` are treated as bold/bold-italic.
+  // A lone `_x_` (single underscore, already word-boundary-guarded below) still gets stripped.
+  collapsed = collapsed
+    .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/(?<![*\w])(\*|_)([^*_]+?)\1(?!\w)/g, '$2')
+    .replace(/`([^`]+)`/g, '$1');
+  // belt-and-suspenders: never let a leading '#' survive into the line, whatever produced it
+  collapsed = collapsed.replace(/^#+\s*/, '').trim();
+  // DAR-291 FB-164 LOW: an observation that is ONLY headings (e.g. the live "# saturn
+  // workspace") flattened to "" and rendered the misleading "(no observations)" — the node
+  // was not actually empty, it just had no body below its title. Fall back to the last
+  // heading's own text (already stripped of its #s) rather than losing it.
+  if (!collapsed && lastHeadingText) collapsed = lastHeadingText;
+  return collapsed;
+}
 
 function truncateObs(text: string): string {
   const t = text.trim();
-  return t.length > MEMORY_INDEX_OBS_TRUNCATE ? `${t.slice(0, MEMORY_INDEX_OBS_TRUNCATE).trimEnd()}…` : t;
+  if (t.length <= MEMORY_INDEX_OBS_TRUNCATE) return t;
+  const cut = t.slice(0, MEMORY_INDEX_OBS_TRUNCATE);
+  const lastSpace = cut.lastIndexOf(' ');
+  const boundary = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+  return `${boundary.trimEnd()}…`;
 }
 const byteLen = (s: string): number => new TextEncoder().encode(s).length;
 
@@ -3878,6 +3981,14 @@ api.get('/memory/index', async (c) => {
   const projectRef = c.req.query('project');
   const scope = await resolveMemoryScope(projectRef);
   if ('error' in scope) return c.json({ error: scope.error }, 404);
+
+  const maxRaw = c.req.query('max');
+  let byteCap = MEMORY_INDEX_BYTE_CAP_DEFAULT;
+  if (maxRaw !== undefined) {
+    const parsed = Number(maxRaw);
+    if (!Number.isFinite(parsed)) return c.json({ error: `max ${JSON.stringify(maxRaw)} is not a number` }, 400);
+    byteCap = Math.min(MEMORY_INDEX_BYTE_CAP_MAX, Math.max(MEMORY_INDEX_BYTE_CAP_MIN, Math.trunc(parsed)));
+  }
 
   // same scope rule as recall: omitting project searches the global scope only; giving one searches
   // that project PLUS whatever is global.
@@ -3907,7 +4018,8 @@ api.get('/memory/index', async (c) => {
     // ever written about this node — a fresh session reading the index at start saw stale text
     // forever, worst on exactly the nodes re-remembered most. The newest is the last element.
     const lastObs = n.observations[n.observations.length - 1]?.text;
-    const line = `- **${n.name}** (${n.type}) — ${lastObs ? truncateObs(lastObs) : '(no observations)'}`;
+    const summary = lastObs ? truncateObs(flattenObs(lastObs)) : '';
+    const line = `- **${n.name}** (${n.type}) — ${summary || '(no observations)'}`;
     return { node: n as MemoryNode & { _id: ObjectId }, score, line };
   });
 
@@ -3940,7 +4052,7 @@ api.get('/memory/index', async (c) => {
 
   let text = render(0);
   let dropIdx = 0;
-  while (byteLen(text) >= MEMORY_INDEX_BYTE_CAP && dropIdx < dropOrder.length) {
+  while (byteLen(text) >= byteCap && dropIdx < dropOrder.length) {
     dropped.add(dropOrder[dropIdx]!);
     dropIdx++;
     text = render(dropIdx);

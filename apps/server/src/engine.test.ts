@@ -1655,6 +1655,85 @@ test('DAR-279 #4: recall(project=P) searches P plus global; recall with no proje
   expect(globalNames).not.toContain('Scoped Widget'); // omitting project searches GLOBAL only
 });
 
+// DAR-293 FB-159 (HIGH): since 6609db3, an edge can run project -> global. The graph walk in
+// /memory/recall followed edges with no project filter on what it reached, so a hub reachable
+// from many projects leaked EVERY project's neighbour node — observation text included — to
+// any other project's recall, and to global recall, through that hub.
+test('DAR-293: a project node linked to a global hub is not leaked to another project or global recall via the hub', async () => {
+  const a = await project();
+  const b = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Mongo Hub', type: 'service' } }); // global
+  await req('POST', '/memory/remember', {
+    node: { name: 'Secret A Thing', type: 'gotcha', project: a.prefix },
+    observations: ['a fact that must never leave project A'],
+    edges: [{ to: 'Mongo Hub', relation: 'DEPENDS_ON' }],
+  });
+
+  // project B's recall for the hub must see the hub, never A's node
+  const fromB = await req<Recalled>('GET', `/memory/recall?q=Mongo&project=${b.prefix}`);
+  const bNames = fromB.body.nodes.map((n) => n.name);
+  expect(bNames).toContain('Mongo Hub');
+  expect(bNames).not.toContain('Secret A Thing');
+  expect(fromB.body.edges.some((e) => e.to === 'Secret A Thing' || e.from === 'Secret A Thing')).toBe(false);
+
+  // global recall (no project) must see the hub, never A's node
+  const global = await req<Recalled>('GET', `/memory/recall?q=Mongo`);
+  const globalNames = global.body.nodes.map((n) => n.name);
+  expect(globalNames).toContain('Mongo Hub');
+  expect(globalNames).not.toContain('Secret A Thing');
+
+  // project A's own recall still sees both — the fix scopes OTHER callers, not A itself
+  const fromA = await req<Recalled>('GET', `/memory/recall?q=Mongo&project=${a.prefix}`);
+  const aNames = fromA.body.nodes.map((n) => n.name);
+  expect(aNames).toContain('Mongo Hub');
+  expect(aNames).toContain('Secret A Thing');
+});
+
+// DAR-293 FB-160 (MEDIUM): findMemoryTarget (6609db3) lets a project caller name a global node
+// as `by`, mirroring what remember already allows for edge targets. What remember never allows,
+// in either direction, is an edge running FROM a global node INTO a project — supersede must
+// refuse the same direction rather than create a SUPERSEDES edge that way.
+test('DAR-293: supersede refuses a global replacement superseding a project-scoped node', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Global Backup', type: 'decision' } }); // global
+  await req('POST', '/memory/remember', { node: { name: 'Local Target', type: 'decision', project: p.prefix } });
+
+  const sup = await req('POST', '/memory/supersede', { nodeName: 'Local Target', by: 'Global Backup', project: p.prefix });
+  expect(sup.status).toBe(400);
+  expect(sup.error).toContain('global');
+
+  // refused, not silently partially applied
+  const still = await req<{ nodes: (MemNode & { depth: number; supersededBy?: string | null })[] }>(
+    'GET', `/memory/recall?q=Local+Target&project=${p.prefix}`,
+  );
+  expect(still.body.nodes.find((n) => n.name === 'Local Target')?.supersededBy).toBeUndefined();
+});
+
+// DAR-293 FB-162 (LOW): the allowed cross-scope direction (a project node superseding an edge
+// asserted by a GLOBAL node — mirroring remember's project -> global permission) ends in 200
+// with a real SUPERSEDES edge, not just a 404 on an unrelated lookup.
+test('DAR-293: a project-scoped replacement can supersede a global node\'s edge, ending in a SUPERSEDES edge', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Global Assertion', type: 'decision' } }); // global
+  await req('POST', '/memory/remember', { node: { name: 'Global Other', type: 'decision' } }); // global
+  await req('POST', '/memory/remember', { node: { name: 'Local Fix', type: 'decision', project: p.prefix } });
+  const linked = await req<Remembered>('POST', '/memory/remember', {
+    node: { name: 'Global Assertion', type: 'decision' },
+    edges: [{ to: 'Global Other', relation: 'RELATES_TO' }],
+  });
+  const edgeId = linked.body.edges[0]!._id;
+
+  const sup = await req<{ invalidated: MemEdge; supersedes: MemEdge }>('POST', '/memory/supersede', {
+    edgeId, by: 'Local Fix', project: p.prefix,
+  });
+  expect(sup.status).toBe(200);
+  expect(sup.body.supersedes.relation).toBe('SUPERSEDES');
+  expect(sup.body.invalidated.invalidAt).not.toBeNull();
+
+  const view = await req<Recalled>('GET', `/memory/recall?q=Local+Fix&project=${p.prefix}`);
+  expect(view.body.edges.some((e) => e.relation === 'SUPERSEDES' && e.from === 'Local Fix')).toBe(true);
+});
+
 test('DAR-279 #5: superseding a node hides it from recall by default and returns it with supersededBy when asked', async () => {
   const p = await project();
   await req('POST', '/memory/remember', { node: { name: 'port is 8080', type: 'decision', project: p.prefix } });
@@ -1734,6 +1813,49 @@ test('memory index caps its output under 24,000 bytes and ends with the omitted-
   const text = await r.text();
   expect(new TextEncoder().encode(text).length).toBeLessThan(24000);
   expect(text).toMatch(/\d+ node\(s\) omitted/);
+});
+
+// DAR-292: the route's default byte cap (24,000) was sized for Claude's MEMORY.md load limit,
+// not for the much smaller SessionStart hook display budget. ?max=<bytes> lets a caller (the
+// hook/snapshot) ask for a smaller index instead of colliding with that budget.
+test('memory index respects ?max, clamped to a sane range', async () => {
+  const p = await project();
+  for (let i = 0; i < 400; i++) {
+    await req('POST', '/memory/remember', {
+      node: { name: `Max Bulk Node ${i}`, type: 'gotcha', project: p.prefix },
+      observations: [`observation text padding out this line to something realistic for node ${i}, so the index has real bytes to cap`],
+    });
+  }
+  const small = await api.request(`/memory/index?project=${p.prefix}&max=2000`);
+  expect(small.status).toBe(200);
+  const smallText = await small.text();
+  expect(new TextEncoder().encode(smallText).length).toBeLessThan(2000);
+
+  const full = await api.request(`/memory/index?project=${p.prefix}`);
+  const fullText = await full.text();
+  // a smaller max drops strictly more (or equal) nodes than the default
+  expect(new TextEncoder().encode(smallText).length).toBeLessThanOrEqual(new TextEncoder().encode(fullText).length);
+
+  // DAR-292 FB-163: clamped to the 1,000-byte floor — still returns a real, floor-sized chunk
+  // of the index, not near-empty. This is the assertion that actually exercises the floor: if
+  // the MEMORY_INDEX_BYTE_CAP_MIN clamp were removed, max=1 would drop everything down to a
+  // near-empty title+footer (well under 500 bytes), which "less than 24000" alone would not
+  // have caught.
+  const tiny = await api.request(`/memory/index?project=${p.prefix}&max=1`);
+  expect(tiny.status).toBe(200);
+  const tinyLen = new TextEncoder().encode(await tiny.text()).length;
+  expect(tinyLen).toBeLessThan(1000);
+  expect(tinyLen).toBeGreaterThan(500);
+
+  // DAR-292 FB-163: clamped to the 24,000-byte ceiling — an absurdly large ?max must not
+  // exceed it. This exercises the ceiling: if MEMORY_INDEX_BYTE_CAP_MAX were removed, 400
+  // padded nodes render well over 24,000 bytes uncapped.
+  const huge = await api.request(`/memory/index?project=${p.prefix}&max=99999`);
+  expect(huge.status).toBe(200);
+  expect(new TextEncoder().encode(await huge.text()).length).toBeLessThan(24000);
+
+  const bad = await api.request(`/memory/index?project=${p.prefix}&max=notanumber`);
+  expect(bad.status).toBe(400);
 });
 
 test('memory index excludes a superseded node', async () => {
@@ -1855,6 +1977,155 @@ test('a reference node is accepted and renders after decision nodes in the index
   expect(referenceIdx).toBeGreaterThan(decisionIdx);
   expect(text).toContain('Metabase Dashboard');
 });
+
+// DAR-291: migrated notes carry a whole markdown body as "the observation" — a leading H1,
+// blank lines, a `## Context` subheading — and rendering that verbatim leaked stray `## …`
+// lines into the index that looked exactly like the `## <type>` group headings the renderer
+// itself emits. Must flatten to one line: no `#`, no embedded newline, no group corruption.
+test('an observation with an H1 and H2 body renders as one flattened line with no # and no newline', async () => {
+  const p = await project();
+  const body = [
+    '# saturn workspace',
+    '',
+    '## Current Phase: Phase 1 (Foundation)',
+    '',
+    'We are **building** the _core_ engine and it is going well so far, onward.',
+  ].join('\n');
+  await req('POST', '/memory/remember', {
+    node: { name: 'Migrated Note', type: 'gotcha', project: p.prefix },
+    observations: [body],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  expect(r.status).toBe(200);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Migrated Note'));
+  expect(line).toBeDefined();
+  expect(line).not.toContain('#');
+  expect(line).toContain('We are building the core engine and it is going well so far, onward.');
+
+  // no line anywhere in the whole document starts with # unless it is a real `## <type>` group
+  // heading or the leading `# Memory index` title — i.e. every OTHER line is flattener output.
+  for (const l of text.split('\n')) {
+    if (l.startsWith('#')) {
+      expect(l === '# Memory index — ' + p.prefix || /^## [a-z]+$/.test(l)).toBe(true);
+    }
+  }
+});
+
+// DAR-291 FB-164 LOW: the old assertions (ends with an ellipsis, total length <= 141, no
+// trailing space before the ellipsis) all stayed green even under a hard 140-char slice with
+// no word-boundary logic at all — trimEnd() already guarantees no trailing space, so the word
+// boundary itself was never actually exercised, only the flattening was. This version plants a
+// long, distinctive run of "X"s straddling character 140: a correct word-boundary cut backs up
+// past the whole word and never emits a single "X", while a hard 140-char slice necessarily
+// keeps a partial run of them.
+test('a flattened observation truncates to 140 chars on a word boundary with an ellipsis', async () => {
+  const p = await project();
+  const prefix = 'Short prefix words here that stay under the character limit for sure and then comes more filler text to reach a nice long run'.slice(0, 125);
+  const xs = 'X'.repeat(40);
+  const body = `# heading\n\n${prefix}${xs} final words after that point for good measure.`;
+  await req('POST', '/memory/remember', {
+    node: { name: 'Long Note', type: 'gotcha', project: p.prefix },
+    observations: [body],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Long Note'))!;
+  const summary = line.split('— ')[1]!;
+  expect(summary.endsWith('…')).toBe(true);
+  expect(summary.length).toBeLessThanOrEqual(141); // 140 chars + ellipsis
+  expect(summary.slice(0, -1).endsWith(' ')).toBe(false); // cut lands on a word, not mid-space
+  // the real word-boundary assertion: a hard 140-char slice would keep a partial run of "X"s
+  // (the marker word straddles position 140); a word-boundary cut excludes the whole word.
+  expect(summary).not.toContain('X');
+});
+
+// DAR-291 FB-164 LOW: irregular whitespace (tabs, multiple blank lines, double spaces from a
+// pasted body) must collapse to single spaces, not just have newlines removed.
+test('a flattened observation collapses tabs and repeated whitespace to single spaces', async () => {
+  const p = await project();
+  const body = '# Title\n\n\nFirst   part\twith\t\ttabs.\n\n\n\nSecond    part   with    extra   spaces.';
+  await req('POST', '/memory/remember', {
+    node: { name: 'Whitespace Note', type: 'gotcha', project: p.prefix },
+    observations: [body],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Whitespace Note'))!;
+  const summary = line.split('— ')[1]!;
+  expect(summary).toBe('First part with tabs. Second part with extra spaces.');
+  expect(summary).not.toMatch(/ {2}/);
+  expect(summary).not.toMatch(/\t/);
+});
+
+// DAR-291 FB-164 LOW: an observation that is ONLY a heading (the live example in the row,
+// "# saturn workspace") used to flatten to "" and render the misleading "(no observations)" —
+// the node had real text, just no body below its title.
+test('an observation that is only a heading renders the heading text, not "(no observations)"', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', {
+    node: { name: 'Heading Only Note', type: 'gotcha', project: p.prefix },
+    observations: ['# saturn workspace'],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Heading Only Note'))!;
+  expect(line).toContain('saturn workspace');
+  expect(line).not.toContain('(no observations)');
+  expect(line).not.toContain('#');
+});
+
+// DAR-291 FB-164 LOW: `__x__` used to be treated as a bold delimiter alongside `**x**`, which
+// mangled a dunder filename like `__init__.py` into `init.py`.
+test('a dunder identifier like __init__.py is not mangled by the emphasis stripper', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', {
+    node: { name: 'Dunder Note', type: 'gotcha', project: p.prefix },
+    observations: ['the extractor reads __init__.py and skips it'],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Dunder Note'))!;
+  expect(line).toContain('__init__.py');
+});
+
+// DAR-291 FB-164 LOW: two `---` lines are only frontmatter delimiters at the very start of the
+// body AND when what they enclose actually looks like YAML — a leading pair that is really two
+// markdown thematic breaks must not swallow the paragraph between them.
+test('a leading --- / --- pair with no YAML content inside is not treated as frontmatter', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', {
+    node: { name: 'Horizontal Rules Note', type: 'gotcha', project: p.prefix },
+    observations: ['---\n\nthis paragraph must survive\n\n---\n\nfollowed by more real text'],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Horizontal Rules Note'))!;
+  expect(line).toContain('this paragraph must survive');
+});
+
+// DAR-291 FB-164 LOW: real YAML frontmatter (a `key: value` line between the --- delimiters) is
+// still stripped — the fix above narrows the heuristic, it does not remove frontmatter handling.
+test('real YAML-ish frontmatter between leading --- delimiters is still stripped', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', {
+    node: { name: 'Real Frontmatter Note', type: 'gotcha', project: p.prefix },
+    observations: ['---\ntitle: some note\ntags: a, b\n---\n\nthe real observation text'],
+  });
+  const r = await api.request(`/memory/index?project=${p.prefix}`);
+  const text = await r.text();
+  const line = text.split('\n').find((l) => l.includes('Real Frontmatter Note'))!;
+  expect(line).toContain('the real observation text');
+  expect(line).not.toContain('title:');
+});
+
+// DAR-291 FB-164 LOW: the previous "byte cap still holds with flattened multi-line
+// observations" test passed unchanged on pre-DAR-291 HEAD too (verified: same assertions, same
+// seed, green on the old api.ts) — the server's byte cap is enforced by the index route's own
+// drop loop, entirely independent of flattenObs/truncateObs, so it was never actually a
+// regression guard for the flattening change and is removed rather than kept as a false
+// signal. The cap itself is already covered by 'memory index caps its output under 24,000
+// bytes and ends with the omitted-node count' above, with or without multi-line bodies.
 
 // minimal store-only zip reader: enough to read back what buildZip (api.ts) writes, without a
 // dependency neither this file nor api.ts otherwise needs.
