@@ -4015,7 +4015,7 @@ api.get('/memory/index', async (c) => {
   }
 
   const now = Date.now();
-  type Ranked = { node: MemoryNode & { _id: ObjectId }; score: number; line: string };
+  type Ranked = { node: MemoryNode & { _id: ObjectId }; score: number; line: string; own: boolean };
   const ranked: Ranked[] = nodes.map((n) => {
     const typeIdx = MEMORY_INDEX_TYPE_ORDER.indexOf(n.type);
     const typeWeight = MEMORY_INDEX_TYPE_ORDER.length - (typeIdx === -1 ? MEMORY_INDEX_TYPE_ORDER.length : typeIdx);
@@ -4029,21 +4029,27 @@ api.get('/memory/index', async (c) => {
     const lastObs = n.observations[n.observations.length - 1]?.text;
     const summary = lastObs ? truncateObs(flattenObs(lastObs)) : '';
     const line = `- **${n.name}** (${n.type}) — ${summary || '(no observations)'}`;
-    return { node: n as MemoryNode & { _id: ObjectId }, score, line };
+    // DAR-301: n.project is only ever non-null when a project scope was requested (the no-project
+    // query matches project:null exclusively, so `own` is unconditionally false there and every
+    // comparator below collapses to its pre-fix form byte-for-byte).
+    const own = scope.id !== null && n.project !== null && String(n.project) === String(scope.id);
+    return { node: n as MemoryNode & { _id: ObjectId }, score, line, own };
   });
 
-  // group by type in the fixed order above, each group internally ranked highest score first
+  // group by type in the fixed order above; own-project nodes first within the group, then highest
+  // score first. `own` is always false with no project scope, so this is identical to score-only.
   const byType = new Map<MemoryNodeType, Ranked[]>();
   for (const r of ranked) {
     const list = byType.get(r.node.type) ?? [];
     list.push(r);
     byType.set(r.node.type, list);
   }
-  for (const list of byType.values()) list.sort((a, b) => b.score - a.score);
+  for (const list of byType.values()) list.sort((a, b) => (a.own !== b.own ? (a.own ? -1 : 1) : b.score - a.score));
   const order = [...MEMORY_INDEX_TYPE_ORDER, ...[...byType.keys()].filter((t) => !MEMORY_INDEX_TYPE_ORDER.includes(t))];
 
-  // global lowest-first drop order, used only to decide what falls off the cap
-  const dropOrder = [...ranked].sort((a, b) => a.score - b.score);
+  // drop order: global nodes lowest-score-first, THEN own-project nodes lowest-score-first, so the
+  // byte cap always eats global nodes before it touches anything the caller's own project wrote.
+  const dropOrder = [...ranked].sort((a, b) => (a.own !== b.own ? (a.own ? 1 : -1) : a.score - b.score));
   const dropped = new Set<Ranked>();
 
   const render = (omittedCount: number): string => {

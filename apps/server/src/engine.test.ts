@@ -1898,6 +1898,45 @@ test('memory index excludes a superseded node', async () => {
   expect(text).toContain('New Index Pick');
 });
 
+// DAR-301: the byte cap must drop GLOBAL nodes before it drops any node scoped to the project the
+// caller actually asked for — otherwise a project view with enough global litter around it renders
+// the identical global index and carries nothing project-specific.
+test('DAR-301: byte cap drops global nodes before the requested project\'s own nodes', async () => {
+  const p = await project();
+  // global bulk uses 'decision' (highest weight in MEMORY_INDEX_TYPE_ORDER) and the project's own
+  // nodes use 'reference' (lowest weight): with near-identical recency and zero inbound edges on
+  // both sides, this guarantees the own nodes score LOWER than the global ones, so a plain
+  // score-ascending drop order (the pre-fix behaviour) would drop the caller's own nodes before
+  // touching the global litter around them.
+  for (let i = 0; i < 300; i++) {
+    await req('POST', '/memory/remember', {
+      node: { name: `Global Bulk Node ${i}`, type: 'decision' },
+      observations: [`global observation padding this line out to something realistic for node ${i}, so the index has real bytes to cap`],
+    });
+  }
+  for (let i = 0; i < 5; i++) {
+    await req('POST', '/memory/remember', {
+      node: { name: `${p.prefix} Own Node ${i}`, type: 'reference', project: p.prefix },
+      observations: [`project-scoped observation for own node ${i}, this is the caller's own project and must survive the cap`],
+    });
+  }
+
+  const projectIdx = await api.request(`/memory/index?project=${p.prefix}`);
+  expect(projectIdx.status).toBe(200);
+  const projectText = await projectIdx.text();
+  expect(projectText).toMatch(/\d+ node\(s\) omitted/);
+  for (let i = 0; i < 5; i++) {
+    expect(projectText).toContain(`${p.prefix} Own Node ${i}`);
+  }
+
+  const globalIdx = await api.request('/memory/index');
+  expect(globalIdx.status).toBe(200);
+  const globalText = await globalIdx.text();
+  for (let i = 0; i < 5; i++) {
+    expect(globalText).not.toContain(`${p.prefix} Own Node ${i}`);
+  }
+});
+
 test('both memory routes are local-only', async () => {
   const p = await project();
   const headers = { 'x-forwarded-host': 'darbar.ngrok.app' };
