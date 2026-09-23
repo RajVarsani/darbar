@@ -112,7 +112,7 @@
 <div class="sub">local-only console. this page and the full api <b>403 through the tunnel</b>; only boards are shared.</div>
 <div class="grid" id="grid"><div class="empty">loading…</div></div>
 <div id="archived"></div>
-<div class="note">boards open on the tunnel url (shareable). manage projects via the api or /darbar-project-init.</div>
+<div class="note">boards open locally from here; use ⋯ → share link for the tunnel url. manage projects via the api or /darbar-project-init.</div>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -122,14 +122,19 @@ function cardHtml(p) {
   // so they leave the denominator instead of reading as unfinished work from the outside
   const total = c.tasks - (c.cancelled || 0);
   const pct = total ? Math.round(c.done / total * 100) : 0;
-  // the card always opens the darbar board, same tab; the LINEAR chip is the outbound
-  // link to Linear (its own click stops propagation so the card link doesn't also fire —
-  // the chip is a span, not a nested <a>, because .card-link already wraps the card in one)
-  const href = p.boardUrl;
+  // the card always opens the LOCAL board, same tab — the console itself only ever runs
+  // locally, so a relative /p/<capId> on the console's own origin is always the right board
+  // (and is the one whose memory routes are not 403'd). the tunnel boardUrl survives only as
+  // the ⋯ menu's "share link" item, for handing the board to someone off this machine.
+  // the LINEAR chip is the outbound link to Linear (its own click stops propagation so the
+  // card link doesn't also fire — the chip is a span, not a nested <a>, because .card-link
+  // already wraps the card in one)
+  const href = `/p/${encodeURIComponent(p.capId)}`;
   const chip = p.linearUrl
     ? `<span class="prefix linear" role="link" tabindex="0" title="open in Linear" onclick="event.stopPropagation(); window.open('${esc(p.linearUrl)}','_blank','noopener')">LINEAR</span>`
     : '';
   const linearItem = p.linearUrl ? `<a href="${esc(p.linearUrl)}" target="_blank" rel="noopener">open in Linear</a>` : '';
+  const shareItem = `<a href="${esc(p.boardUrl)}" target="_blank" rel="noopener">share link</a>`;
   return `<div class="card" data-prefix="${esc(p.prefix)}" data-name="${esc(p.name)}">
       <a class="card-link" href="${esc(href)}">
         <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span>${chip}</h2>
@@ -142,7 +147,7 @@ function cardHtml(p) {
         <div class="progress"><i style="width:${pct}%"></i></div>
       </a>
       <button type="button" class="menu-trigger" data-action="toggle-menu" aria-haspopup="true" aria-expanded="false" aria-label="project actions">&#8943;</button>
-      <div class="card-menu" hidden>${linearItem}<button type="button" data-action="open-archive">archive</button></div>
+      <div class="card-menu" hidden>${linearItem}${shareItem}<button type="button" data-action="open-archive">archive</button></div>
       <div class="archive-panel" hidden>
         <label class="archive-label" for="reason-${esc(p.prefix)}">reason (optional)</label>
         <input type="text" class="archive-reason" id="reason-${esc(p.prefix)}" placeholder="why is this done?">
@@ -162,14 +167,14 @@ function archCardHtml(p) {
   const openRows = (typeof p.archivedOpenRows === 'number' && p.archivedOpenRows > 0)
     ? `<div class="openrows">${esc(p.archivedOpenRows)} rows left open</div>` : '';
   return `<div class="card arch" data-prefix="${esc(p.prefix)}" data-name="${esc(p.name)}">
-      <a class="card-link" href="${esc(p.boardUrl)}">
+      <a class="card-link" href="/p/${encodeURIComponent(p.capId)}">
         <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span></h2>
         <div class="meta">${dateStr ? 'archived ' + esc(dateStr) : 'archived'}</div>
         ${reason}
         ${openRows}
       </a>
       <button type="button" class="menu-trigger" data-action="toggle-menu" aria-haspopup="true" aria-expanded="false" aria-label="project actions">&#8943;</button>
-      <div class="card-menu" hidden><button type="button" data-action="unarchive">unarchive</button></div>
+      <div class="card-menu" hidden><a href="${esc(p.boardUrl)}" target="_blank" rel="noopener">share link</a><button type="button" data-action="unarchive">unarchive</button></div>
       <div class="card-error" hidden></div>
     </div>`;
 }

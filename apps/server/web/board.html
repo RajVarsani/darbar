@@ -1839,8 +1839,14 @@ function memRowHtml(n){
     ${n.supersededBy?`<span class="badge off" title="superseded by ${esc(n.supersededBy)}">SUPERSEDED</span>`:''}
   </div>`;
 }
+// DAR-306: the page has no way to know the local port from inside a share-link view (location.host
+// is the tunnel's host once x-forwarded-host fired the 403), so this names the path only and asks
+// the reader to open it on the machine actually running darbar, rather than guessing a port.
+function localMemHint(){
+  return `open <code>/p/${esc(capId)}</code> on the machine running darbar to see it`;
+}
 function renderMemResults(){
-  if (state.mem.forbidden) return '<div class="empty">memory is local-only — this board is open through a share link, which never carries it</div>';
+  if (state.mem.forbidden) return `<div class="empty">memory is local-only — this board is open through a share link, which never carries it. ${localMemHint()}.</div>`;
   if (state.mem.error) return `<div class="empty">${esc(state.mem.error)}</div>`;
   if (state.mem.loading) return `<div class="empty">${state.mem.q.trim()?'searching…':'loading…'}</div>`;
   if (!state.mem.nodes.length) {
@@ -2000,7 +2006,7 @@ function renderMemDrawer(dr, backBtn, closeBtn){
   const head = `<div class="dhead"><span class="id">MEMORY</span><span class="grow"></span>${closeBtn}</div>`;
   if (!mn){ state.sel = null; return renderDrawer(); }
   if (mn.forbidden){
-    dr.innerHTML = `${head}<div class="dbody"><div class="note">memory is local-only — this board is open through a share link, which never carries it</div></div>`;
+    dr.innerHTML = `${head}<div class="dbody"><div class="note">memory is local-only — this board is open through a share link, which never carries it. ${localMemHint()}.</div></div>`;
     return;
   }
   if (mn.loading && !mn.node){
