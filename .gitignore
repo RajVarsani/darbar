@@ -13,3 +13,4 @@ data/watchdog-state/
 
 # session snapshot + watchdog bookkeeping: machine state, not source
 data/handoff.md
+__pycache__/
