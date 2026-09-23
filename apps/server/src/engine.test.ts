@@ -1940,6 +1940,156 @@ test('/memory/list is local-only, same as recall and index', async () => {
   expect(await r.text()).toContain('local-only');
 });
 
+// ---------- DAR-308: scope=own on list/recall, and the /memory/graph view ----------
+
+test('DAR-308: scope=own on /memory/list returns only the project\'s own nodes, never global ones', async () => {
+  const a = await project();
+  const b = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Own A Node', type: 'gotcha', project: a.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Own B Node', type: 'gotcha', project: b.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Shared Global Node', type: 'gotcha' } });
+
+  const own = await req<Listed & { scope: string }>('GET', `/memory/list?project=${a.prefix}&scope=own`);
+  expect(own.status).toBe(200);
+  expect(own.body.nodes.map((n) => n.name)).toEqual(['Own A Node']);
+  expect(own.body.total).toBe(1);
+  expect(own.body.scope).toBe('own');
+
+  // default stays project + global, so existing callers are unchanged
+  const all = await req<Listed>('GET', `/memory/list?project=${a.prefix}`);
+  expect(all.body.nodes.map((n) => n.name).sort()).toEqual(['Own A Node', 'Shared Global Node']);
+
+  const bad = await req('GET', `/memory/list?project=${a.prefix}&scope=mine`);
+  expect(bad.status).toBe(400);
+});
+
+test('DAR-308: scope=own on /memory/recall drops global hits AND global neighbours reached by the walk', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Widget Hub', type: 'service' } }); // global
+  await req('POST', '/memory/remember', { node: { name: 'Widget Global Gotcha', type: 'gotcha' } }); // global, text hit
+  await req('POST', '/memory/remember', {
+    node: { name: 'Widget Local Fact', type: 'gotcha', project: p.prefix },
+    edges: [{ to: 'Widget Hub', relation: 'DEPENDS_ON' }],
+  });
+
+  const own = await req<Recalled>('GET', `/memory/recall?q=Widget&project=${p.prefix}&scope=own`);
+  expect(own.status).toBe(200);
+  expect(own.body.nodes.map((n) => n.name)).toEqual(['Widget Local Fact']);
+  expect(own.body.edges).toEqual([]); // the edge to the global hub has a dropped end
+
+  const all = await req<Recalled>('GET', `/memory/recall?q=Widget&project=${p.prefix}`);
+  const allNames = all.body.nodes.map((n) => n.name);
+  expect(allNames).toContain('Widget Hub');
+  expect(allNames).toContain('Widget Global Gotcha');
+  expect(all.body.edges).toHaveLength(1);
+});
+
+type Graphed = {
+  nodes: { id: string; name: string; type: string; project: string | null; text: string; observationCount: number; supersededBy?: string | null }[];
+  edges: { id: string; from: string; to: string; relation: string }[];
+  total: number; capped: boolean; cap: number; scope: string;
+};
+
+test('DAR-308: /memory/graph never leaks another project\'s nodes and honours scope=own', async () => {
+  const a = await project();
+  const b = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Graph Hub', type: 'service' } }); // global
+  await req('POST', '/memory/remember', {
+    node: { name: 'Graph Secret A', type: 'gotcha', project: a.prefix },
+    observations: ['must never reach project B'],
+    edges: [{ to: 'Graph Hub', relation: 'DEPENDS_ON' }],
+  });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Graph B Node', type: 'decision', project: b.prefix },
+    edges: [{ to: 'Graph Hub', relation: 'USES' }],
+  });
+
+  const fromB = await req<Graphed>('GET', `/memory/graph?project=${b.prefix}`);
+  expect(fromB.status).toBe(200);
+  expect(fromB.body.nodes.map((n) => n.name).sort()).toEqual(['Graph B Node', 'Graph Hub']);
+  expect(fromB.body.edges.map((e) => e.relation)).toEqual(['USES']); // A's DEPENDS_ON never shows
+  expect(JSON.stringify(fromB.body)).not.toContain('must never reach project B');
+
+  const ownB = await req<Graphed>('GET', `/memory/graph?project=${b.prefix}&scope=own`);
+  expect(ownB.body.nodes.map((n) => n.name)).toEqual(['Graph B Node']);
+  expect(ownB.body.scope).toBe('own');
+
+  const global = await req<Graphed>('GET', '/memory/graph');
+  expect(global.body.nodes.map((n) => n.name)).toEqual(['Graph Hub']);
+  expect(global.body.edges).toEqual([]);
+});
+
+test('DAR-308: /memory/graph returns edges only where both ends are in the returned node set', async () => {
+  const p = await project();
+  await req('POST', '/memory/remember', { node: { name: 'Edge Hub', type: 'service' } }); // global
+  await req('POST', '/memory/remember', { node: { name: 'Edge Target', type: 'service', project: p.prefix } });
+  await req('POST', '/memory/remember', {
+    node: { name: 'Edge Source', type: 'gotcha', project: p.prefix },
+    edges: [{ to: 'Edge Hub', relation: 'DEPENDS_ON' }, { to: 'Edge Target', relation: 'RELATES_TO' }],
+  });
+  // a superseded node is out of the default set; the SUPERSEDES edge into it must go with it
+  await req('POST', '/memory/remember', { node: { name: 'Edge Old', type: 'decision', project: p.prefix } });
+  await req('POST', '/memory/remember', { node: { name: 'Edge New', type: 'decision', project: p.prefix } });
+  expect((await req('POST', '/memory/supersede', { nodeName: 'Edge Old', by: 'Edge New', project: p.prefix })).status).toBe(200);
+
+  const own = await req<Graphed>('GET', `/memory/graph?project=${p.prefix}&scope=own`);
+  const ids = new Set(own.body.nodes.map((n) => n.id));
+  expect(own.body.nodes.map((n) => n.name)).not.toContain('Edge Hub');
+  expect(own.body.nodes.map((n) => n.name)).not.toContain('Edge Old');
+  expect(own.body.edges.map((e) => e.relation)).toEqual(['RELATES_TO']);
+  for (const e of own.body.edges) { expect(ids.has(e.from)).toBe(true); expect(ids.has(e.to)).toBe(true); }
+
+  // widening the scope and including superseded brings both edges back, ids resolving to nodes
+  const all = await req<Graphed>('GET', `/memory/graph?project=${p.prefix}&includeSuperseded=true`);
+  const allIds = new Set(all.body.nodes.map((n) => n.id));
+  expect(all.body.edges.map((e) => e.relation).sort()).toEqual(['DEPENDS_ON', 'RELATES_TO', 'SUPERSEDES']);
+  for (const e of all.body.edges) { expect(allIds.has(e.from)).toBe(true); expect(allIds.has(e.to)).toBe(true); }
+  expect(all.body.nodes.find((n) => n.name === 'Edge Old')!.supersededBy).toBe('Edge New');
+});
+
+test('DAR-308: /memory/graph caps at 500 nodes and says so, own-project nodes kept first', async () => {
+  const p = await project();
+  // global nodes observed AFTER the project's own, so recency alone would rank them first
+  await req('POST', '/memory/remember', { node: { name: 'Cap Own Node', type: 'gotcha', project: p.prefix } });
+  for (let i = 0; i < 500; i++) {
+    await req('POST', '/memory/remember', { node: { name: `Cap Global ${i}`, type: 'gotcha' } });
+  }
+  const r = await req<Graphed>('GET', `/memory/graph?project=${p.prefix}`);
+  expect(r.status).toBe(200);
+  expect(r.body.nodes).toHaveLength(500);
+  expect(r.body.total).toBe(501);
+  expect(r.body.capped).toBe(true);
+  expect(r.body.cap).toBe(500);
+  expect(r.body.nodes.map((n) => n.name)).toContain('Cap Own Node');
+
+  const own = await req<Graphed>('GET', `/memory/graph?project=${p.prefix}&scope=own`);
+  expect(own.body.capped).toBe(false);
+  expect(own.body.total).toBe(1);
+});
+
+test('DAR-308: /memory/graph ships a short text excerpt, not whole observations, and rejects unknown query keys', async () => {
+  const p = await project();
+  const long = 'x'.repeat(2000);
+  await req('POST', '/memory/remember', { node: { name: 'Long Node', type: 'gotcha', project: p.prefix }, observations: [long, 'second'] });
+  const r = await req<Graphed & { nodes: Record<string, unknown>[] }>('GET', `/memory/graph?project=${p.prefix}&scope=own`);
+  const n = r.body.nodes[0]!;
+  expect(n.observations).toBeUndefined();
+  expect(n.observationCount).toBe(2);
+  expect((n.text as string).length).toBeLessThanOrEqual(401);
+
+  const bad = await req('GET', `/memory/graph?project=${p.prefix}&limit=10`);
+  expect(bad.status).toBe(400);
+  expect(bad.error).toContain('limit');
+  const badScope = await req('GET', `/memory/graph?project=${p.prefix}&scope=everything`);
+  expect(badScope.status).toBe(400);
+});
+
+test('/memory/graph is local-only, same as list and recall', async () => {
+  const p = await project();
+  const r = await api.request(`/memory/graph?project=${p.prefix}`, { headers: { 'x-forwarded-host': 'darbar.ngrok.app' } });
+  expect(r.status).toBe(403);
+});
+
 // ---------- memory index + export (DAR-280) ----------
 
 test('memory index caps its output under 24,000 bytes and ends with the omitted-node count', async () => {

@@ -590,6 +590,83 @@
     font-size:13px;background:var(--beige-2);color:var(--ink);resize:vertical}
   .mform textarea{min-height:56px}
   .mform .mformrow{display:flex;gap:8px;margin-top:8px;align-items:center}
+
+  /* ---------- memory graph (DAR-308) ----------
+     the scope chip is outlined and muted on purpose: the type chip is the filled one, so a node of
+     type "project" can never be read as "this is the project's own node" */
+  body[data-view="memory"] .viewbar{flex-wrap:wrap;row-gap:8px}
+  .filters.memmode{margin-left:4px}
+  .chip.scope{background:transparent;border:1.5px solid var(--ink-faint);color:var(--ink-soft);font-size:10px;
+    padding:1px 6px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip.scope.own{border-color:var(--ink);color:var(--ink)}
+  .mrow.scoped{grid-template-columns:160px 90px 70px minmax(0,1fr) 70px auto}
+  .mgraph{position:relative;height:max(480px,calc(100vh - 250px));overflow:hidden;background:var(--beige-2);
+    --dot:rgba(28,28,28,.13)}
+  .mgraph svg{display:block;width:100%;height:100%;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+  .mgraph svg:active{cursor:grabbing}
+  .mgraph.busy::after{content:"loading…";position:absolute;top:12px;left:50%;transform:translateX(-50%);
+    font-family:var(--mono);font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
+    background:var(--ink);color:var(--lime);padding:3px 9px}
+  .mgraph .e line{stroke:var(--ink);stroke-opacity:.28;stroke-width:1.25;transition:stroke-opacity .12s}
+  .mgraph .e .hit{stroke:transparent;stroke-width:10;stroke-opacity:1}
+  .mgraph .e.sup line.v{stroke-dasharray:4 3}
+  .mgraph .e.hot line.v{stroke-opacity:1;stroke-width:2}
+  .mgraph .e.dim line.v{stroke-opacity:.06}
+  .mgraph .elab{pointer-events:none;opacity:0;transition:opacity .1s}
+  .mgraph .elab.hot{opacity:1}
+  .mgraph .elab rect{fill:var(--ink)}
+  .mgraph .elab text{fill:var(--lime);font-family:var(--mono);font-size:8.5px;font-weight:800;letter-spacing:.06em}
+  .mgraph .n{cursor:pointer;transition:opacity .12s}
+  .mgraph .n .sh{fill:var(--ink)}
+  .mgraph .n .b{stroke:var(--ink);stroke-width:2}
+  .mgraph .n.glob .b{stroke:rgba(28,28,28,.5);stroke-width:1.25}
+  .mgraph .n.sup .b{fill:var(--beige-2)!important;stroke-dasharray:3 2}
+  .mgraph .n .halo{fill:var(--lime);stroke:var(--ink);stroke-width:2;opacity:0}
+  .mgraph .n.match .halo,.mgraph .n.sel .halo{opacity:1}
+  .mgraph .n.sel .halo{stroke-width:2.5}
+  .mgraph .n text{font-family:var(--mono);font-size:10px;font-weight:700;fill:var(--ink);paint-order:stroke;
+    stroke:var(--beige-2);stroke-width:3px;stroke-linejoin:round;opacity:0;pointer-events:none}
+  .mgraph .n.own text{font-size:11px;font-weight:800;opacity:1}
+  .mgraph .n.hub text,.mgraph svg.zin .n text,.mgraph .n.match text,.mgraph .n.sel text,.mgraph .n.hot text,
+  .mgraph .n.near text{opacity:1}
+  .mgraph .n.sup text{text-decoration:line-through;fill:var(--ink-soft)}
+  .mgraph .n.dim{opacity:.13}
+  .mgraph .n.dim text{opacity:0}
+  .mgraph .n:hover .b{stroke:var(--ink);stroke-width:2.5}
+  .mgpanel{position:absolute;background:var(--beige);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink)}
+  .mglegend{left:12px;bottom:12px;padding:8px 10px 9px;font-family:var(--mono);font-size:10.5px;min-width:172px}
+  .mglegend .h{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);margin:0 0 5px}
+  .mglegend .h + .h{margin-top:8px}
+  .mglegend .lrow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:8px;align-items:center;width:100%;
+    padding:2px 4px;margin:0 -4px;width:calc(100% + 8px);text-align:left;font-weight:700}
+  .mglegend button.lrow:hover{background:var(--beige-2)}
+  .mglegend .lrow.on{background:var(--lime)}
+  .mglegend .lrow .c{color:var(--ink-soft);font-weight:700;font-variant-numeric:tabular-nums}
+  .mglegend .sw{width:11px;height:11px;border:1.5px solid var(--ink)}
+  .mglegend .sw.own{box-shadow:2px 2px 0 var(--ink)}
+  .mglegend .sw.glob{border-color:rgba(28,28,28,.5);opacity:.55}
+  .mglegend .sw.sup{background:var(--beige-2);border-style:dashed}
+  .mglegend .sep{border-top:1.5px solid var(--hair);margin:7px 0 6px}
+  .mgctl{right:12px;top:12px;display:flex;flex-direction:column;box-shadow:3px 3px 0 var(--ink)}
+  .mgctl button{width:30px;height:30px;display:grid;place-items:center;border-bottom:2px solid var(--ink);color:var(--ink)}
+  .mgctl button:last-child{border-bottom:none}
+  .mgctl button:hover{background:var(--ink);color:var(--lime)}
+  .mgcap{left:12px;top:12px;display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;font-family:var(--mono);
+    font-size:11px;font-weight:700}
+  .mgcap .badge{font-size:9.5px}
+  .mgmeta{right:12px;bottom:12px;padding:4px 9px;font-family:var(--mono);font-size:10.5px;font-weight:700;
+    color:var(--ink-soft);box-shadow:none;border-width:1.5px;background:var(--beige-2)}
+  .mgmeta b{color:var(--ink)}
+  .mgtip{position:absolute;z-index:5;pointer-events:none;max-width:300px;padding:9px 11px 10px;background:var(--beige);
+    border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink)}
+  .mgtip .tn{font-family:var(--mono);font-weight:800;font-size:12.5px;line-height:1.3;margin-bottom:6px;word-break:break-word}
+  .mgtip .tc{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+  .mgtip .tx{font-size:12px;color:var(--ink-soft);display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+  .mgtip .tm{font-family:var(--mono);font-size:10px;color:var(--ink-soft);margin-top:6px}
+  .mgempty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;font-family:var(--mono);
+    font-size:12.5px;color:var(--ink-soft);padding:24px}
+  .mgempty .pbtn{margin-top:12px;font-family:var(--mono);font-size:11px;font-weight:700}
+  @media (prefers-reduced-motion:reduce){ .mgraph .n,.mgraph .e line{transition:none} }
 </style>
 </head>
 <body data-view="board">
@@ -684,11 +761,15 @@ const state = {
   parkArm: null,           // the one parkId whose remedy button is armed; transient, never persisted
   // memory tab (DAR-283): list state. forbidden mirrors state.parked's null-means-unavailable
   // shape — a 403 here means "not allowed to look", never "nothing found"
-  mem: {q:'', type:'', includeSuperseded:false, loading:false, forbidden:false, error:null, nodes:[], edges:[], total:0},
+  // DAR-308: scope 'own' (this project's nodes only) is the default; 'all' adds global. mode is the
+  // one per-viewer convenience remembered in localStorage. graph is the /memory/graph payload and
+  // graphVer bumps on every fetch, so a re-render with the same graph keeps its DOM and layout.
+  mem: {q:'', type:'', includeSuperseded:false, scope:'own', mode: memStoredMode(), loading:false, forbidden:false, error:null,
+    nodes:[], edges:[], total:0, graph:null, graphVer:0},
   memNode: null,           // open node drawer: {name, loading, forbidden, error, node, out[], in[], armSupersede, superBy, superBusy}
 };
 // mirrors packages/core/src/types.ts MEMORY_NODE_TYPES — read-only client copy for the filter chips
-const MEMORY_NODE_TYPES = ['decision','gotcha','person','service','repo','project','preference'];
+const MEMORY_NODE_TYPES = ['decision','gotcha','person','service','repo','project','preference','reference'];
 
 // tolerates a missing/non-string name: roster entries come from unvalidated project config
 const initials = n => String(n ?? '').split(/[\s-]+/).filter(Boolean).map(w=>w[0]).join('').slice(0,2).toUpperCase();
@@ -1826,14 +1907,32 @@ function heldBandHtml(){
 }
 
 // ---------- memory tab (DAR-283) ----------
+function memStoredMode(){
+  try { return localStorage.getItem('darbar.memMode')==='list' ? 'list' : 'graph'; } catch { return 'graph'; }
+}
+// a node in the caller's scope is either this project's own or global, never another project's,
+// so a non-null project is always this board's prefix
+function memScopeChip(n){
+  const prefix = state.data?.project?.prefix ?? '';
+  return n.project
+    ? `<span class="chip scope own" title="recorded on ${esc(prefix)}">${esc(prefix)}</span>`
+    : `<span class="chip scope" title="global memory, shared by every project">global</span>`;
+}
+function memEmptyScopeHtml(){
+  const prefix = state.data?.project?.prefix ?? 'this project';
+  return `<div>no memory recorded for ${esc(prefix)} yet<br>
+    <span style="color:var(--ink-faint)">global memory is shared by every project</span><br>
+    <button class="pbtn" type="button" data-mem-scope-all>include global</button></div>`;
+}
 function memEdgeCount(name){
   return state.mem.edges.filter(e=>e.from===name||e.to===name).length;
 }
 function memRowHtml(n){
   const firstObs = n.observations?.[0]?.text || '';
-  return `<div class="mrow" data-mem-row="${esc(n.name)}">
+  return `<div class="mrow scoped" data-mem-row="${esc(n.name)}">
     <span class="mname">${esc(n.name)}</span>
     <span class="chip">${esc(n.type)}</span>
+    ${memScopeChip(n)}
     <span class="mobs">${esc(firstObs) || '<span style="color:var(--ink-faint)">no observations</span>'}</span>
     <span class="medges">${memEdgeCount(n.name)} edge${memEdgeCount(n.name)===1?'':'s'}</span>
     ${n.supersededBy?`<span class="badge off" title="superseded by ${esc(n.supersededBy)}">SUPERSEDED</span>`:''}
@@ -1853,6 +1952,7 @@ function renderMemResults(){
     const q = state.mem.q.trim();
     // empty-state text only when the scope truly has zero nodes (or zero of the filtered type) —
     // a blank query with results just renders the list, same rows a search renders
+    if (!q && !state.mem.type && state.mem.scope==='own') return `<div class="empty">${memEmptyScopeHtml()}</div>`;
     return q
       ? `<div class="empty">no matches for “${esc(q)}”${state.mem.type?` in ${esc(state.mem.type)}`:''}</div>`
       : `<div class="empty">nothing in memory yet${state.mem.type?` for type ${esc(state.mem.type)}`:''}</div>`;
@@ -1861,38 +1961,45 @@ function renderMemResults(){
 }
 let memT = null;
 function scheduleMemory(){ clearTimeout(memT); memT = setTimeout(loadMemory, 300); }
-// DAR-303: a blank query browses the graph via /memory/list (recall keeps its q-required contract);
-// typing switches to /memory/recall as before, and clearing the box comes back here.
+let memSeq = 0;
+// DAR-303: a blank query browses via /memory/list (recall keeps its q-required contract); typing
+// switches to /memory/recall, and clearing the box comes back. DAR-308: the graph view fetches the
+// whole scope from /memory/graph instead and searches it client-side (highlight, never refetch).
 async function loadMemory(){
   const q = state.mem.q.trim();
   const prefix = state.data?.project?.prefix;
+  const seq = ++memSeq; // a fast toggle must not let an older response land last
   state.mem.loading = true;
   if (state.view==='memory') renderContent();
+  const empty = () => { state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; };
   try {
-    if (!q){
-      const params = new URLSearchParams({limit:'50', includeSuperseded:String(state.mem.includeSuperseded)});
-      if (prefix) params.set('project', prefix);
-      if (state.mem.type) params.set('type', state.mem.type);
-      const r = await fetch(`/api/memory/list?${params}`);
-      if (r.status===403){ state.mem.forbidden = true; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
+    const params = new URLSearchParams({scope: state.mem.scope, includeSuperseded:String(state.mem.includeSuperseded)});
+    if (prefix) params.set('project', prefix);
+    if (state.mem.type) params.set('type', state.mem.type);
+    let route = 'graph';
+    if (state.mem.mode==='list'){
+      params.set('limit', '50');
+      if (q) params.set('q', q);
+      route = q ? 'recall' : 'list';
+    }
+    const r = await fetch(`/api/memory/${route}?${params}`);
+    if (seq !== memSeq) return;
+    if (r.status===403){ state.mem.forbidden = true; empty(); state.mem.graph = null; }
+    else {
+      const j = await r.json().catch(()=>({}));
+      if (seq !== memSeq) return;
+      if (!r.ok){ state.mem.error = j.error || `${route} failed (http ${r.status})`; empty(); }
       else {
-        const j = await r.json().catch(()=>({}));
-        if (!r.ok){ state.mem.error = j.error || `list failed (http ${r.status})`; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
-        else { state.mem.forbidden=false; state.mem.error=null; state.mem.nodes=j.nodes||[]; state.mem.edges=[]; state.mem.total=j.total||0; }
-      }
-    } else {
-      const params = new URLSearchParams({q, limit:'50', includeSuperseded:String(state.mem.includeSuperseded)});
-      if (prefix) params.set('project', prefix);
-      if (state.mem.type) params.set('type', state.mem.type);
-      const r = await fetch(`/api/memory/recall?${params}`);
-      if (r.status===403){ state.mem.forbidden = true; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
-      else {
-        const j = await r.json().catch(()=>({}));
-        if (!r.ok){ state.mem.error = j.error || `recall failed (http ${r.status})`; state.mem.nodes=[]; state.mem.edges=[]; state.mem.total=0; }
-        else { state.mem.forbidden=false; state.mem.error=null; state.mem.nodes=j.nodes||[]; state.mem.edges=j.edges||[]; state.mem.total=j.nodes.length; }
+        state.mem.forbidden=false; state.mem.error=null;
+        if (route==='graph'){
+          state.mem.graph = {nodes:j.nodes||[], edges:j.edges||[], total:j.total||0, capped:!!j.capped, cap:j.cap};
+          state.mem.graphVer++;
+          state.mem.total = j.total||0;
+        } else if (route==='list'){ state.mem.nodes=j.nodes||[]; state.mem.edges=[]; state.mem.total=j.total||0; }
+        else { state.mem.nodes=j.nodes||[]; state.mem.edges=j.edges||[]; state.mem.total=(j.nodes||[]).length; }
       }
     }
-  } catch { state.mem.error = 'could not reach the memory API: network'; }
+  } catch { if (seq !== memSeq) return; state.mem.error = 'could not reach the memory API: network'; }
   state.mem.loading = false;
   if (state.view==='memory') renderContent();
 }
@@ -1904,6 +2011,7 @@ function openMemNode(name){
   state.sel = {kind:'mem', id:name};
   state.memNode = {name, loading:true, forbidden:false, error:null, node:null, out:[], in:[], armSupersede:false, superBy:'', superBusy:false, superOptions:[]};
   renderDrawer();
+  memGraphRestyle();
   loadMemNode(name);
 }
 async function loadMemNode(name){
@@ -1999,6 +2107,314 @@ async function exportMemory(){
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
   } catch { toast('export failed: network'); }
+}
+
+// ---------- memory graph view (DAR-308) ----------
+// d3 (force + zoom + drag), loaded lazily from jsdelivr the first time the graph opens, drawn as
+// plain SVG so every mark is styled by this page's own CSS variables rather than a library theme.
+// Chosen over cytoscape because cytoscape paints to canvas with its own style language, which
+// would put the board's ink/lime vocabulary behind a second stylesheet.
+// type colours: ink, brick, lime and green are the board's own; the rest are picked to sit beside
+// them on beige without competing with lime, which stays the highlight colour
+const MEM_TYPE_COLOR = {decision:'#1c1c1c', gotcha:'#c2412d', person:'#d8ff7c', service:'#2d8654',
+  repo:'#3a5fb0', project:'#e3a82b', preference:'#9a63c4', reference:'#5bb8c9'};
+const memTypeColor = t => MEM_TYPE_COLOR[t] || '#8a8a8a';
+// global nodes read lighter: the type hue washed toward the canvas beige, never a different hue
+function memTint(hex){
+  const n = parseInt(hex.slice(1), 16), bg = [0xf2, 0xee, 0xe6], k = .5;
+  const c = [(n>>16)&255, (n>>8)&255, n&255].map((v,i)=>Math.round(v*(1-k)+bg[i]*k));
+  return '#' + c.map(v=>v.toString(16).padStart(2,'0')).join('');
+}
+function memHash(str){ let h = 2166136261; for (let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h>>>0; }
+
+let d3Promise = null;
+function loadD3(){
+  if (window.d3) return Promise.resolve(window.d3);
+  if (!d3Promise) d3Promise = new Promise((res, rej)=>{
+    const sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js';
+    sc.onload = ()=>res(window.d3);
+    sc.onerror = ()=>{ d3Promise = null; rej(new Error('d3 failed to load')); };
+    document.head.appendChild(sc);
+  });
+  return d3Promise;
+}
+
+// positions by node id outlive a refetch, so a filter/scope toggle or an added observation redraws
+// the same picture instead of reshuffling it. pinned = dropped there by hand, stays there.
+const memPos = new Map();
+const memG = {sim:null, zoom:null, svg:null, nodes:[], pairs:[], byId:new Map(), near:new Map(),
+  transform:null, refit:true, hoverId:null, hoverPair:null, labels:null, nodeSel:null, edgeSel:null};
+
+function memGraphMatches(){
+  const q = state.mem.q.trim().toLowerCase();
+  if (!q || !state.mem.graph) return null;
+  const hit = new Set();
+  for (const n of state.mem.graph.nodes){
+    if (n.name.toLowerCase().includes(q) || (n.text||'').toLowerCase().includes(q) || n.type===q) hit.add(n.id);
+  }
+  return hit;
+}
+function memGraphCountText(){
+  const g = state.mem.graph; if (!g) return String(state.mem.total);
+  const m = memGraphMatches();
+  return m ? `${m.size} of ${g.nodes.length} match` : String(g.total);
+}
+
+function renderMemGraph(el){
+  const g = state.mem.graph;
+  let box = el.querySelector('#mgraph');
+  if (box && box.dataset.ver === String(state.mem.graphVer)){
+    box.classList.toggle('busy', state.mem.loading);
+    memGraphRestyle();
+    return;
+  }
+  if (!g){ el.innerHTML = '<div class="empty">loading…</div>'; return; }
+  if (!g.nodes.length){
+    const scopeEmpty = state.mem.scope==='own' && !state.mem.type;
+    el.innerHTML = `<div class="mgraph" id="mgraph" data-ver="${state.mem.graphVer}"><div class="mgempty">${scopeEmpty ? memEmptyScopeHtml()
+      : `<div>nothing in memory yet${state.mem.type?` for type ${esc(state.mem.type)}`:''}</div>`}</div></div>`;
+    return;
+  }
+  const icon = d => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6">${d}</svg>`;
+  el.innerHTML = `<div class="mgraph${state.mem.loading?' busy':''}" id="mgraph" data-ver="${state.mem.graphVer}">
+    <svg id="mgsvg" role="img" aria-label="memory graph: ${g.nodes.length} nodes, ${g.edges.length} edges"></svg>
+    ${g.capped?`<div class="mgpanel mgcap"><span class="badge warn">CAPPED</span>showing ${g.nodes.length} of ${g.total} · own first, then newest</div>`:''}
+    <div class="mgpanel mgctl">
+      <button type="button" data-mg="in" title="Zoom in">${icon('<path d="M12 5v14M5 12h14"/>')}</button>
+      <button type="button" data-mg="out" title="Zoom out">${icon('<path d="M5 12h14"/>')}</button>
+      <button type="button" data-mg="fit" title="Fit to screen">${icon('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>')}</button>
+    </div>
+    <div class="mgpanel mglegend" id="mglegend"></div>
+    <div class="mgpanel mgmeta" id="mgmeta"></div>
+    <div class="mgtip" id="mgtip" hidden></div>
+  </div>`;
+  const ver = String(state.mem.graphVer);
+  loadD3().then(d3=>{ if ($('mgraph')?.dataset.ver===ver) buildMemGraph(d3); })
+    .catch(()=>{ const b = $('mgraph'); if (b && b.dataset.ver===ver) b.innerHTML = '<div class="mgempty">could not load the graph library from cdn.jsdelivr.net · the List view still works</div>'; });
+}
+
+function buildMemGraph(d3){
+  const g = state.mem.graph;
+  const svgEl = $('mgsvg'); if (!svgEl) return;
+  memG.sim?.stop();
+  const W = svgEl.clientWidth || 900, H = svgEl.clientHeight || 560;
+
+  const deg = new Map();
+  for (const e of g.edges){ deg.set(e.from, (deg.get(e.from)||0)+1); deg.set(e.to, (deg.get(e.to)||0)+1); }
+  // one line per connected pair, whatever the number of relations or their directions
+  const pairMap = new Map();
+  for (const e of g.edges){
+    if (e.from===e.to) continue;
+    const [a, b] = e.from < e.to ? [e.from, e.to] : [e.to, e.from];
+    const k = `${a}|${b}`;
+    if (!pairMap.has(k)) pairMap.set(k, {k, source:a, target:b, fwd:false, back:false, rels:new Set()});
+    const p = pairMap.get(k);
+    if (e.from===a) p.fwd = true; else p.back = true;
+    p.rels.add(e.relation);
+  }
+  const pairs = [...pairMap.values()];
+
+  // deterministic seed: sorted by id, positions from the cache, else near a cached neighbour, else a
+  // hash of the id. With the randomLcg below, the same graph always settles into the same picture.
+  const nodes = g.nodes.slice().sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0).map(n=>{
+    const d = deg.get(n.id)||0, own = !!n.project;
+    const r = (own ? 7.5 : 5) + Math.min(9, Math.sqrt(d)*2.1);
+    const p = memPos.get(n.id);
+    return {...n, own, deg:d, r, sup:!!n.supersededBy, x:p?.x, y:p?.y, fx:p?.pinned?p.x:null, fy:p?.pinned?p.y:null, fresh:!p};
+  });
+  // labels at rest: every own node, plus only the ten best-connected others. Labelling every node
+  // with 4+ edges piled names on top of each other in the dense middle; the rest label on hover,
+  // on search match, or once zoomed in.
+  const hubs = new Set(nodes.filter(n=>!n.own && n.deg>=4).sort((a,b)=>b.deg-a.deg || (a.id<b.id?-1:1)).slice(0,10).map(n=>n.id));
+  for (const n of nodes) n.hub = hubs.has(n.id);
+  const byId = new Map(nodes.map(n=>[n.id, n]));
+  const near = new Map(nodes.map(n=>[n.id, new Set()]));
+  for (const p of pairs){ near.get(p.source)?.add(p.target); near.get(p.target)?.add(p.source); }
+  const spread = 26*Math.sqrt(nodes.length);
+  for (const n of nodes){
+    if (!n.fresh) continue;
+    const h = memHash(n.id);
+    const anchor = [...near.get(n.id)].map(id=>byId.get(id)).find(m=>m && !m.fresh);
+    if (anchor){ n.x = anchor.x + ((h%41)-20); n.y = anchor.y + (((h>>>8)%41)-20); continue; }
+    const a = (h%3600)/3600*Math.PI*2, rad = spread*Math.sqrt(((h>>>12)%1000)/1000);
+    n.x = Math.cos(a)*rad*1.4; n.y = Math.sin(a)*rad*.8;
+  }
+
+  const sim = d3.forceSimulation(nodes)
+    .randomSource(d3.randomLcg(0.308))
+    .force('link', d3.forceLink(pairs).id(d=>d.id).distance(l=>30 + l.source.r + l.target.r))
+    .force('charge', d3.forceManyBody().strength(n=>-40 - n.r*9).distanceMax(380))
+    .force('collide', d3.forceCollide(n=>n.r + (n.own || n.hub ? 18 : 6)).iterations(2))
+    .force('x', d3.forceX(0).strength(.035))
+    .force('y', d3.forceY(0).strength(.06))
+    .stop();
+  // settle off-screen so the first paint is final: the layout never plays out in front of anyone.
+  // A fully cached graph skips it (same picture as last time); a partly new one settles gently.
+  const fresh = nodes.filter(n=>n.fresh).length;
+  if (fresh){
+    sim.alpha(fresh===nodes.length ? 1 : .35);
+    const ticks = Math.ceil(Math.log(sim.alphaMin()/sim.alpha())/Math.log(1-sim.alphaDecay()));
+    for (let i=0;i<ticks;i++) sim.tick();
+  }
+  const savePos = () => { for (const n of nodes) memPos.set(n.id, {x:n.x, y:n.y, pinned:n.fx!=null}); };
+  savePos();
+
+  const svg = d3.select(svgEl);
+  svg.selectAll('*').remove();
+  const defs = svg.append('defs');
+  const dots = defs.append('pattern').attr('id','mgdots').attr('width',20).attr('height',20).attr('patternUnits','userSpaceOnUse');
+  dots.append('circle').attr('cx',1.2).attr('cy',1.2).attr('r',1.1).attr('fill','rgba(28,28,28,.16)');
+  for (const [id, fill] of [['mgarr','rgba(28,28,28,.45)'], ['mgarrhot','#1c1c1c']]){
+    defs.append('marker').attr('id',id).attr('viewBox','0 -5 10 10').attr('refX',9).attr('refY',0)
+      .attr('markerWidth',7).attr('markerHeight',7).attr('markerUnits','userSpaceOnUse').attr('orient','auto-start-reverse')
+      .append('path').attr('d','M0,-4.5L10,0L0,4.5Z').attr('fill',fill);
+  }
+  svg.append('rect').attr('width','100%').attr('height','100%').attr('fill','url(#mgdots)');
+  const vp = svg.append('g');
+  const edgeLayer = vp.append('g'), nodeLayer = vp.append('g'), labelLayer = vp.append('g');
+
+  const edgeSel = edgeLayer.selectAll('g').data(pairs).join('g')
+    .attr('class', p=>`e${p.rels.has('SUPERSEDES')?' sup':''}`);
+  edgeSel.append('line').attr('class','v');
+  edgeSel.append('line').attr('class','hit');
+  edgeSel.on('mouseenter', (ev,p)=>{ memG.hoverPair = p.k; memGraphRestyle(); })
+    .on('mouseleave', ()=>{ memG.hoverPair = null; memGraphRestyle(); });
+
+  const labelSel = labelLayer.selectAll('g').data(pairs).join('g').attr('class','elab');
+  labelSel.each(function(p){
+    const t = [...p.rels].join(' · ').toUpperCase();
+    const w = t.length*5.7 + 10;
+    d3.select(this).append('rect').attr('x',-w/2).attr('y',-7.5).attr('width',w).attr('height',15);
+    d3.select(this).append('text').attr('text-anchor','middle').attr('dy','.34em').text(t);
+  });
+
+  const nodeSel = nodeLayer.selectAll('g').data(nodes, d=>d.id).join('g')
+    .attr('class', d=>`n ${d.own?'own':'glob'}${d.sup?' sup':''}${d.hub?' hub':''}`)
+    .attr('data-mem-row', d=>d.name);
+  nodeSel.append('rect').attr('class','halo').attr('x',d=>-d.r-5).attr('y',d=>-d.r-5).attr('width',d=>d.r*2+10).attr('height',d=>d.r*2+10);
+  nodeSel.filter(d=>d.own && !d.sup).append('rect').attr('class','sh').attr('x',d=>-d.r+2.5).attr('y',d=>-d.r+2.5).attr('width',d=>d.r*2).attr('height',d=>d.r*2);
+  nodeSel.append('rect').attr('class','b').attr('x',d=>-d.r).attr('y',d=>-d.r).attr('width',d=>d.r*2).attr('height',d=>d.r*2)
+    .attr('fill', d=>d.own ? memTypeColor(d.type) : memTint(memTypeColor(d.type)));
+  nodeSel.append('text').attr('x',d=>d.r+6).attr('dy','.34em')
+    .text(d=>d.name.length>38 ? d.name.slice(0,37)+'…' : d.name);
+
+  const tip = $('mgtip'), box = $('mgraph');
+  const moveTip = ev => {
+    const b = box.getBoundingClientRect();
+    let x = ev.clientX - b.left + 16, y = ev.clientY - b.top + 14;
+    if (x + tip.offsetWidth > b.width - 8) x = ev.clientX - b.left - tip.offsetWidth - 16;
+    if (y + tip.offsetHeight > b.height - 8) y = ev.clientY - b.top - tip.offsetHeight - 14;
+    tip.style.left = `${Math.max(8,x)}px`; tip.style.top = `${Math.max(8,y)}px`;
+  };
+  nodeSel.on('mouseenter', (ev,d)=>{
+    memG.hoverId = d.id; memGraphRestyle();
+    tip.innerHTML = `<div class="tn">${esc(d.name)}</div>
+      <div class="tc"><span class="chip">${esc(d.type)}</span>${memScopeChip(d)}${d.sup?`<span class="badge off">SUPERSEDED</span>`:''}</div>
+      ${d.text?`<div class="tx">${esc(d.text)}</div>`:''}
+      <div class="tm">${d.observationCount} obs · ${d.deg} edge${d.deg===1?'':'s'}${d.updatedAt?` · ${relTime(d.updatedAt)}`:''}${d.sup&&d.supersededBy?` · by ${esc(d.supersededBy)}`:''}</div>`;
+    tip.hidden = false; moveTip(ev);
+  }).on('mousemove', moveTip)
+    .on('mouseleave', ()=>{ memG.hoverId = null; tip.hidden = true; memGraphRestyle(); });
+
+  const paint = () => {
+    nodeSel.attr('transform', d=>`translate(${d.x},${d.y})`);
+    edgeSel.each(function(p){
+      const a = p.source, b = p.target;
+      const dx = b.x-a.x, dy = b.y-a.y, len = Math.hypot(dx,dy) || 1, ux = dx/len, uy = dy/len;
+      // stop each end at the square's edge (not its centre) so the arrowhead is visible
+      const ea = a.r*1.15 + (p.back?3:1), eb = b.r*1.15 + (p.fwd?3:1);
+      const x1 = a.x+ux*ea, y1 = a.y+uy*ea, x2 = b.x-ux*eb, y2 = b.y-uy*eb;
+      d3.select(this).selectAll('line').attr('x1',x1).attr('y1',y1).attr('x2',x2).attr('y2',y2);
+    });
+    labelSel.attr('transform', p=>`translate(${(p.source.x+p.target.x)/2},${(p.source.y+p.target.y)/2})`);
+  };
+  paint();
+
+  // drag drops a node where it is let go (pinned, remembered); the sim warms just enough to let
+  // neighbours follow, then cools to a stop: no idle motion once the hand is off it
+  const drag = d3.drag().clickDistance(4)
+    .on('start', (ev,d)=>{ if (!ev.active) sim.alphaTarget(.08).restart(); d.fx = d.x; d.fy = d.y; tip.hidden = true; })
+    .on('drag', (ev,d)=>{ d.fx = ev.x; d.fy = ev.y; })
+    .on('end', (ev)=>{ if (!ev.active) sim.alphaTarget(0); });
+  nodeSel.call(drag);
+  sim.on('tick', paint).on('end', savePos);
+
+  const zoom = d3.zoom().scaleExtent([.15, 4]).on('zoom', ev=>{
+    const t = ev.transform;
+    vp.attr('transform', t);
+    dots.attr('patternTransform', `translate(${t.x},${t.y}) scale(${t.k})`);
+    svgEl.classList.toggle('zin', t.k >= 1.6);
+    memG.transform = t;
+  });
+  svg.call(zoom).on('dblclick.zoom', null);
+  Object.assign(memG, {sim, zoom, svg, nodes, pairs, byId, near, nodeSel, edgeSel, labels:labelSel, W, H, d3});
+  if (memG.refit || !memG.transform){ memG.refit = false; memGraphFit(null, false); }
+  else svg.call(zoom.transform, memG.transform);
+
+  memGraphLegend();
+  memGraphRestyle();
+}
+
+// fit the given nodes (default all) into view, leaving room on the right for labels
+function memGraphFit(only, animate=true){
+  const {svg, zoom, d3} = memG; if (!svg || !zoom) return;
+  const list = (only && only.length) ? only : memG.nodes; if (!list.length) return;
+  const W = svg.node().clientWidth || memG.W, H = svg.node().clientHeight || memG.H;
+  let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
+  for (const n of list){ x0=Math.min(x0,n.x-n.r); y0=Math.min(y0,n.y-n.r); x1=Math.max(x1,n.x+n.r+(n.own?90:20)); y1=Math.max(y1,n.y+n.r); }
+  const pad = 56, k = Math.max(.15, Math.min(1.8, Math.min((W-pad*2)/Math.max(1,x1-x0), (H-pad*2)/Math.max(1,y1-y0))));
+  const t = d3.zoomIdentity.translate(W/2 - k*(x0+x1)/2, H/2 - k*(y0+y1)/2).scale(k);
+  (animate ? svg.transition().duration(380).ease(d3.easeCubicOut) : svg).call(zoom.transform, t);
+}
+function memGraphZoom(dir){
+  const {svg, zoom} = memG; if (!svg) return;
+  if (dir==='fit'){ const m = memGraphMatches(); return memGraphFit(m ? memG.nodes.filter(n=>m.has(n.id)) : null); }
+  svg.transition().duration(200).call(zoom.scaleBy, dir==='in' ? 1.4 : 1/1.4);
+}
+
+function memGraphLegend(){
+  const el = $('mglegend'); const g = state.mem.graph; if (!el || !g) return;
+  const counts = new Map();
+  for (const n of g.nodes) counts.set(n.type, (counts.get(n.type)||0)+1);
+  const prefix = state.data?.project?.prefix ?? '';
+  const anyGlobal = g.nodes.some(n=>!n.project), anySup = g.nodes.some(n=>n.supersededBy);
+  el.innerHTML = `<div class="h">Type</div>
+    ${MEMORY_NODE_TYPES.map(t=>{ const c = counts.get(t)||0; const on = state.mem.type===t;
+      return `<button type="button" class="lrow${on?' on':''}" data-mem-legend="${esc(t)}" ${!c&&!on?'style="opacity:.4"':''}
+        title="${on?'show every type':`show only ${esc(t)}`}"><span class="sw" style="background:${memTypeColor(t)}"></span><span>${esc(t)}</span><span class="c">${c}</span></button>`; }).join('')}
+    <div class="sep"></div>
+    <div class="lrow"><span class="sw own" style="background:var(--beige)"></span><span>own · ${esc(prefix)}</span><span></span></div>
+    ${anyGlobal||state.mem.scope==='all'?`<div class="lrow"><span class="sw glob" style="background:var(--beige)"></span><span>global</span><span></span></div>`:''}
+    ${anySup?`<div class="lrow"><span class="sw sup"></span><span>superseded</span><span></span></div>`:''}`;
+  const meta = $('mgmeta');
+  if (meta) meta.innerHTML = `<b>${g.nodes.length}</b> nodes · <b>${g.edges.length}</b> edges`;
+}
+
+// class-only restyle: search, hover and the open drawer change emphasis, never positions
+function memGraphRestyle(){
+  const {nodeSel, edgeSel, labels, near} = memG;
+  if (!nodeSel || !document.getElementById('mgsvg')?.contains(nodeSel.node())) return;
+  const m = memGraphMatches();
+  const selName = state.sel?.kind==='mem' ? state.sel.id : null;
+  const hov = memG.hoverId, hp = memG.hoverPair;
+  const hn = hov ? near.get(hov) : null;
+  const pairHot = p => (hov && (p.source.id===hov || p.target.id===hov)) || p.k===hp;
+  nodeSel
+    .classed('match', d=>!!m && m.has(d.id))
+    .classed('sel', d=>d.name===selName)
+    .classed('hot', d=>d.id===hov)
+    .classed('near', d=>!!hn && hn.has(d.id))
+    .classed('dim', d=> hov ? (d.id!==hov && !hn.has(d.id)) : (!!m && !m.has(d.id)));
+  const edgeDim = p => hov ? !pairHot(p) : (!!m && !(m.has(p.source.id) && m.has(p.target.id)));
+  edgeSel.classed('hot', pairHot).classed('dim', edgeDim)
+    .each(function(p){
+      const hot = pairHot(p);
+      this.firstChild.setAttribute('marker-end', p.fwd ? `url(#${hot?'mgarrhot':'mgarr'})` : '');
+      this.firstChild.setAttribute('marker-start', p.back ? `url(#${hot?'mgarrhot':'mgarr'})` : '');
+    });
+  labels.classed('hot', pairHot);
+  const vn = $('memvn'); if (vn && state.mem.mode==='graph') vn.textContent = memGraphCountText();
 }
 
 function renderMemDrawer(dr, backBtn, closeBtn){
@@ -2116,18 +2532,27 @@ function renderContent(){
     // only the results below it are rewritten each time state.mem changes
     if (!vb.querySelector('#memq')){
       vb.innerHTML = `<span class="vtitle">Memory</span><span class="vn" id="memvn"></span>
+        <div class="filters memmode" id="memmode"></div>
         <label class="meminput"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-          <input id="memq" placeholder="search memory…" autocomplete="off" value="${esc(state.mem.q)}"></label>
+          <input id="memq" autocomplete="off" value="${esc(state.mem.q)}"></label>
         <div class="filters memtypes" id="memtypes"></div>
+        <button class="pbtn" type="button" id="memglobal" title="add global memory (shared by every project) to this project's own"></button>
         <button class="pbtn" type="button" id="memsup"></button>
         <button class="pbtn" type="button" id="memexport">Export .md</button>`;
     }
-    $('memvn').textContent = state.mem.total;
+    const graphMode = state.mem.mode==='graph';
+    $('memvn').textContent = graphMode ? memGraphCountText() : state.mem.total;
+    $('memmode').innerHTML = ['graph','list'].map(m=>
+      `<button class="seg ${state.mem.mode===m?'on':''}" data-mem-mode="${m}">${m}</button>`).join('');
+    $('memq').placeholder = graphMode ? 'highlight in graph…' : 'search memory…';
     $('memtypes').innerHTML = ['', ...MEMORY_NODE_TYPES].map(t=>
       `<button class="seg ${state.mem.type===t?'on':''}" data-mem-type="${esc(t)}">${esc(t||'all')}</button>`).join('');
+    $('memglobal').textContent = (state.mem.scope==='all'?'✓ ':'') + 'include global';
+    $('memglobal').setAttribute('aria-pressed', String(state.mem.scope==='all'));
     $('memsup').textContent = (state.mem.includeSuperseded?'✓ ':'') + 'superseded';
     $('memsup').setAttribute('aria-pressed', String(state.mem.includeSuperseded));
-    el.innerHTML = renderMemResults();
+    if (graphMode && !state.mem.forbidden && !state.mem.error) renderMemGraph(el);
+    else el.innerHTML = renderMemResults();
   }
   else {
     vb.innerHTML = `<span class="vtitle">Activity</span>`;
@@ -2504,6 +2929,21 @@ document.addEventListener('click', e=>{
   if (memRow){ e.preventDefault(); openMemNode(memRow.dataset.memRow); return; }
   const memType = e.target.closest('[data-mem-type]');
   if (memType){ state.mem.type = memType.dataset.memType; renderContent(); loadMemory(); return; }
+  const memLegend = e.target.closest('[data-mem-legend]');
+  if (memLegend){ const t = memLegend.dataset.memLegend; state.mem.type = state.mem.type===t ? '' : t; renderContent(); loadMemory(); return; }
+  const memMode = e.target.closest('[data-mem-mode]');
+  if (memMode){
+    state.mem.mode = memMode.dataset.memMode;
+    try { localStorage.setItem('darbar.memMode', state.mem.mode); } catch {}
+    renderContent(); loadMemory(); return;
+  }
+  if (e.target.closest('#memglobal') || e.target.closest('[data-mem-scope-all]')){
+    state.mem.scope = (state.mem.scope==='own' || e.target.closest('[data-mem-scope-all]')) ? 'all' : 'own';
+    memG.refit = true; // the node set changes wholesale; re-frame it rather than keep the old view
+    renderContent(); loadMemory(); return;
+  }
+  const mg = e.target.closest('[data-mg]');
+  if (mg){ memGraphZoom(mg.dataset.mg); return; }
   if (e.target.closest('#memsup')){ state.mem.includeSuperseded = !state.mem.includeSuperseded; renderContent(); loadMemory(); return; }
   if (e.target.closest('#memexport')){ exportMemory(); return; }
   if (e.target.closest('#memobsadd')){
@@ -2521,10 +2961,17 @@ $('palq').addEventListener('input', e=>{ state.pal.q = e.target.value.trim().toL
 // delegated: #memq and #memsupby are built and torn down with the memory view/drawer, so a static
 // listener like palq's would miss them after the first rebuild
 document.addEventListener('input', e=>{
-  if (e.target.id==='memq'){ state.mem.q = e.target.value; scheduleMemory(); return; }
+  if (e.target.id==='memq'){
+    state.mem.q = e.target.value;
+    // graph mode searches what is already drawn: highlight + dim, no refetch, no relayout
+    if (state.mem.mode==='graph'){ memGraphRestyle(); const vn = $('memvn'); if (vn) vn.textContent = memGraphCountText(); return; }
+    scheduleMemory(); return;
+  }
   if (e.target.id==='memsupby'){ if (state.memNode){ state.memNode.superBy = e.target.value; scheduleMemSupSearch(e.target.value); } return; }
 });
 document.addEventListener('keydown', e=>{
+  // Enter in the graph's search box frames whatever it matched
+  if (e.key==='Enter' && e.target.id==='memq' && state.mem.mode==='graph'){ e.preventDefault(); memGraphZoom('fit'); return; }
   if ((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); state.pal.open ? closePal() : openPal(); return; }
   if (state.pal.open){
     if (e.key==='Escape'){ e.preventDefault(); closePal(); return; }
