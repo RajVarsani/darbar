@@ -85,7 +85,8 @@
   .card-menu a{display:block;font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--ink);
     text-transform:lowercase;text-decoration:none;padding:8px 12px}
   .card-menu a:hover{background:var(--lime)}
-  .prefix.linear{background:var(--ink);color:var(--lime)}
+  .prefix.linear{background:var(--ink);color:var(--lime);cursor:pointer}
+  .prefix.linear:hover{background:var(--lime);color:var(--ink)}
   .card.arch .menu-trigger{border-color:var(--faint);color:var(--soft);
     box-shadow:2px 2px 0 var(--faint);background:transparent}
   .card.arch .menu-trigger:hover{box-shadow:3px 3px 0 var(--faint)}
@@ -121,13 +122,16 @@ function cardHtml(p) {
   // so they leave the denominator instead of reading as unfinished work from the outside
   const total = c.tasks - (c.cancelled || 0);
   const pct = total ? Math.round(c.done / total * 100) : 0;
-  // a linear-native project opens its Linear view; the darbar board stays one ⋯ click away
-  const href = p.linearUrl || p.boardUrl;
-  const ext = p.linearUrl ? ' target="_blank" rel="noopener"' : '';
-  const chip = p.linearUrl ? '<span class="prefix linear">LINEAR</span>' : '';
-  const boardItem = p.linearUrl ? `<a href="${esc(p.boardUrl)}">darbar board</a>` : '';
+  // the card always opens the darbar board, same tab; the LINEAR chip is the outbound
+  // link to Linear (its own click stops propagation so the card link doesn't also fire —
+  // the chip is a span, not a nested <a>, because .card-link already wraps the card in one)
+  const href = p.boardUrl;
+  const chip = p.linearUrl
+    ? `<span class="prefix linear" role="link" tabindex="0" title="open in Linear" onclick="event.stopPropagation(); window.open('${esc(p.linearUrl)}','_blank','noopener')">LINEAR</span>`
+    : '';
+  const linearItem = p.linearUrl ? `<a href="${esc(p.linearUrl)}" target="_blank" rel="noopener">open in Linear</a>` : '';
   return `<div class="card" data-prefix="${esc(p.prefix)}" data-name="${esc(p.name)}">
-      <a class="card-link" href="${esc(href)}"${ext}>
+      <a class="card-link" href="${esc(href)}">
         <h2>${esc(p.name)}<span class="prefix">${esc(p.prefix)}</span>${chip}</h2>
         <div class="repos">${esc((p.repos||[]).join(' · ')) || 'no repos'}</div>
         <div class="nums">
@@ -138,7 +142,7 @@ function cardHtml(p) {
         <div class="progress"><i style="width:${pct}%"></i></div>
       </a>
       <button type="button" class="menu-trigger" data-action="toggle-menu" aria-haspopup="true" aria-expanded="false" aria-label="project actions">&#8943;</button>
-      <div class="card-menu" hidden>${boardItem}<button type="button" data-action="open-archive">archive</button></div>
+      <div class="card-menu" hidden>${linearItem}<button type="button" data-action="open-archive">archive</button></div>
       <div class="archive-panel" hidden>
         <label class="archive-label" for="reason-${esc(p.prefix)}">reason (optional)</label>
         <input type="text" class="archive-reason" id="reason-${esc(p.prefix)}" placeholder="why is this done?">
