@@ -6,10 +6,13 @@ import { streamSSE, streamText } from 'hono/streaming';
 import { Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpisodes, ObjectId, capId, nextShortId } from '@darbar/core';
 import { emit, subscribe } from './sse';
 import { nudge, waitForNudge } from './inbox';
+import * as linearSync from './linear-sync';
 import { config, pathPatternError, PATH_PATTERN_FORM, isParkId, MEMORY_NODE_TYPES, slugify } from '@darbar/core';
 import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus, MemoryNode, MemoryEdge, MemoryEdgeSource, MemoryNodeType, MemoryObservation } from '@darbar/core';
 
 export const api = new Hono();
+// DAR-266: the Linear mirror logs through the same event feed and runs the same ship cascade
+linearSync.configureLinearHooks({ logEvent, transition: (t, set, opts) => transitionTask(t, set, opts) });
 
 export const TASK_STATUSES: TaskStatus[] = ['backlog', 'todo', 'in_progress', 'in_review', 'qa', 'blocked', 'done', 'cancelled'];
 export const TASK_TYPES: TaskType[] = ['feature', 'bug', 'chore', 'review', 'regression'];
@@ -145,6 +148,7 @@ const PROJECT_VOCAB: FieldVocab = {
   archived: 'archiving is its own act: PATCH /api/projects/:ref {"archived": true} to take a finished project off the active board, {"archived": false} to put it back',
   archivedAt: 'the server owns that clock: send {"archived": true} to stamp it now, false to clear it. When a project was finished is the thing the field is for, so it is not hand-settable',
   archiveReason: 'a reason belongs to the act that needs one: PATCH /api/projects/:ref {"archived": true, "archiveReason": "…"}. On its own it would be a reason for nothing, and unarchiving clears it',
+  linearSync: 'server-owned state of the Linear mirror (team, label, poll cursor); set linearUrl and the server resolves it',
   archivedOpenRows: 'the server counts what was still open when a project was forced into the archive; it is a record of what was left behind, not a setting',
   cancelOpen: 'that answers a question only archiving asks: PATCH /api/projects/:ref {"archived": true, "cancelOpen": true} cancels the still-open rows as part of archiving',
   force: 'that answers a question only archiving asks: PATCH /api/projects/:ref {"archived": true, "force": true} archives and leaves the open rows open',
@@ -169,7 +173,7 @@ const CONFIG_VOCAB: FieldVocab = {
   pipeline: 'lanes are edited one at a time under /api/projects/:ref/pipeline/lanes, autoAdvance at PATCH /api/projects/:ref/pipeline, or wholesale with PATCH /api/projects/:ref {"pipeline": {…}}',
   agents: 'agents are edited one at a time under /api/projects/:ref/agents, or wholesale with PATCH /api/projects/:ref {"agents": […]}',
   proxy: 'the share is edited at PATCH /api/projects/:ref/proxy and published at PATCH /api/projects/:ref/proxy/enabled, or wholesale with PATCH /api/projects/:ref {"proxy": {…}}',
-  linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} makes this project LINEAR-NATIVE: Linear becomes the board of record for tasks and the console card opens that view (null clears it). Feedback still arrives here through gabbar and is drained into Linear by the orchestrator',
+  linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} makes this project LINEAR-NATIVE: Linear becomes the board of record for tasks and the console card opens that view (null clears it). Rows keep being written here; with LINEAR_API_KEY set the server mirrors them to Linear itself',
 };
 // what a granular project route is measured against: the server-owned fields plus the config doors.
 // NOTE ON SCOPE: a vocabulary belongs to ONE document, so each route below has to say which of these
@@ -198,6 +202,7 @@ const TASK_VOCAB: FieldVocab = {
   // second round on a row that has never had one. Same reason addCommit is in this table.
   reviewAgain: 'a SECOND review round on a task that already had one is asked for on the move itself: PATCH /tasks/:ref {"status": "in_review", "reviewAgain": true}',
   dispatchedAt: 'the server owns that clock: send {"dispatched": true} to stamp it now, false to clear it',
+  linear: 'the Linear link is server-owned: the mirror writes it when it creates or links the issue',
   createdAt: 'stamped by the server at create',
   updatedAt: 'stamped by the server on every write',
 };
@@ -976,6 +981,7 @@ async function maybeAdvanceParent(parentId: ObjectId) {
   );
   if (advanced.matchedCount === 0) return; // a concurrent closer advanced it and owns the cascade
   await logEvent(parent.projectId, `${parent.shortId} auto-advanced → done (all reviews closed)`, parent._id);
+  await linearSync.taskUpdated(parentId, { fields: ['status'] });
   const shipped = await Tasks.findOne({ _id: parentId });
   if (shipped) await resolvePromotedFeedback(shipped);
 }
@@ -1261,6 +1267,8 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
   // proxy: absent = untouched, null = cleared (route withdrawn), object = replaced wholesale
   let proxyChange: { after: ProjectProxy | null } | undefined;
   const unset: Record<string, ''> = {};
+  // DAR-266: a set, changed or cleared linearUrl restarts the mirror, so rows filed before it are legacy
+  if (set.linearUrl !== undefined && set.linearUrl !== (p.linearUrl ?? null) && p.linearSync) unset.linearSync = '';
   if (b.proxy !== undefined) {
     if (b.proxy === null) {
       unset.proxy = '';
@@ -2219,6 +2227,7 @@ api.post('/tasks', async (c) => {
   // would leave no way to file a row at the status the work is actually at. Same guard as the PATCH
   // path (spawnReviews is idempotent: it returns early when a round is already open).
   if (doc.status === 'in_review' && doc.type !== 'review') await spawnReviews(doc);
+  await linearSync.taskCreated(doc._id);
   // re-read: an explicit lanes:[] selection self-advances the parent inside spawnReviews, so the
   // created doc in hand can already be stale about its own status
   return c.json((await Tasks.findOne({ _id: doc._id })) ?? doc);
@@ -2290,6 +2299,111 @@ api.get('/tasks/:ref', async (c) => {
   if (!t) return c.json({ error: 'task not found' }, 404);
   return c.json(t);
 });
+
+// ---------- DAR-266: the one status transition, shared by PATCH /tasks/:ref and the Linear pull ----------
+// Everything from the gates to the pipeline hooks. The route validates the body and builds `set`;
+// the Linear inbound sync builds `set` from what it pulled. Both then go through exactly this, so a
+// status that arrives from Linear meets the same done-gate, the same one-round guard and the same
+// lane spawn as a darbar move. `guard` narrows the write (the pull passes the updatedAt it read, so
+// it can never land over a darbar edit made while it was working); `via` names the source in the
+// event and skips the outbound Linear hook.
+export type TransitionResult =
+  | { ok: true; after: Task }
+  | { ok: false; kind: 'gate' | 'round' | 'race'; error: string };
+export type TransitionOpts = { addCommit?: string; reviewAgain?: boolean; guard?: Record<string, unknown>; via?: string };
+const entersReview = (t: Task, set: Record<string, unknown>) =>
+  set.status === 'in_review' && t.status !== 'in_review' && t.type !== 'review';
+
+export async function transitionTask(t: Task, set: Record<string, unknown>, opts: TransitionOpts = {}): Promise<TransitionResult> {
+  // any status change is the assignee reporting for itself, which retires the dispatch fact: the row
+  // has moved on, and a stamp left behind would claim a fresh hand-off if the task ever came back to
+  // todo. An explicit `dispatched` in the same body wins — that is a re-dispatch, not a leftover.
+  if (set.status !== undefined && set.status !== t.status && t.dispatchedAt && !('dispatchedAt' in set)) {
+    set.dispatchedAt = null;
+  }
+  const enteringReview = entersReview(t, set);
+
+  // done-gate: a dev task cannot close over the heads of its open review lanes or open feedback
+  if (set.status === 'done' && t.type !== 'review') {
+    const open = await openReviewCount(t._id!);
+    if (open) return { ok: false, kind: 'gate', error: `${t.shortId} has ${open} open review subtask(s); close them (or cancel them) first` };
+    const fbIds = await openFeedbackShortIds(t._id!);
+    if (fbIds.length) return { ok: false, kind: 'gate', error: `${t.shortId} has ${fbIds.length} open feedback row(s) (${fbIds.join(', ')}); resolve or reject them first` };
+  }
+
+  // ---------- one entry into in_review, one review round ----------
+  // The no-double-spawn guard lives inside spawnReviews and counts only OPEN children, so a task
+  // whose round had CLOSED and was then moved back to in_review came out carrying two rounds on one
+  // row: the closed one and a fresh one. Refused here rather than swallowed in the hook, because a
+  // second round is sometimes exactly what rework wants and the server cannot tell the two apart on
+  // its own. `reviewAgain` is the caller saying which of the two this is.
+  //
+  // Scoped to a round that is fully CLOSED, which is precisely the case that duplicates. With a
+  // child still open spawnReviews already declines, the re-entry genuinely changes nothing and 200
+  // is the honest answer; a 409 there would refuse a move that is not this bug, and an override
+  // there would answer 200 having spawned nothing, which is the same silence one door along.
+  if (enteringReview && opts.reviewAgain !== true) {
+    const kids = await Tasks.find({ parentTaskId: t._id, type: 'review' }).toArray();
+    if (kids.length && kids.every((k) => CLOSED.includes(k.status))) {
+      const named = kids.map((k) => `${k.shortId} (${k.lane ?? 'no lane'}, ${k.status})`).join(', ');
+      return { ok: false, kind: 'round', error: `${t.shortId} already had a review round and every lane of it is closed: ${named}. Moving it back to in_review spawns a SECOND round on top of that one. Send {"reviewAgain": true} in this same patch if a fresh round is what the rework needs, or leave the row where it is if the round it already had is the answer` };
+    }
+  }
+
+  set.updatedAt = new Date();
+  const addCommit = opts.addCommit;
+  const update: { $set: Record<string, unknown>; $push?: { commits: string } } = { $set: set };
+  if (addCommit) update.$push = { commits: addCommit };
+  // ---------- DAR-256: the transition itself is the lock ----------
+  // Every guard above this line, and openReviewCount inside spawnReviews, is a READ. Two requests
+  // crossing into in_review together therefore both pass all of them before either one writes, and
+  // the row comes out carrying two rounds — measured on this rig, not argued: 4 children on a
+  // two-lane task, 3 on the reviewAgain shape. Guarding harder in front of the write cannot fix
+  // that; it only reproduces the same window one floor up, which is what DAR-247 did.
+  //
+  // So the condition moves INTO the write, where the driver settles it: exactly one racer flips the
+  // status, and only that one goes on to run the hooks. `$ne` rather than a compare-and-swap on the
+  // status we read, because the invariant this owes is "one entry into in_review", not "the row has
+  // not moved at all" — a patch that crossed some other status in between is not this bug.
+  //
+  // SCOPED TO THE ENTERING-REVIEW PATCH and nowhere else. As a filter on every PATCH it would
+  // refuse every legitimate write to a row that is sitting in in_review: a note, a commit, an
+  // assignee, a lanes echo, and the explicit `done` that leaves in_review when autoAdvance is off.
+  // Uncontended patches are unchanged — same one filter on _id, same one write, no extra read.
+  const res = await Tasks.updateOne(
+    { _id: t._id, ...opts.guard, ...(enteringReview ? { status: { $ne: 'in_review' as TaskStatus } } : {}) },
+    update,
+  );
+  // The loser matched nothing, so NOTHING it sent landed: not the status, not the notes beside it,
+  // not its addCommit. That is why this is a 409 and not a 200 naming the real state — the row does
+  // end up in_review, so a 200 would be true about the status and false about the rest of the body,
+  // which is the silent drop the rest of this route exists to stop. One re-read, on the contended
+  // path only, so the sentence states what the row actually says rather than assuming.
+  if (res.matchedCount === 0 && (enteringReview || opts.guard)) {
+    if (!enteringReview) return { ok: false, kind: 'race', error: `${t.shortId} changed while this write was in flight; nothing was applied` };
+    const now = await Tasks.findOne({ _id: t._id });
+    return { ok: false, kind: 'race', error: `${t.shortId} is ${now ? now.status : 'no longer on the board'}: another patch crossed into in_review while this one was in flight, and that one owns the review round. So nothing in this patch was applied — not the status, and not the other fields it carried. Re-read the row and send whatever still applies.` };
+  }
+  const changed = Object.keys(set).filter((k) => k !== 'updatedAt').concat(addCommit ? ['commit'] : []).join(', ');
+  await logEvent(t.projectId, `${t.shortId} updated (${changed})${set.status ? ` → ${set.status}` : ''}${opts.via ? ` via ${opts.via}` : ''}`, t._id);
+
+  const after = await Tasks.findOne({ _id: t._id });
+  // pipeline hooks fire on the transition, not the state: entering review spawns lanes,
+  // closing the last review lane advances (or announces) the parent
+  if (after && enteringReview) await spawnReviews(after);
+  if (t.type === 'review' && CLOSED.includes(set.status as TaskStatus) && t.parentTaskId) await maybeAdvanceParent(t.parentTaskId);
+  if (after && set.status === 'done') await resolvePromotedFeedback(after);
+  // an inbound pull is Linear's own change: echoing it back through the outbound hook is pointless
+  if (!opts.via) {
+    await linearSync.taskUpdated(t._id, {
+      fields: Object.keys(set),
+      notes: set.notes !== undefined && set.notes !== t.notes ? String(set.notes) : undefined,
+      prevNotes: t.notes,
+      commit: addCommit,
+    });
+  }
+  return { ok: true, after: (await Tasks.findOne({ _id: t._id })) ?? after! };
+}
 
 api.patch('/tasks/:ref', async (c) => {
   const t = await resolveTaskRef(c.req.param('ref'));
@@ -2373,12 +2487,6 @@ api.patch('/tasks/:ref', async (c) => {
     }
     set.lanes = lanes;
   }
-  // any status change is the assignee reporting for itself, which retires the dispatch fact: the row
-  // has moved on, and a stamp left behind would claim a fresh hand-off if the task ever came back to
-  // todo. An explicit `dispatched` in the same body wins — that is a re-dispatch, not a leftover.
-  if (set.status !== undefined && set.status !== t.status && t.dispatchedAt && b.dispatched === undefined) {
-    set.dispatchedAt = null;
-  }
   // reviewAgain names an override for exactly one thing below: the no-double-spawn guard, which only
   // fires on a patch that is genuinely crossing INTO in_review (a status change, off a non-in_review
   // status, on a non-review task). Anywhere else the word has nothing to attach to, and the route used
@@ -2388,88 +2496,22 @@ api.patch('/tasks/:ref', async (c) => {
   // second round is coming. reviewAgain:false is exempt: nothing here treats false as an instruction
   // (the guard below already reads absent and false alike), so declining an override on an unrelated
   // patch has not claimed anything false about what the patch does.
-  const enteringReview = set.status === 'in_review' && t.status !== 'in_review' && t.type !== 'review';
+  const enteringReview = entersReview(t, set);
   if (b.reviewAgain === true && !enteringReview) {
     return c.json({ error: `${t.shortId}: reviewAgain only means something on a patch that moves this task INTO in_review (a status change, off a status other than in_review, and not on a review task itself). Send {"status": "in_review", "reviewAgain": true} together, or drop reviewAgain if that is not what this patch is doing` }, 400);
   }
   const addCommit = str(b.addCommit);
   if (Object.keys(set).length === 0 && !addCommit) return c.json(t); // nothing to do, no noise event
 
-  // done-gate: a dev task cannot close over the heads of its open review lanes or open feedback
-  if (set.status === 'done' && t.type !== 'review') {
-    const open = await openReviewCount(t._id!);
-    if (open) return c.json({ error: `${t.shortId} has ${open} open review subtask(s); close them (or cancel them) first` }, 409);
-    const fbIds = await openFeedbackShortIds(t._id!);
-    if (fbIds.length) return c.json({ error: `${t.shortId} has ${fbIds.length} open feedback row(s) (${fbIds.join(', ')}); resolve or reject them first` }, 409);
-  }
-
-  // ---------- one entry into in_review, one review round ----------
-  // The no-double-spawn guard lives inside spawnReviews and counts only OPEN children, so a task
-  // whose round had CLOSED and was then moved back to in_review came out carrying two rounds on one
-  // row: the closed one and a fresh one. Refused here rather than swallowed in the hook, because a
-  // second round is sometimes exactly what rework wants and the server cannot tell the two apart on
-  // its own. `reviewAgain` is the caller saying which of the two this is.
-  //
-  // Scoped to a round that is fully CLOSED, which is precisely the case that duplicates. With a
-  // child still open spawnReviews already declines, the re-entry genuinely changes nothing and 200
-  // is the honest answer; a 409 there would refuse a move that is not this bug, and an override
-  // there would answer 200 having spawned nothing, which is the same silence one door along.
-  if (enteringReview && b.reviewAgain !== true) {
-    const kids = await Tasks.find({ parentTaskId: t._id, type: 'review' }).toArray();
-    if (kids.length && kids.every((k) => CLOSED.includes(k.status))) {
-      const named = kids.map((k) => `${k.shortId} (${k.lane ?? 'no lane'}, ${k.status})`).join(', ');
-      return c.json({ error: `${t.shortId} already had a review round and every lane of it is closed: ${named}. Moving it back to in_review spawns a SECOND round on top of that one. Send {"reviewAgain": true} in this same patch if a fresh round is what the rework needs, or leave the row where it is if the round it already had is the answer` }, 409);
-    }
-  }
-
-  set.updatedAt = new Date();
-  const update: { $set: Record<string, unknown>; $push?: { commits: string } } = { $set: set };
-  if (addCommit) update.$push = { commits: addCommit };
-  // ---------- DAR-256: the transition itself is the lock ----------
-  // Every guard above this line, and openReviewCount inside spawnReviews, is a READ. Two requests
-  // crossing into in_review together therefore both pass all of them before either one writes, and
-  // the row comes out carrying two rounds — measured on this rig, not argued: 4 children on a
-  // two-lane task, 3 on the reviewAgain shape. Guarding harder in front of the write cannot fix
-  // that; it only reproduces the same window one floor up, which is what DAR-247 did.
-  //
-  // So the condition moves INTO the write, where the driver settles it: exactly one racer flips the
-  // status, and only that one goes on to run the hooks. `$ne` rather than a compare-and-swap on the
-  // status we read, because the invariant this owes is "one entry into in_review", not "the row has
-  // not moved at all" — a patch that crossed some other status in between is not this bug.
-  //
-  // SCOPED TO THE ENTERING-REVIEW PATCH and nowhere else. As a filter on every PATCH it would
-  // refuse every legitimate write to a row that is sitting in in_review: a note, a commit, an
-  // assignee, a lanes echo, and the explicit `done` that leaves in_review when autoAdvance is off.
-  // Uncontended patches are unchanged — same one filter on _id, same one write, no extra read.
-  const res = await Tasks.updateOne(
-    { _id: t._id, ...(enteringReview ? { status: { $ne: 'in_review' as TaskStatus } } : {}) },
-    update,
-  );
-  // The loser matched nothing, so NOTHING it sent landed: not the status, not the notes beside it,
-  // not its addCommit. That is why this is a 409 and not a 200 naming the real state — the row does
-  // end up in_review, so a 200 would be true about the status and false about the rest of the body,
-  // which is the silent drop the rest of this route exists to stop. One re-read, on the contended
-  // path only, so the sentence states what the row actually says rather than assuming.
-  if (enteringReview && res.matchedCount === 0) {
-    const now = await Tasks.findOne({ _id: t._id });
-    return c.json({ error: `${t.shortId} is ${now ? now.status : 'no longer on the board'}: another patch crossed into in_review while this one was in flight, and that one owns the review round. So nothing in this patch was applied — not the status, and not the other fields it carried. Re-read the row and send whatever still applies.` }, 409);
-  }
-  const changed = Object.keys(set).filter((k) => k !== 'updatedAt').concat(addCommit ? ['commit'] : []).join(', ');
-  await logEvent(t.projectId, `${t.shortId} updated (${changed})${set.status ? ` → ${set.status}` : ''}`, t._id);
-
-  const after = await Tasks.findOne({ _id: t._id });
-  // pipeline hooks fire on the transition, not the state: entering review spawns lanes,
-  // closing the last review lane advances (or announces) the parent
-  if (after && enteringReview) await spawnReviews(after);
-  if (t.type === 'review' && CLOSED.includes(set.status as TaskStatus) && t.parentTaskId) await maybeAdvanceParent(t.parentTaskId);
-  if (after && set.status === 'done') await resolvePromotedFeedback(after);
-  // RE-READ, because the hooks above write to this very row. `after` is the row as it stood BEFORE
+  const r = await transitionTask(t, set, { addCommit, reviewAgain: b.reviewAgain === true });
+  if (!r.ok) return c.json({ error: r.error }, 409);
+  // r.after is RE-READ after the hooks, because they write to this very row. The pre-hook read was the row as it stood BEFORE
   // them, so a self-advancing patch (a lanes:[] selection entering in_review, which spawns nothing
   // and ships the row inside spawnReviews) answered in_review about a row that was already done. The
   // caller then acts on a status the server had itself just replaced, which is a shell chain printing
   // the previous commit after a failed step. POST /tasks re-reads for exactly this reason and this
   // route did not.
-  return c.json((await Tasks.findOne({ _id: t._id })) ?? after);
+  return c.json(r.after);
 });
 
 // ---------- feedback ----------
@@ -2704,6 +2746,9 @@ api.patch('/feedback/:shortId', async (c) => {
     return c.json({ error: `${fb.shortId} → ${next} replies to ${fb.author} in their own thread and that reply IS the resolution text, so "resolution" is required: say ${REPLY_ASKS[next]}, in plain words that person will understand` }, 400);
   }
   await Feedback.updateOne({ _id: fb._id }, { $set: set });
+  if (set.resolvedTaskId && !(fb.resolvedTaskId && fb.resolvedTaskId.equals(set.resolvedTaskId as ObjectId))) {
+    await linearSync.feedbackPromoted(fb._id, set.resolvedTaskId as ObjectId);
+  }
   const statusNote = next ?? (set.status === 'triaged' ? 'triaged (auto: promoted)' : 'updated');
   await logEvent(fb.projectId, `${fb.shortId} → ${statusNote}${resolution ? `: ${resolution}` : ''}`, fb.taskId);
 

@@ -157,6 +157,9 @@ export type Project = {
   /** external mirror: when set, the console card opens this Linear view instead of the native
    *  board. Rows, feedback and the engine stay HERE; the Linear side is a hand-synced copy. */
   linearUrl?: string | null;
+  /** DAR-266. Server-owned state of the Linear mirror (apps/server/src/linear-sync.ts). Absent until
+   *  the sync first runs for this project with LINEAR_API_KEY set. */
+  linearSync?: LinearProjectSync;
   counters: { task: number; feedback: number };
   createdAt: Date;
   // ---------- archiving: a finished project comes OFF the active board ----------
@@ -214,8 +217,60 @@ export type Task = {
   // it WITH ITS AGE, so a dispatch that never turns into in_progress reads as stale rather than as
   // work in flight — the field can go unset (nobody dispatched) but it cannot quietly go wrong.
   dispatchedAt?: Date | null;
+  /** DAR-266. Server-owned link to the Linear issue this row mirrors (linear-native projects only). */
+  linear?: LinearLink;
   createdAt: Date;
   updatedAt: Date;
+};
+
+// ---------- DAR-266: the Linear mirror ----------
+// Resolved once from the project's linearUrl and cached; re-resolved when linearUrl changes.
+export type LinearProjectSync = {
+  resolvedFrom: string; // the linearUrl these ids were resolved from
+  teamId: string;
+  linearProjectId: string | null; // set when linearUrl names a Linear project: new issues land in it
+  labelId: string; // the darbar/<PREFIX> child label, the scope guard's key
+  /** when THIS project's sync first ran (reset when linearUrl changes). Rows created before it are
+   *  legacy: never pushed, only linked by the backfill match */
+  startedAt: Date;
+  cursor: string | null; // max Linear updatedAt the inbound poll has seen
+  /** labelled issues the backfill could not link yet (ambiguous, or the link write failed). Retried
+   *  each poll from the snapshot, so the cursor can move past them without losing them. */
+  pending?: LinearPendingIssue[];
+  lastRunAt: Date | null;
+  lastError: string | null;
+};
+/** the last-synced values on each side; the three-way merge compares both sides against these */
+export type LinearSideLocal = { title: string; description: string; status: TaskStatus };
+export type LinearSideRemote = { title: string; description: string; stateId: string };
+export type LinearOutboxItem = { id: string; body: string; tried?: boolean };
+export type LinearPendingIssue = {
+  issue: { id: string; identifier: string; url: string; title: string; description: string | null; stateId: string; stateType: string; updatedAt: string; labelIds: string[] };
+  attempts: number; // failed link writes; ambiguity does not count (it costs no Linear call)
+  error: string;
+  gaveUp: boolean;
+};
+export type LinearLink = {
+  id: string; // uuid reserved BEFORE the create call and sent as the issue id, so a retry cannot duplicate
+  created: boolean;
+  identifier: string | null; // MEE-26
+  url: string | null;
+  attempts: number;
+  /** the issue's updatedAt after our last write or last applied pull; equal on the poll = our own echo */
+  seenUpdatedAt: string | null;
+  dirty: boolean; // needs a sync pass (a hook ran, or the last pass failed)
+  base?: LinearSideLocal;
+  remote?: LinearSideRemote;
+  outbox: LinearOutboxItem[]; // comments waiting to post, each with its own reserved uuid
+  error: string | null;
+  errorAt: Date | null;
+  /** consecutive failed passes; the poll backs off (retryAt) and gives up at a small cap, keeping the error */
+  failures?: number;
+  retryAt?: Date | null;
+  gaveUp?: boolean;
+  /** Linear moved the issue to a status darbar's gates refused (e.g. done over an open review). The
+   *  row stays where it is and Linear is not flipped back; cleared once either side moves on. */
+  held?: { status: TaskStatus; stateId: string; reason: string; at: Date } | null;
 };
 
 export type SlackRef = { channel: string; ts: string; user: string };

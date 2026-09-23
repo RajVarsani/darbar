@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { api, reconcileAllProxies } from './api';
 import { startMemoryInboxWatcher } from './memory-inbox';
+import { startLinearSync } from './linear-sync';
 import { initDb, config, db } from '@darbar/core';
 
 const app = new Hono();
@@ -90,6 +91,9 @@ console.log(`darbar listening on ${config.bindHost}:${config.port} (pid ${proces
 // DAR-276: drain Claude's autoMemoryDirectory drop zone into the graph. Started only after the
 // port above is bound, since the drain talks to /api/memory/remember on this same server.
 startMemoryInboxWatcher();
+
+// DAR-266: mirror linear-native projects to Linear. No key = one log line and every hook a no-op.
+startLinearSync();
 
 // Bare SIGTERM with no handler kills immediately and drops in-flight requests (verified).
 // server.stop() drains: stops taking new connections, finishes what's in flight, then resolves.

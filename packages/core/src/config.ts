@@ -24,6 +24,10 @@ export const config = {
   slackBotToken: env.SLACK_BOT_TOKEN || '',
   slackAppToken: env.SLACK_APP_TOKEN || '',
   slackApiBase: env.SLACK_API_BASE || 'https://slack.com/api',
+  // DAR-266: absent = the Linear mirror is off (one log line at boot, every hook a no-op)
+  linearApiKey: env.LINEAR_API_KEY || '',
+  linearApiUrl: env.LINEAR_API_URL || 'https://api.linear.app/graphql',
+  linearPollMs: Number(env.LINEAR_POLL_MS || 120_000),
   anthropicApiKey: env.ANTHROPIC_API_KEY || '',
   gabbarModel: env.GABBAR_MODEL || 'claude-opus-5',
   gabbarTriageModel: env.GABBAR_TRIAGE_MODEL || 'claude-haiku-4-5',
