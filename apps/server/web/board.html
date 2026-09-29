@@ -591,7 +591,7 @@
   .mform textarea{min-height:56px}
   .mform .mformrow{display:flex;gap:8px;margin-top:8px;align-items:center}
 
-  /* ---------- memory graph (DAR-308) ----------
+  /* ---------- memory graph (DAR-308, redesigned DAR-316) ----------
      the scope chip is outlined and muted on purpose: the type chip is the filled one, so a node of
      type "project" can never be read as "this is the project's own node" */
   body[data-view="memory"] .viewbar{flex-wrap:wrap;row-gap:8px}
@@ -601,59 +601,88 @@
   .chip.scope.own{border-color:var(--ink);color:var(--ink)}
   .mrow.scoped{grid-template-columns:160px 90px 70px minmax(0,1fr) 70px auto}
   .mgraph{position:relative;height:max(480px,calc(100vh - 250px));overflow:hidden;background:var(--beige-2);
-    --dot:rgba(28,28,28,.13)}
+    --mg-fade:.1;--mg-dim:.24;--mg-t:.18s}
   .mgraph svg{display:block;width:100%;height:100%;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
   .mgraph svg:active{cursor:grabbing}
+  .mgraph svg .bg{fill:transparent}
   .mgraph.busy::after{content:"loading…";position:absolute;top:12px;left:50%;transform:translateX(-50%);
     font-family:var(--mono);font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;
     background:var(--ink);color:var(--lime);padding:3px 9px}
-  .mgraph .e line{stroke:var(--ink);stroke-opacity:.28;stroke-width:1.25;transition:stroke-opacity .12s}
+  /* regions: one soft tint per type, so the picture reads as areas before it reads as dots */
+  .mgraph .hull{fill:var(--c);fill-opacity:.085;stroke:var(--cl);stroke-opacity:.34;stroke-width:1.25;
+    pointer-events:none;transition:opacity var(--mg-t) ease}
+  .mgraph .tlab{cursor:pointer;transition:opacity var(--mg-t) ease}
+  .mgraph .tlab text{font-family:var(--mono);font-size:9.5px;font-weight:800;letter-spacing:.1em;fill:var(--ink-soft)}
+  .mgraph .tlab text .c{fill:var(--ink-faint);font-weight:700}
+  .mgraph .tlab:hover text{fill:var(--ink)}
+  .mgraph .tlab.off,.mgraph .hull.off{opacity:0;visibility:hidden;transition:opacity var(--mg-t) ease,visibility 0s linear var(--mg-t)}
+  .mgraph svg.focusing .hull,.mgraph svg.focusing .tlab{opacity:.3}
+  /* edges stay quiet until something is in focus */
+  .mgraph .e line{stroke:var(--ink);stroke-opacity:.17;stroke-width:1;transition:stroke-opacity var(--mg-t) ease}
   .mgraph .e .hit{stroke:transparent;stroke-width:10;stroke-opacity:1}
   .mgraph .e.sup line.v{stroke-dasharray:4 3}
-  .mgraph .e.hot line.v{stroke-opacity:1;stroke-width:2}
-  .mgraph .e.dim line.v{stroke-opacity:.06}
+  .mgraph .e.fe line.v{stroke-opacity:.5;stroke-width:1.4}
+  .mgraph .e.hot line.v{stroke-opacity:.95;stroke-width:1.8}
+  .mgraph .e.dim line.v{stroke-opacity:.05}
+  .mgraph .e.fade line.v{stroke-opacity:.03}
+  .mgraph .e.off{visibility:hidden}
   .mgraph .elab{pointer-events:none;opacity:0;transition:opacity .1s}
   .mgraph .elab.hot{opacity:1}
   .mgraph .elab rect{fill:var(--ink)}
   .mgraph .elab text{fill:var(--lime);font-family:var(--mono);font-size:8.5px;font-weight:800;letter-spacing:.06em}
-  .mgraph .n{cursor:pointer;transition:opacity .12s}
-  .mgraph .n .sh{fill:var(--ink)}
-  .mgraph .n .b{stroke:var(--ink);stroke-width:2}
-  .mgraph .n.glob .b{stroke:rgba(28,28,28,.5);stroke-width:1.25}
-  .mgraph .n.sup .b{fill:var(--beige-2)!important;stroke-dasharray:3 2}
-  .mgraph .n .halo{fill:var(--lime);stroke:var(--ink);stroke-width:2;opacity:0}
+  .mgraph .n{cursor:pointer;transition:opacity var(--mg-t) ease,visibility 0s}
+  .mgraph .n .b{stroke:var(--ink);stroke-width:1.5}
+  .mgraph .n.glob .b{stroke:rgba(28,28,28,.42);stroke-width:1}
+  .mgraph .n.sup .b{fill:var(--beige-2)!important;stroke:var(--ink-soft);stroke-dasharray:3 2}
+  .mgraph .n .gl{fill:none;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+  .mgraph .n .halo{fill:var(--lime);stroke:var(--ink);stroke-width:1.25;opacity:0}
   .mgraph .n.match .halo,.mgraph .n.sel .halo{opacity:1}
-  .mgraph .n.sel .halo{stroke-width:2.5}
+  .mgraph .n.sel .halo{stroke-width:2.25}
+  .mgraph .n:hover .b{stroke:var(--ink);stroke-width:2.25}
   .mgraph .n text{font-family:var(--mono);font-size:10px;font-weight:700;fill:var(--ink);paint-order:stroke;
-    stroke:var(--beige-2);stroke-width:3px;stroke-linejoin:round;opacity:0;pointer-events:none}
-  .mgraph .n.own text{font-size:11px;font-weight:800}
-  .mgraph .n.lr text,.mgraph svg.zin .n.lz text,.mgraph .n.match.lz text,.mgraph .n.near.lz text,
+    stroke:var(--beige-2);stroke-width:3.5px;stroke-linejoin:round;opacity:0;pointer-events:none;transition:opacity .12s ease}
+  .mgraph .n.hub text{font-size:11px;font-weight:800}
+  .mgraph .n.glob text{fill:rgba(28,28,28,.78);font-weight:500}
+  /* label level of detail: at rest (lr), once zoomed in (lz), placed for a search/focus/pin (pl);
+     hover and the selected node always show theirs */
+  .mgraph .n.lr text,.mgraph svg.zin .n.lz text,.mgraph .n.pl text,.mgraph .n.near.lz text,
   .mgraph .n.sel text,.mgraph .n.hot text{opacity:1}
+  .mgraph svg.zout .n.lr:not(.hub):not(.pl):not(.sel):not(.hot) text{opacity:0}
   .mgraph .n.sup text{text-decoration:line-through;fill:var(--ink-soft)}
-  .mgraph .n.dim{opacity:.13}
-  .mgraph .n.dim text{opacity:0}
-  .mgraph .n:hover .b{stroke:var(--ink);stroke-width:2.5}
+  .mgraph .n.dim{opacity:var(--mg-dim)}
+  .mgraph .n.fade{opacity:var(--mg-fade)}
+  .mgraph .n.dim:not(.hot) text,.mgraph .n.fade:not(.hot) text{opacity:0}
+  .mgraph .n.off{opacity:0;visibility:hidden;pointer-events:none;transition:opacity var(--mg-t) ease,visibility 0s linear var(--mg-t)}
   .mgpanel{position:absolute;background:var(--beige);border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink)}
-  .mglegend{left:12px;bottom:12px;padding:8px 10px 9px;font-family:var(--mono);font-size:10.5px;min-width:172px}
+  .mglegend{left:12px;bottom:12px;padding:8px 10px 9px;font-family:var(--mono);font-size:10.5px;min-width:164px}
   .mglegend .h{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);margin:0 0 5px}
-  .mglegend .h + .h{margin-top:8px}
-  .mglegend .lrow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:8px;align-items:center;width:100%;
+  .mglegend .lrow{display:grid;grid-template-columns:14px minmax(0,1fr) auto;gap:8px;align-items:center;
     padding:2px 4px;margin:0 -4px;width:calc(100% + 8px);text-align:left;font-weight:700}
   .mglegend button.lrow:hover{background:var(--beige-2)}
   .mglegend .lrow.on{background:var(--lime)}
+  .mglegend .lrow.mute{opacity:.45}
   .mglegend .lrow .c{color:var(--ink-soft);font-weight:700;font-variant-numeric:tabular-nums}
-  .mglegend .sw{width:11px;height:11px;border:1.5px solid var(--ink)}
-  .mglegend .sw.own{box-shadow:2px 2px 0 var(--ink)}
-  .mglegend .sw.glob{border-color:rgba(28,28,28,.5);opacity:.55}
-  .mglegend .sw.sup{background:var(--beige-2);border-style:dashed}
+  .mglegend .sw{display:block}
   .mglegend .sep{border-top:1.5px solid var(--hair);margin:7px 0 6px}
-  .mgctl{right:12px;top:12px;display:flex;flex-direction:column;box-shadow:3px 3px 0 var(--ink)}
+  .mgctl{right:12px;top:12px;display:flex;flex-direction:column}
   .mgctl button{width:30px;height:30px;display:grid;place-items:center;border-bottom:2px solid var(--ink);color:var(--ink)}
   .mgctl button:last-child{border-bottom:none}
   .mgctl button:hover{background:var(--ink);color:var(--lime)}
   .mgcap{left:12px;top:12px;display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;font-family:var(--mono);
     font-size:11px;font-weight:700}
   .mgcap .badge{font-size:9.5px}
+  /* local graph bar: shown while a node is selected; depth is the hop radius kept lit around it */
+  .mgfocus{top:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:3px 3px 3px 10px;
+    font-family:var(--mono);font-size:11px;font-weight:700;max-width:calc(100% - 120px);white-space:nowrap}
+  .mgfocus .h{font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft)}
+  .mgfocus b{overflow:hidden;text-overflow:ellipsis;max-width:260px}
+  .mgfocus .hops{display:flex;border:1.5px solid var(--ink)}
+  .mgfocus .hops button{width:22px;height:20px;font-size:10.5px;font-weight:800;border-right:1.5px solid var(--ink)}
+  .mgfocus .hops button:last-child{border-right:none}
+  .mgfocus .hops button.on{background:var(--ink);color:var(--lime)}
+  .mgfocus .hops button:not(.on):hover{background:var(--beige-2)}
+  .mgfocus .x{height:22px;padding:0 7px;font-size:9.5px;font-weight:800;letter-spacing:.06em;color:var(--ink-soft)}
+  .mgfocus .x:hover{color:var(--ink);background:var(--beige-2)}
   .mgmeta{right:12px;bottom:12px;padding:4px 9px;font-family:var(--mono);font-size:10.5px;font-weight:700;
     color:var(--ink-soft);box-shadow:none;border-width:1.5px;background:var(--beige-2)}
   .mgmeta b{color:var(--ink)}
@@ -665,8 +694,12 @@
   .mgtip .tm{font-family:var(--mono);font-size:10px;color:var(--ink-soft);margin-top:6px}
   .mgempty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;font-family:var(--mono);
     font-size:12.5px;color:var(--ink-soft);padding:24px}
+  .mgempty.soft{pointer-events:none}
   .mgempty .pbtn{margin-top:12px;font-family:var(--mono);font-size:11px;font-weight:700}
-  @media (prefers-reduced-motion:reduce){ .mgraph .n,.mgraph .e line{transition:none} }
+  @media (prefers-reduced-motion:reduce){
+    .mgraph{--mg-t:0s}
+    .mgraph .n,.mgraph .e line,.mgraph .n text,.mgraph .hull,.mgraph .tlab,.mgraph .elab{transition:none}
+  }
 </style>
 </head>
 <body data-view="board">
@@ -765,7 +798,7 @@ const state = {
   // one per-viewer convenience remembered in localStorage. graph is the /memory/graph payload and
   // graphVer bumps on every fetch, so a re-render with the same graph keeps its DOM and layout.
   mem: {q:'', type:'', includeSuperseded:false, scope:'own', mode: memStoredMode(), loading:false, forbidden:false, error:null,
-    nodes:[], edges:[], total:0, graph:null, graphVer:0},
+    nodes:[], edges:[], total:0, graph:null, graphVer:0, hideUnlinked: memStoredHideUnlinked()},
   memNode: null,           // open node drawer: {name, loading, forbidden, error, node, out[], in[], armSupersede, superBy, superBusy}
 };
 // mirrors packages/core/src/types.ts MEMORY_NODE_TYPES — read-only client copy for the filter chips
@@ -1910,6 +1943,9 @@ function heldBandHtml(){
 function memStoredMode(){
   try { return localStorage.getItem('darbar.memMode')==='list' ? 'list' : 'graph'; } catch { return 'graph'; }
 }
+function memStoredHideUnlinked(){
+  try { return localStorage.getItem('darbar.memHideUnlinked')==='1'; } catch { return false; }
+}
 // a node in the caller's scope is either this project's own or global, never another project's,
 // so a non-null project is always this board's prefix
 function memScopeChip(n){
@@ -1975,7 +2011,8 @@ async function loadMemory(){
   try {
     const params = new URLSearchParams({scope: state.mem.scope, includeSuperseded:String(state.mem.includeSuperseded)});
     if (prefix) params.set('project', prefix);
-    if (state.mem.type) params.set('type', state.mem.type);
+    // DAR-316: the graph filters type client-side (hide in place, same layout), so it fetches every type
+    if (state.mem.type && state.mem.mode==='list') params.set('type', state.mem.type);
     let route = 'graph';
     if (state.mem.mode==='list'){
       params.set('limit', '50');
@@ -2109,26 +2146,56 @@ async function exportMemory(){
   } catch { toast('export failed: network'); }
 }
 
-// ---------- memory graph view (DAR-308) ----------
+// ---------- memory graph view (DAR-308, redesigned DAR-316) ----------
 // d3 (force + zoom + drag), loaded lazily from jsdelivr the first time the graph opens, drawn as
 // plain SVG so every mark is styled by this page's own CSS variables rather than a library theme.
 // Chosen over cytoscape because cytoscape paints to canvas with its own style language, which
 // would put the board's ink/lime vocabulary behind a second stylesheet.
+// DAR-316 layout: each type owns a region (a packed centroid), so unlinked nodes gather by type
+// instead of drifting; links still pull across regions. Filters, search and focus restyle and
+// reframe the settled picture, they never re-run the layout.
 // type colours: ink, brick, lime and green are the board's own; the rest are picked to sit beside
 // them on beige without competing with lime, which stays the highlight colour
 const MEM_TYPE_COLOR = {decision:'#1c1c1c', gotcha:'#c2412d', person:'#d8ff7c', service:'#2d8654',
   repo:'#3a5fb0', project:'#e3a82b', preference:'#9a63c4', reference:'#5bb8c9'};
 const memTypeColor = t => MEM_TYPE_COLOR[t] || '#8a8a8a';
-// global nodes read lighter: the type hue washed toward the canvas beige, never a different hue
-function memTint(hex){
-  const n = parseInt(hex.slice(1), 16), bg = [0xf2, 0xee, 0xe6], k = .5;
-  const c = [(n>>16)&255, (n>>8)&255, n&255].map((v,i)=>Math.round(v*(1-k)+bg[i]*k));
+// one glyph per type (24-unit stroke paths), so type survives without colour
+const MEM_TYPE_GLYPH = {
+  decision:'M6.5 12.5l3.8 3.8 7.2-8.3',
+  gotcha:'M12 5.5v8.2M12 18.2v.3',
+  person:'M12 11.6a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6zM6 19.5c.8-3.3 3.2-5 6-5s5.2 1.7 6 5',
+  service:'M13.4 4 7 13h5l-1.4 7L17 11h-5z',
+  repo:'M9 7.5 4.5 12 9 16.5M15 7.5l4.5 4.5-4.5 4.5',
+  project:'M4.5 7h5.5l2 2.2h7.5V18h-15z',
+  preference:'M12 18.5s-6.5-4-6.5-8.7A3.5 3.5 0 0 1 12 7.7a3.5 3.5 0 0 1 6.5 2.1c0 4.7-6.5 8.7-6.5 8.7z',
+  reference:'M7.5 4.5h9v15l-4.5-3.6-4.5 3.6z'};
+const memGlyph = t => MEM_TYPE_GLYPH[t] || 'M8 12h8';
+function memMix(hex, to, k){
+  const n = parseInt(hex.slice(1), 16);
+  const c = [(n>>16)&255, (n>>8)&255, n&255].map((v,i)=>Math.round(v*(1-k)+to[i]*k));
   return '#' + c.map(v=>v.toString(16).padStart(2,'0')).join('');
 }
-// labels: 28 chars max (full name in the tooltip), sized by the mono advance of 0.6em, so layout
-// and hide rule agree with what is drawn without measuring text
-const MEM_LABEL_MAX = 28, MEM_LABEL_GAP = 6;
-const memLabelText = name => name.length>MEM_LABEL_MAX ? name.slice(0,MEM_LABEL_MAX-1)+'…' : name;
+// global nodes read lighter: the type hue washed toward the canvas beige, never a different hue
+const memTint = hex => memMix(hex, [0xf2, 0xee, 0xe6], .5);
+// region outline: the hue pulled toward ink so lime and cyan still draw a visible edge
+const memLine = hex => memMix(hex, [0x1c, 0x1c, 0x1c], .3);
+// ink or white glyph, whichever reads on the fill
+function memOnFill(hex){
+  const n = parseInt(hex.slice(1), 16);
+  return (.299*((n>>16)&255) + .587*((n>>8)&255) + .114*(n&255))/255 > .58 ? '#1c1c1c' : '#ffffff';
+}
+function memSwatch(t, size=14, fill=memTypeColor(t), ring='#1c1c1c'){
+  return `<svg class="sw" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10.5" fill="${fill}" stroke="${ring}" stroke-width="1.6"/><path d="${memGlyph(t)}" transform="translate(12 12) scale(.7) translate(-12 -12)" fill="none" stroke="${memOnFill(fill)}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+// labels cut on a word boundary (full name on hover and in the tooltip), sized by the mono advance
+// of 0.6em, so layout and hide rule agree with what is drawn without measuring text
+const MEM_LABEL_MAX = 26, MEM_LABEL_GAP = 7;
+function memShortLabel(name){
+  if (name.length <= MEM_LABEL_MAX) return name;
+  const head = name.slice(0, MEM_LABEL_MAX - 1);
+  const cut = Math.max(...['-', ' ', '_', '/', '.'].map(c=>head.lastIndexOf(c)));
+  return (cut >= 12 ? head.slice(0, cut) : head).replace(/[\s\-_/.,:;·—]+$/, '') + '…';
+}
 function memLabelBox(n, side){
   const w = n.lw + 6, h = n.fs/2 + 3;
   const x0 = side==='l' ? n.x - n.r - MEM_LABEL_GAP - w : n.x + n.r + MEM_LABEL_GAP - 3;
@@ -2136,23 +2203,26 @@ function memLabelBox(n, side){
 }
 const memBoxHit = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
 
-// collision on each node's whole footprint, square plus its label to the right, so neighbours are
-// kept off the text and not just off the square. Sweep over x keeps it near-linear.
-function memRectCollide(padX = 12, padY = 5){
+// collision on each node's whole footprint, circle plus its label to the right, so neighbours are
+// kept off the text and not just off the circle; nodes of different types keep a wider gutter,
+// which is what separates the regions. Sweep over x keeps it near-linear.
+function memRectCollide(padX = 10, padY = 4, gutter = 52){
   let nodes = [];
   const force = alpha => {
     const s = nodes.slice().sort((a,b)=>(a.x+a.bx0)-(b.x+b.bx0));
     const k = .6 + .4*Math.min(1, alpha*4);
     for (let i=0;i<s.length;i++){
-      const a = s[i], ax1 = a.x + a.bx1 + padX;
+      const a = s[i], ax1 = a.x + a.bx1 + padX + gutter;
       for (let j=i+1;j<s.length;j++){
         const b = s[j];
         if (b.x + b.bx0 >= ax1) break;
-        const ox = Math.min(a.x+a.bx1, b.x+b.bx1) - Math.max(a.x+a.bx0, b.x+b.bx0) + padX;
-        const oy = Math.min(a.y+a.by, b.y+b.by) - Math.max(a.y-a.by, b.y-b.by) + padY;
+        const gx = a.type===b.type ? padX : padX + gutter, gy = a.type===b.type ? padY : padY + gutter;
+        const ox = Math.min(a.x+a.bx1, b.x+b.bx1) - Math.max(a.x+a.bx0, b.x+b.bx0) + gx;
+        const oy = Math.min(a.y+a.by, b.y+b.by) - Math.max(a.y-a.by, b.y-b.by) + gy;
         if (ox<=0 || oy<=0) continue;
         const fa = a.fx!=null ? 0 : b.fx!=null ? 1 : .5, fb = 1 - fa;
-        if (oy <= ox){
+        // favour sliding sideways: y-only resolution stacks wide footprints into tall columns
+        if (oy <= ox*.5){
           const d = (a.y===b.y ? (memHash(a.id)&1 ? 1 : -1) : Math.sign(b.y-a.y)) * oy * k;
           a.y -= d*fa; b.y += d*fb;
         } else {
@@ -2166,27 +2236,27 @@ function memRectCollide(padX = 12, padY = 5){
   return force;
 }
 
-// hide rule: labels claim space in priority order (own, then best connected), right side first,
-// then left; one that would still cross an earlier label or any other node's square stays hidden.
-// Tier 'r' shows at rest, tier 'z' once zoomed in; text scales with the zoom, so the check holds
-// at every zoom level.
-function memPlaceLabels(nodes){
-  const taken = [], squares = nodes.map(n=>[n.x-n.r-4, n.y-n.r-3, n.x+n.r+4, n.y+n.r+3, n.id]);
-  const order = nodes.slice().sort((a,b)=>(b.own-a.own) || (b.hub-a.hub) || (b.deg-a.deg) || (a.id<b.id?-1:1));
-  for (const n of order) n.lt = null;
-  for (const tier of ['r','z']){
-    for (const n of order){
-      if (n.lt || (tier==='r') !== (n.own || n.hub)) continue;
-      for (const side of ['r','l']){
-        const box = memLabelBox(n, side);
-        if (taken.some(t=>memBoxHit(t, box)) || squares.some(q=>q[4]!==n.id && memBoxHit(q, box))) continue;
-        n.lt = tier; n.side = side; taken.push(box); break;
-      }
+// hide rule: labels claim space in priority order (search/focus/pinned, then linked and own hubs,
+// then the rest), right side first, then left; one that would still cross an earlier label, a
+// region title or any other node's circle stays hidden. 'r' shows at rest, 'z' once zoomed in,
+// 'p' while its search/focus/pin lasts. Text scales with the zoom, so the check holds at every zoom.
+function memPlaceLabels(nodes, prio, blocks){
+  const taken = blocks.slice(), discs = nodes.map(n=>[n.x-n.r-3, n.y-n.r-2, n.x+n.r+3, n.y+n.r+2, n.id]);
+  const rank = n => prio.has(n.id) ? 0 : (n.deg || n.hub || n.fx!=null) ? 1 : 2;
+  const order = nodes.slice().sort((a,b)=>(rank(a)-rank(b)) || (b.own-a.own) || (b.deg-a.deg) || (a.id<b.id?-1:1));
+  for (const n of order){
+    n.lt = null;
+    for (const side of ['r','l']){
+      const box = memLabelBox(n, side);
+      if (taken.some(t=>memBoxHit(t, box)) || discs.some(q=>q[4]!==n.id && memBoxHit(q, box))) continue;
+      n.lt = ['p','r','z'][rank(n)]; n.side = side; taken.push(box); break;
     }
   }
 }
 
 function memHash(str){ let h = 2166136261; for (let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h>>>0; }
+const memReduced = () => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } };
+const memDur = ms => memReduced() ? 0 : ms;
 
 let d3Promise = null;
 function loadD3(){
@@ -2201,17 +2271,29 @@ function loadD3(){
   return d3Promise;
 }
 
-// positions by node id outlive a refetch, so a filter/scope toggle or an added observation redraws
-// the same picture instead of reshuffling it. pinned = dropped there by hand, stays there.
-const memPos = new Map();
-const memG = {sim:null, zoom:null, svg:null, nodes:[], pairs:[], byId:new Map(), near:new Map(),
-  transform:null, refit:true, hoverId:null, hoverPair:null, labels:null, nodeSel:null, edgeSel:null};
+// positions by node id, one cache per scope, outlive a refetch, so an added observation or the
+// superseded toggle redraws the same picture instead of reshuffling it. pinned = dropped there by
+// hand, stays there until double-clicked.
+const memPosByScope = new Map();
+function memPosFor(){
+  if (!memPosByScope.has(state.mem.scope)) memPosByScope.set(state.mem.scope, new Map());
+  return memPosByScope.get(state.mem.scope);
+}
+function memStoredDepth(){
+  try { const d = Number(localStorage.getItem('darbar.memDepth')); return d>=1 && d<=3 ? d : 1; } catch { return 1; }
+}
+const memG = {sim:null, zoom:null, svg:null, nodes:[], pairs:[], byId:new Map(), byName:new Map(), near:new Map(),
+  transform:null, refit:true, hoverId:null, hoverPair:null, labels:null, nodeSel:null, edgeSel:null, hullSel:null,
+  tlabSel:null, blocks:[], ver:null, filterKey:null, prioKey:null, focusKey:null, depth:memStoredDepth()};
 
+const memVisible = n => (!state.mem.type || n.type===state.mem.type) && (!state.mem.hideUnlinked || n.deg>0);
+const memBuilt = () => memG.ver===state.mem.graphVer && memG.nodes.length>0;
 function memGraphMatches(){
   const q = state.mem.q.trim().toLowerCase();
   if (!q || !state.mem.graph) return null;
   const hit = new Set();
-  for (const n of state.mem.graph.nodes){
+  const list = memBuilt() ? memG.nodes.filter(n=>n.vis) : state.mem.graph.nodes;
+  for (const n of list){
     if (n.name.toLowerCase().includes(q) || (n.text||'').toLowerCase().includes(q) || n.type===q) hit.add(n.id);
   }
   return hit;
@@ -2219,7 +2301,9 @@ function memGraphMatches(){
 function memGraphCountText(){
   const g = state.mem.graph; if (!g) return String(state.mem.total);
   const m = memGraphMatches();
-  return m ? `${m.size} of ${g.nodes.length} match` : String(g.total);
+  const vis = memBuilt() ? memG.nodes.filter(n=>n.vis).length : g.nodes.length;
+  if (m) return `${m.size} of ${vis} match`;
+  return vis < g.nodes.length ? `${vis} of ${g.total}` : String(g.total);
 }
 
 function renderMemGraph(el){
@@ -2232,22 +2316,24 @@ function renderMemGraph(el){
   }
   if (!g){ el.innerHTML = '<div class="empty">loading…</div>'; return; }
   if (!g.nodes.length){
-    const scopeEmpty = state.mem.scope==='own' && !state.mem.type;
+    const scopeEmpty = state.mem.scope==='own';
     el.innerHTML = `<div class="mgraph" id="mgraph" data-ver="${state.mem.graphVer}"><div class="mgempty">${scopeEmpty ? memEmptyScopeHtml()
-      : `<div>nothing in memory yet${state.mem.type?` for type ${esc(state.mem.type)}`:''}</div>`}</div></div>`;
+      : '<div>nothing in memory yet</div>'}</div></div>`;
     return;
   }
   const icon = d => `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6">${d}</svg>`;
   el.innerHTML = `<div class="mgraph${state.mem.loading?' busy':''}" id="mgraph" data-ver="${state.mem.graphVer}">
     <svg id="mgsvg" role="img" aria-label="memory graph: ${g.nodes.length} nodes, ${g.edges.length} edges"></svg>
     ${g.capped?`<div class="mgpanel mgcap"><span class="badge warn">CAPPED</span>showing ${g.nodes.length} of ${g.total} · own first, then newest</div>`:''}
-    <div class="mgpanel mgctl">
+    <div class="mgpanel mgfocus" id="mgfocus" hidden></div>
+    <div class="mgpanel mgctl" id="mgctl">
       <button type="button" data-mg="in" title="Zoom in">${icon('<path d="M12 5v14M5 12h14"/>')}</button>
       <button type="button" data-mg="out" title="Zoom out">${icon('<path d="M5 12h14"/>')}</button>
       <button type="button" data-mg="fit" title="Fit to screen">${icon('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>')}</button>
     </div>
     <div class="mgpanel mglegend" id="mglegend"></div>
     <div class="mgpanel mgmeta" id="mgmeta"></div>
+    <div class="mgempty soft" id="mgnone" hidden></div>
     <div class="mgtip" id="mgtip" hidden></div>
   </div>`;
   const ver = String(state.mem.graphVer);
@@ -2255,18 +2341,17 @@ function renderMemGraph(el){
     .catch(()=>{ const b = $('mgraph'); if (b && b.dataset.ver===ver) b.innerHTML = '<div class="mgempty">could not load the graph library from cdn.jsdelivr.net · the List view still works</div>'; });
 }
 
-function buildMemGraph(d3){
-  const g = state.mem.graph;
-  const svgEl = $('mgsvg'); if (!svgEl) return;
-  memG.sim?.stop();
-  const W = svgEl.clientWidth || 900, H = svgEl.clientHeight || 560;
-
-  const deg = new Map();
-  for (const e of g.edges){ deg.set(e.from, (deg.get(e.from)||0)+1); deg.set(e.to, (deg.get(e.to)||0)+1); }
+// the layout, on its own so it can be settled off-screen: sorted by id, seeded from the cache, else
+// beside a cached neighbour, else a hash of the id inside its type's region, and run with a fixed
+// random source, so the same graph always settles into the same picture
+function memGraphLayout(d3, g, pos){
+  const ids = new Set(g.nodes.map(n=>n.id));
+  const edgeN = new Map();
+  for (const e of g.edges){ edgeN.set(e.from, (edgeN.get(e.from)||0)+1); edgeN.set(e.to, (edgeN.get(e.to)||0)+1); }
   // one line per connected pair, whatever the number of relations or their directions
   const pairMap = new Map();
   for (const e of g.edges){
-    if (e.from===e.to) continue;
+    if (e.from===e.to || !ids.has(e.from) || !ids.has(e.to)) continue;
     const [a, b] = e.from < e.to ? [e.from, e.to] : [e.to, e.from];
     const k = `${a}|${b}`;
     if (!pairMap.has(k)) pairMap.set(k, {k, source:a, target:b, fwd:false, back:false, rels:new Set()});
@@ -2275,77 +2360,173 @@ function buildMemGraph(d3){
     p.rels.add(e.relation);
   }
   const pairs = [...pairMap.values()];
+  const near = new Map(g.nodes.map(n=>[n.id, new Set()]));
+  for (const p of pairs){ near.get(p.source).add(p.target); near.get(p.target).add(p.source); }
 
-  // deterministic seed: sorted by id, positions from the cache, else near a cached neighbour, else a
-  // hash of the id. With the randomLcg below, the same graph always settles into the same picture.
+  // size by degree (distinct neighbours), so hubs are visibly bigger than leaves
   const nodes = g.nodes.slice().sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0).map(n=>{
-    const d = deg.get(n.id)||0, own = !!n.project;
-    const r = (own ? 7.5 : 5) + Math.min(9, Math.sqrt(d)*2.1);
-    const p = memPos.get(n.id), label = memLabelText(n.name), fs = own ? 11 : 10;
-    return {...n, own, deg:d, r, label, fs, lw:label.length*fs*.6, side:'r', lt:null,
+    const d = near.get(n.id).size, own = !!n.project, p = pos.get(n.id);
+    const r = 6 + Math.min(8, Math.sqrt(d)*2.6), fs = d>=4 ? 11 : 10, label = memShortLabel(n.name);
+    return {...n, own, deg:d, edges:edgeN.get(n.id)||0, r, fs, label, lw:label.length*fs*.6, side:'r', lt:null, vis:true,
       sup:!!n.supersededBy, x:p?.x, y:p?.y, fx:p?.pinned?p.x:null, fy:p?.pinned?p.y:null, fresh:!p};
   });
-  // labels at rest: every own node, plus only the ten best-connected others. Labelling every node
-  // with 4+ edges piled names on top of each other in the dense middle; the rest label on hover,
-  // on search match, or once zoomed in.
-  const hubs = new Set(nodes.filter(n=>!n.own && n.deg>=4).sort((a,b)=>b.deg-a.deg || (a.id<b.id?-1:1)).slice(0,10).map(n=>n.id));
+  // hubs: the best-connected nodes (own first), bold and still labelled when zoomed out
+  const hubs = new Set(nodes.filter(n=>n.deg>=3).sort((a,b)=>(b.own-a.own) || b.deg-a.deg || (a.id<b.id?-1:1)).slice(0,12).map(n=>n.id));
   // footprint for collision: every label up to 160 nodes (so zooming in reveals them without
   // clashes), beyond that only the labels shown at rest
   const allLabels = nodes.length <= 160;
   for (const n of nodes){
     n.hub = hubs.has(n.id);
-    const lab = allLabels || n.own || n.hub;
+    const lab = allLabels || n.deg || n.hub;
     n.bx0 = -n.r; n.bx1 = lab ? n.r + MEM_LABEL_GAP + n.lw : n.r; n.by = Math.max(n.r, lab ? n.fs/2 + 2 : 0);
   }
   const byId = new Map(nodes.map(n=>[n.id, n]));
-  const near = new Map(nodes.map(n=>[n.id, new Set()]));
-  for (const p of pairs){ near.get(p.source)?.add(p.target); near.get(p.target)?.add(p.source); }
-  const spread = 26*Math.sqrt(nodes.length);
+
+  // regions: one circle per type, sized by the footprint area its nodes need, packed around the
+  // centre and stretched a little to the canvas's wide aspect. Biggest type first, then the
+  // canonical type order, so the arrangement is the same every time.
+  const count = new Map(), area = new Map();
+  for (const n of nodes){
+    count.set(n.type, (count.get(n.type)||0)+1);
+    area.set(n.type, (area.get(n.type)||0) + (n.bx1-n.bx0+16)*(2*n.by+10));
+  }
+  const ti = t => { const i = MEMORY_NODE_TYPES.indexOf(t); return i<0 ? 99 : i; };
+  const types = [...count.keys()].sort((a,b)=>(count.get(b)-count.get(a)) || (ti(a)-ti(b)) || (a<b?-1:1));
+  const circles = types.map(t=>({t, r:Math.sqrt(area.get(t)/Math.PI)*1.12 + 30}));
+  d3.packSiblings(circles);
+  const enc = d3.packEnclose(circles);
+  const cen = new Map(circles.map(c=>[c.t, {x:(c.x-enc.x)*1.22, y:(c.y-enc.y)*.9, r:c.r}]));
+
   for (const n of nodes){
     if (!n.fresh) continue;
-    const h = memHash(n.id);
-    const anchor = [...near.get(n.id)].map(id=>byId.get(id)).find(m=>m && !m.fresh);
+    const h = memHash(n.id), c = cen.get(n.type);
+    const anchor = [...near.get(n.id)].map(id=>byId.get(id)).find(m=>m && !m.fresh && m.type===n.type);
     if (anchor){ n.x = anchor.x + ((h%41)-20); n.y = anchor.y + (((h>>>8)%41)-20); continue; }
-    const a = (h%3600)/3600*Math.PI*2, rad = spread*Math.sqrt(((h>>>12)%1000)/1000);
-    n.x = Math.cos(a)*rad*1.4; n.y = Math.sin(a)*rad*.8;
+    const a = (h%3600)/3600*Math.PI*2, rad = c.r*.75*Math.sqrt(((h>>>12)%1000)/1000);
+    n.x = c.x + Math.cos(a)*rad*1.2; n.y = c.y + Math.sin(a)*rad*.8;
   }
 
   const sim = d3.forceSimulation(nodes)
-    .randomSource(d3.randomLcg(0.308))
-    .force('link', d3.forceLink(pairs).id(d=>d.id).distance(l=>30 + l.source.r + l.target.r))
-    .force('charge', d3.forceManyBody().strength(n=>n.deg ? -40 - n.r*9 : -25).distanceMax(260))
+    .randomSource(d3.randomLcg(0.316))
+    // same-type links pull hard; cross-type links pull gently, so a link bends a region toward
+    // its neighbour without dragging nodes out of it
+    .force('link', d3.forceLink(pairs).id(d=>d.id)
+      .distance(l=>22 + l.source.r + l.target.r + (l.source.type===l.target.type ? 0 : 36))
+      .strength(l=>(l.source.type===l.target.type ? .7 : .1) / Math.max(1, Math.min(l.source.deg, l.target.deg))))
+    .force('charge', d3.forceManyBody().strength(n=>-40 - n.r*4).distanceMax(150))
+    // y pulls harder than x: footprints are wide, so a region packs into rows rather than a column
+    .force('cx', d3.forceX(n=>cen.get(n.type).x - (n.bx0+n.bx1)/2).strength(.07))
+    .force('cy', d3.forceY(n=>cen.get(n.type).y).strength(.26))
     .force('collide', memRectCollide())
-    .force('x', d3.forceX(0).strength(.03))
-    .force('y', d3.forceY(0).strength(.07))
     .stop();
   // settle off-screen so the first paint is final: the layout never plays out in front of anyone.
-  // A fully cached graph skips it (same picture as last time); a partly new one settles gently.
+  // A fully cached graph skips it (same picture as last time). A mostly cached one holds every
+  // known node still while the new ones find a place, so one added node never reshuffles the rest.
   const fresh = nodes.filter(n=>n.fresh).length;
   if (fresh){
-    sim.alpha(fresh===nodes.length ? 1 : .35);
+    const hold = fresh <= nodes.length/2 ? nodes.filter(n=>!n.fresh && n.fx==null) : [];
+    for (const n of hold){ n.fx = n.x; n.fy = n.y; }
+    sim.alpha(1);
     const ticks = Math.ceil(Math.log(sim.alphaMin()/sim.alpha())/Math.log(1-sim.alphaDecay()));
     for (let i=0;i<ticks;i++) sim.tick();
     // links still pull footprints into each other at rest; a few collision-only passes clear that
     const collide = sim.force('collide');
     for (let i=0;i<150;i++) collide(1);
+    for (const n of hold){ n.fx = n.fy = null; n.vx = n.vy = 0; }
   }
-  const savePos = () => { for (const n of nodes) memPos.set(n.id, {x:n.x, y:n.y, pinned:n.fx!=null}); };
+  return {nodes, pairs, near, byId, sim, types, count};
+}
+
+// soft region hull per type around the visible nodes' footprints, and its title above it
+function memGraphHulls(){
+  const {d3, hullSel, tlabSel, nodes} = memG; if (!hullSel) return;
+  const line = d3.line().curve(d3.curveCatmullRomClosed.alpha(.5));
+  const byType = d3.group(nodes.filter(n=>n.vis), n=>n.type);
+  memG.blocks = [];
+  hullSel.each(function(t){
+    const list = byType.get(t.t) || [];
+    t.hull = null;
+    if (list.length){
+      const pts = [];
+      for (const n of list){
+        const R = n.r + 12;
+        for (let i=0;i<12;i++){ const a = i/12*Math.PI*2; pts.push([n.x+Math.cos(a)*R, n.y+Math.sin(a)*R]); }
+        const x1 = n.x + n.bx1 + 9, yb = n.by + 8;
+        if (n.bx1 > n.r) pts.push([x1, n.y-yb], [x1, n.y+yb]);
+      }
+      const h = d3.polygonHull(pts);
+      if (h){
+        t.hull = h;
+        let x0=Infinity, x1=-Infinity, y0=Infinity;
+        for (const [x,y] of h){ x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); }
+        t.lx = (x0+x1)/2; t.ly = y0 - 9;
+        const w = 18 + (t.t.length + 1 + String(list.length).length)*6.9;
+        t.box = [t.lx - w/2, t.ly - 8, t.lx + w/2, t.ly + 8];
+        memG.blocks.push(t.box);
+      }
+    }
+    t.n = list.length;
+    d3.select(this).classed('off', !t.hull).attr('d', t.hull ? line(t.hull) : null);
+  });
+  tlabSel.classed('off', t=>!t.hull).attr('transform', t=>t.hull ? `translate(${t.lx},${t.ly})` : null)
+    .each(function(t){
+      if (!t.hull) return;
+      const w = t.box[2] - t.box[0];
+      d3.select(this).select('g.sw').attr('transform', `translate(${-w/2+6},0)`);
+      d3.select(this).select('text').attr('x', -w/2 + 16).select('.c').text(String(t.n));
+    });
+}
+
+function memGraphPlace(prio){
+  const {nodeSel, nodes} = memG; if (!nodeSel) return;
+  const vis = nodes.filter(n=>n.vis);
+  for (const n of nodes) if (!n.vis) n.lt = null;
+  memPlaceLabels(vis, prio, memG.blocks);
+  nodeSel.classed('lr', d=>d.lt==='r').classed('lz', d=>d.lt==='z').classed('pl', d=>d.lt==='p')
+    .select('text').attr('x', d=>d.side==='l' ? -d.r-MEM_LABEL_GAP : d.r+MEM_LABEL_GAP)
+    .attr('text-anchor', d=>d.side==='l' ? 'end' : 'start');
+}
+
+function buildMemGraph(d3){
+  const g = state.mem.graph;
+  const svgEl = $('mgsvg'); if (!svgEl) return;
+  memG.sim?.stop();
+  const W = svgEl.clientWidth || 900, H = svgEl.clientHeight || 560;
+  const pos = memPosFor();
+  const {nodes, pairs, near, byId, sim, types, count} = memGraphLayout(d3, g, pos);
+  const savePos = () => { for (const n of nodes) pos.set(n.id, {x:n.x, y:n.y, pinned:n.fx!=null}); };
   savePos();
-  memPlaceLabels(nodes);
 
   const svg = d3.select(svgEl);
   svg.selectAll('*').remove();
   const defs = svg.append('defs');
-  const dots = defs.append('pattern').attr('id','mgdots').attr('width',20).attr('height',20).attr('patternUnits','userSpaceOnUse');
-  dots.append('circle').attr('cx',1.2).attr('cy',1.2).attr('r',1.1).attr('fill','rgba(28,28,28,.16)');
-  for (const [id, fill] of [['mgarr','rgba(28,28,28,.45)'], ['mgarrhot','#1c1c1c']]){
+  for (const [id, fill] of [['mgarr','rgba(28,28,28,.55)'], ['mgarrhot','#1c1c1c']]){
     defs.append('marker').attr('id',id).attr('viewBox','0 -5 10 10').attr('refX',9).attr('refY',0)
-      .attr('markerWidth',7).attr('markerHeight',7).attr('markerUnits','userSpaceOnUse').attr('orient','auto-start-reverse')
+      .attr('markerWidth',6.5).attr('markerHeight',6.5).attr('markerUnits','userSpaceOnUse').attr('orient','auto-start-reverse')
       .append('path').attr('d','M0,-4.5L10,0L0,4.5Z').attr('fill',fill);
   }
-  svg.append('rect').attr('width','100%').attr('height','100%').attr('fill','url(#mgdots)');
+  // an empty-canvas click clears the focus; d3-zoom swallows the click that ends a pan
+  svg.append('rect').attr('class','bg').attr('width','100%').attr('height','100%')
+    .on('click', ()=>{ if (state.sel?.kind==='mem') clearSel(); });
   const vp = svg.append('g');
-  const edgeLayer = vp.append('g'), nodeLayer = vp.append('g'), labelLayer = vp.append('g');
+  const hullLayer = vp.append('g'), edgeLayer = vp.append('g'), tlabLayer = vp.append('g'),
+    nodeLayer = vp.append('g'), labelLayer = vp.append('g');
+
+  const tdata = types.map(t=>({t, n:count.get(t)}));
+  const hullSel = hullLayer.selectAll('path').data(tdata).join('path').attr('class','hull')
+    .attr('style', t=>`--c:${memTypeColor(t.t)};--cl:${memLine(memTypeColor(t.t))}`);
+  // a region's title is also its filter: clicking it shows only that type (again: every type)
+  const tlabSel = tlabLayer.selectAll('g').data(tdata).join('g').attr('class','tlab')
+    .attr('data-mem-legend', t=>t.t);
+  tlabSel.append('title').text(t=>`show only ${t.t} · click again for every type`);
+  tlabSel.each(function(t){
+    const c = memTypeColor(t.t), sw = d3.select(this).append('g').attr('class','sw');
+    sw.append('circle').attr('r',6).attr('fill',c).attr('stroke','#1c1c1c').attr('stroke-width',1);
+    sw.append('path').attr('d', memGlyph(t.t)).attr('transform','scale(.36) translate(-12 -12)')
+      .attr('fill','none').attr('stroke', memOnFill(c)).attr('stroke-width',3.4).attr('stroke-linecap','round').attr('stroke-linejoin','round');
+    const tx = d3.select(this).append('text').attr('dy','.35em').text(t.t.toUpperCase());
+    tx.append('tspan').attr('class','c').attr('dx', 5);
+  });
 
   const edgeSel = edgeLayer.selectAll('g').data(pairs).join('g')
     .attr('class', p=>`e${p.rels.has('SUPERSEDES')?' sup':''}`);
@@ -2365,18 +2546,15 @@ function buildMemGraph(d3){
   const nodeSel = nodeLayer.selectAll('g').data(nodes, d=>d.id).join('g')
     .attr('class', d=>`n ${d.own?'own':'glob'}${d.sup?' sup':''}${d.hub?' hub':''}`)
     .attr('data-mem-row', d=>d.name);
-  nodeSel.append('rect').attr('class','halo').attr('x',d=>-d.r-5).attr('y',d=>-d.r-5).attr('width',d=>d.r*2+10).attr('height',d=>d.r*2+10);
-  nodeSel.filter(d=>d.own && !d.sup).append('rect').attr('class','sh').attr('x',d=>-d.r+2.5).attr('y',d=>-d.r+2.5).attr('width',d=>d.r*2).attr('height',d=>d.r*2);
-  nodeSel.append('rect').attr('class','b').attr('x',d=>-d.r).attr('y',d=>-d.r).attr('width',d=>d.r*2).attr('height',d=>d.r*2)
+  nodeSel.append('circle').attr('class','halo').attr('r', d=>d.r+3.5);
+  nodeSel.append('circle').attr('class','b').attr('r', d=>d.r)
     .attr('fill', d=>d.own ? memTypeColor(d.type) : memTint(memTypeColor(d.type)));
+  // the glyph needs room: only circles big enough to hold it carry one
+  nodeSel.filter(d=>d.r>=7.5 && !d.sup).append('path').attr('class','gl').attr('d', d=>memGlyph(d.type))
+    .attr('transform', d=>{ const s = d.r*1.3; return `translate(${-s/2},${-s/2}) scale(${s/24})`; })
+    .attr('stroke', d=>memOnFill(d.own ? memTypeColor(d.type) : memTint(memTypeColor(d.type))))
+    .attr('stroke-width', d=>1.35*24/(d.r*1.3));
   nodeSel.append('text').attr('dy','.34em').text(d=>d.label);
-  const placeLabels = () => {
-    memPlaceLabels(nodes);
-    nodeSel.classed('lr', d=>d.lt==='r').classed('lz', d=>d.lt==='z')
-      .select('text').attr('x', d=>d.side==='l' ? -d.r-MEM_LABEL_GAP : d.r+MEM_LABEL_GAP)
-      .attr('text-anchor', d=>d.side==='l' ? 'end' : 'start');
-  };
-  placeLabels();
 
   const tip = $('mgtip'), box = $('mgraph');
   const moveTip = ev => {
@@ -2386,23 +2564,25 @@ function buildMemGraph(d3){
     if (y + tip.offsetHeight > b.height - 8) y = ev.clientY - b.top - tip.offsetHeight - 14;
     tip.style.left = `${Math.max(8,x)}px`; tip.style.top = `${Math.max(8,y)}px`;
   };
-  nodeSel.on('mouseenter', (ev,d)=>{
-    memG.hoverId = d.id; memGraphRestyle();
+  // hover previews the node's neighbours and shows its whole name, raised over anything nearby
+  nodeSel.on('mouseenter', function(ev,d){
+    memG.hoverId = d.id; d3.select(this).raise().select('text').text(d.name); memGraphRestyle();
     tip.innerHTML = `<div class="tn">${esc(d.name)}</div>
       <div class="tc"><span class="chip">${esc(d.type)}</span>${memScopeChip(d)}${d.sup?`<span class="badge off">SUPERSEDED</span>`:''}</div>
       ${d.text?`<div class="tx">${esc(d.text)}</div>`:''}
-      <div class="tm">${d.observationCount} obs · ${d.deg} edge${d.deg===1?'':'s'}${d.updatedAt?` · ${relTime(d.updatedAt)}`:''}${d.sup&&d.supersededBy?` · by ${esc(d.supersededBy)}`:''}</div>`;
+      <div class="tm">${d.observationCount} obs · ${d.edges} edge${d.edges===1?'':'s'}${d.updatedAt?` · ${relTime(d.updatedAt)}`:''}${d.sup&&d.supersededBy?` · by ${esc(d.supersededBy)}`:''}${d.fx!=null?' · pinned, double-click to release':''}</div>`;
     tip.hidden = false; moveTip(ev);
   }).on('mousemove', moveTip)
-    .on('mouseleave', ()=>{ memG.hoverId = null; tip.hidden = true; memGraphRestyle(); });
+    .on('mouseleave', function(ev,d){ memG.hoverId = null; d3.select(this).select('text').text(d.label); tip.hidden = true; memGraphRestyle(); })
+    .on('dblclick', (ev,d)=>{ ev.stopPropagation(); if (d.fx==null) return; d.fx = d.fy = null; savePos(); memG.prioKey = null; memGraphRestyle(); });
 
   const paint = () => {
     nodeSel.attr('transform', d=>`translate(${d.x},${d.y})`);
     edgeSel.each(function(p){
       const a = p.source, b = p.target;
       const dx = b.x-a.x, dy = b.y-a.y, len = Math.hypot(dx,dy) || 1, ux = dx/len, uy = dy/len;
-      // stop each end at the square's edge (not its centre) so the arrowhead is visible
-      const ea = a.r*1.15 + (p.back?3:1), eb = b.r*1.15 + (p.fwd?3:1);
+      // stop each end at the circle's edge (not its centre) so the arrowhead is visible
+      const ea = a.r + (p.back?2.5:1), eb = b.r + (p.fwd?2.5:1);
       const x1 = a.x+ux*ea, y1 = a.y+uy*ea, x2 = b.x-ux*eb, y2 = b.y-uy*eb;
       d3.select(this).selectAll('line').attr('x1',x1).attr('y1',y1).attr('x2',x2).attr('y2',y2);
     });
@@ -2410,46 +2590,103 @@ function buildMemGraph(d3){
   };
   paint();
 
-  // drag drops a node where it is let go (pinned, remembered); the sim warms just enough to let
-  // neighbours follow, then cools to a stop: no idle motion once the hand is off it
+  // drag drops a node where it is let go (pinned, remembered). Only it and its direct neighbours
+  // move: everything else is held still while the sim warms, then cools to a stop, so a drag never
+  // reshuffles the rest of the picture and nothing idles once the hand is off it
+  const release = () => { for (const n of nodes) if (n.hold){ n.fx = n.fy = null; n.hold = false; n.vx = n.vy = 0; } };
   const drag = d3.drag().clickDistance(4)
-    .on('start', (ev,d)=>{ if (!ev.active) sim.alphaTarget(.08).restart(); d.fx = d.x; d.fy = d.y; tip.hidden = true; })
+    .on('start', (ev,d)=>{
+      release();
+      for (const n of nodes) if (n!==d && n.fx==null && !near.get(d.id).has(n.id)){ n.fx = n.x; n.fy = n.y; n.hold = true; }
+      if (!ev.active) sim.alphaTarget(.06).restart();
+      d.fx = d.x; d.fy = d.y; tip.hidden = true;
+    })
     .on('drag', (ev,d)=>{ d.fx = ev.x; d.fy = ev.y; })
     .on('end', (ev)=>{ if (!ev.active) sim.alphaTarget(0); });
   nodeSel.call(drag);
-  sim.on('tick', paint).on('end', ()=>{ savePos(); placeLabels(); });
+  sim.on('tick', ()=>{ paint(); memGraphHulls(); })
+    .on('end', ()=>{ release(); savePos(); memGraphHulls(); memG.prioKey = null; memGraphRestyle(); });
 
   const zoom = d3.zoom().scaleExtent([.15, 4]).on('zoom', ev=>{
     const t = ev.transform;
     vp.attr('transform', t);
-    dots.attr('patternTransform', `translate(${t.x},${t.y}) scale(${t.k})`);
-    svgEl.classList.toggle('zin', t.k >= 1.6);
+    svgEl.classList.toggle('zin', t.k >= 1.25);
+    svgEl.classList.toggle('zout', t.k < .55);
     memG.transform = t;
   });
   svg.call(zoom).on('dblclick.zoom', null);
-  Object.assign(memG, {sim, zoom, svg, nodes, pairs, byId, near, nodeSel, edgeSel, labels:labelSel, W, H, d3});
+  Object.assign(memG, {sim, zoom, svg, nodes, pairs, byId, near, nodeSel, edgeSel, hullSel, tlabSel, labels:labelSel,
+    byName:new Map(nodes.map(n=>[n.name, n])), W, H, d3, ver:state.mem.graphVer, filterKey:null, prioKey:null, focusKey:null});
+  memGraphRestyle();
   if (memG.refit || !memG.transform){ memG.refit = false; memGraphFit(null, false); }
   else svg.call(zoom.transform, memG.transform);
-
-  memGraphLegend();
-  memGraphRestyle();
 }
 
-// fit the given nodes (default all) into view, leaving room on the right for labels
-function memGraphFit(only, animate=true){
+// the canvas the graph may use: all of it (less the drawer when it overlays the graph, and the
+// focus bar on top), or, when that would put nodes under them, the part the legend and the zoom
+// controls leave free
+function memFreeRect(narrow){
+  const svgEl = memG.svg.node();
+  const W = svgEl.clientWidth || memG.W, H = svgEl.clientHeight || memG.H;
+  let x0 = 20, x1 = W - 20, y0 = 20, y1 = H - 20;
+  const lg = $('mglegend');
+  if (narrow){
+    x1 = W - 54;
+    if (lg && lg.offsetWidth) x0 = Math.max(x0, lg.offsetLeft + lg.offsetWidth + 16);
+  }
+  if (!$('mgfocus')?.hidden || document.querySelector('.mgcap')) y0 = 52;
+  const dr = $('drawer');
+  if (dr?.classList.contains('open') && window.innerWidth > 1080){
+    const left = svgEl.getBoundingClientRect().left;
+    x1 = Math.min(x1, window.innerWidth - dr.offsetWidth - left - 16);
+  }
+  if (x1 - x0 < 260){ x0 = 20; x1 = Math.max(x0 + 260, x1); }
+  return {x0, x1, y0, y1};
+}
+// screen boxes of the floating panels a node must not end up under
+function memPanelBoxes(){
+  return ['mglegend', 'mgctl'].map(id=>$(id)).filter(el=>el && el.offsetWidth)
+    .map(el=>[el.offsetLeft - 8, el.offsetTop - 8, el.offsetLeft + el.offsetWidth + 8, el.offsetTop + el.offsetHeight + 8]);
+}
+// frame the given nodes (default every visible one): each node's reserved footprint plus a margin
+function memGraphFit(only, animate=true, maxK=1.8){
   const {svg, zoom, d3} = memG; if (!svg || !zoom) return;
-  const list = (only && only.length) ? only : memG.nodes; if (!list.length) return;
-  const W = svg.node().clientWidth || memG.W, H = svg.node().clientHeight || memG.H;
+  const list = (only && only.length) ? only : memG.nodes.filter(n=>n.vis); if (!list.length) return;
   let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
-  for (const n of list){ x0=Math.min(x0,n.x-n.r); y0=Math.min(y0,n.y-n.r); x1=Math.max(x1,n.x+n.r+(n.lt==='r'&&n.side==='r'?MEM_LABEL_GAP+n.lw:0)); x0=Math.min(x0,n.x-n.r-(n.lt==='r'&&n.side==='l'?MEM_LABEL_GAP+n.lw:0)); y1=Math.max(y1,n.y+n.r); }
-  const pad = 56, k = Math.max(.15, Math.min(1.8, Math.min((W-pad*2)/Math.max(1,x1-x0), (H-pad*2)/Math.max(1,y1-y0))));
-  const t = d3.zoomIdentity.translate(W/2 - k*(x0+x1)/2, H/2 - k*(y0+y1)/2).scale(k);
-  (animate ? svg.transition().duration(380).ease(d3.easeCubicOut) : svg).call(zoom.transform, t);
+  for (const n of list){
+    const lx = n.lt && n.side==='l' ? n.x - n.r - MEM_LABEL_GAP - n.lw : n.x + n.bx0;
+    x0 = Math.min(x0, lx); x1 = Math.max(x1, n.x + n.bx1); y0 = Math.min(y0, n.y - n.by); y1 = Math.max(y1, n.y + n.by);
+  }
+  const m = only ? 16 : 30; x0 -= m; x1 += m; y0 -= m + (only ? 0 : 14); y1 += m;
+  const frame = R => {
+    const k = Math.max(.15, Math.min(maxK, (R.x1-R.x0)/Math.max(1,x1-x0), (R.y1-R.y0)/Math.max(1,y1-y0)));
+    return d3.zoomIdentity.translate((R.x0+R.x1)/2 - k*(x0+x1)/2, (R.y0+R.y1)/2 - k*(y0+y1)/2).scale(k);
+  };
+  let t = frame(memFreeRect(false));
+  const panels = memPanelBoxes();
+  const under = t => list.some(n=>{ const b = [t.applyX(n.x+n.bx0), t.applyY(n.y-n.by), t.applyX(n.x+n.bx1), t.applyY(n.y+n.by)];
+    return panels.some(p=>memBoxHit(p, b)); });
+  if (panels.length && under(t)) t = frame(memFreeRect(true));
+  const dur = animate ? memDur(360) : 0;
+  svg.interrupt();
+  (dur ? svg.transition().duration(dur).ease(d3.easeCubicInOut) : svg).call(zoom.transform, t);
+}
+// on focus: keep the current zoom when the whole neighbourhood is already in view, else frame it
+function memGraphReveal(list){
+  const t = memG.transform; if (!t || !list.length) return memGraphFit(list, true, 1.4);
+  const R = memFreeRect(true);
+  const inView = list.every(n=>{ const x = t.applyX(n.x), y = t.applyY(n.y); return x>R.x0 && x<R.x1 && y>R.y0 && y<R.y1; });
+  if (!inView) memGraphFit(list, true, Math.max(1, Math.min(1.4, t.k)));
 }
 function memGraphZoom(dir){
   const {svg, zoom} = memG; if (!svg) return;
-  if (dir==='fit'){ const m = memGraphMatches(); return memGraphFit(m ? memG.nodes.filter(n=>m.has(n.id)) : null); }
-  svg.transition().duration(200).call(zoom.scaleBy, dir==='in' ? 1.4 : 1/1.4);
+  if (dir==='fit'){
+    const m = memGraphMatches(), f = memG.focus;
+    const only = m ? memG.nodes.filter(n=>m.has(n.id)) : f ? [...f.keys()].map(id=>memG.byId.get(id)) : null;
+    return memGraphFit(only, true, only ? 1.6 : 1.8);
+  }
+  svg.interrupt();
+  svg.transition().duration(memDur(200)).call(zoom.scaleBy, dir==='in' ? 1.4 : 1/1.4);
 }
 
 function memGraphLegend(){
@@ -2458,41 +2695,121 @@ function memGraphLegend(){
   for (const n of g.nodes) counts.set(n.type, (counts.get(n.type)||0)+1);
   const prefix = state.data?.project?.prefix ?? '';
   const anyGlobal = g.nodes.some(n=>!n.project), anySup = g.nodes.some(n=>n.supersededBy);
-  el.innerHTML = `<div class="h">Type</div>
-    ${MEMORY_NODE_TYPES.map(t=>{ const c = counts.get(t)||0; const on = state.mem.type===t;
-      return `<button type="button" class="lrow${on?' on':''}" data-mem-legend="${esc(t)}" ${!c&&!on?'style="opacity:.4"':''}
-        title="${on?'show every type':`show only ${esc(t)}`}"><span class="sw" style="background:${memTypeColor(t)}"></span><span>${esc(t)}</span><span class="c">${c}</span></button>`; }).join('')}
+  const types = MEMORY_NODE_TYPES.filter(t=>counts.get(t) || state.mem.type===t);
+  const ring = (fill, stroke, dash='') => `<svg class="sw" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5" fill="${fill}" stroke="${stroke}" stroke-width="2"${dash}/></svg>`;
+  el.innerHTML = `<div class="h">Types · click to filter</div>
+    ${types.map(t=>{ const c = counts.get(t)||0, on = state.mem.type===t, mute = state.mem.type && !on;
+      return `<button type="button" class="lrow${on?' on':''}${mute?' mute':''}" data-mem-legend="${esc(t)}"
+        title="${on?'show every type':`show only ${esc(t)}`}">${memSwatch(t)}<span>${esc(t)}</span><span class="c">${c}</span></button>`; }).join('')}
     <div class="sep"></div>
-    <div class="lrow"><span class="sw own" style="background:var(--beige)"></span><span>own · ${esc(prefix)}</span><span></span></div>
-    ${anyGlobal||state.mem.scope==='all'?`<div class="lrow"><span class="sw glob" style="background:var(--beige)"></span><span>global</span><span></span></div>`:''}
-    ${anySup?`<div class="lrow"><span class="sw sup"></span><span>superseded</span><span></span></div>`:''}`;
+    <div class="lrow">${ring('#e3a82b','#1c1c1c')}<span>own · ${esc(prefix)}</span><span></span></div>
+    ${anyGlobal?`<div class="lrow">${ring(memTint('#e3a82b'),'rgba(28,28,28,.42)')}<span>global</span><span></span></div>`:''}
+    ${anySup?`<div class="lrow">${ring('#f2eee6','rgba(28,28,28,.55)',' stroke-dasharray="4 3"')}<span>superseded</span><span></span></div>`:''}
+    <div class="lrow"><svg class="sw" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="16" r="3.5" fill="none" stroke="#1c1c1c" stroke-width="1.8"/><circle cx="15.5" cy="11" r="7" fill="none" stroke="#1c1c1c" stroke-width="1.8"/></svg><span>size = links</span><span></span></div>`;
   const meta = $('mgmeta');
-  if (meta) meta.innerHTML = `<b>${g.nodes.length}</b> nodes · <b>${g.edges.length}</b> edges`;
+  if (meta){
+    const vis = memG.nodes.filter(n=>n.vis), vids = new Set(vis.map(n=>n.id));
+    const ve = memG.pairs.filter(p=>vids.has(p.source.id) && vids.has(p.target.id)).length;
+    const unl = vis.filter(n=>!n.deg).length;
+    meta.innerHTML = `<b>${vis.length}</b> nodes · <b>${ve}</b> links${unl?` · ${unl} unlinked`:''}`;
+  }
 }
 
-// class-only restyle: search, hover and the open drawer change emphasis, never positions
+// type filter and hide-unlinked hide nodes in place (the layout stays put) and reframe what is left
+function memGraphApplyFilter(animate){
+  const {nodeSel, edgeSel, nodes} = memG;
+  for (const n of nodes) n.vis = memVisible(n);
+  nodeSel.classed('off', d=>!d.vis);
+  edgeSel.classed('off', p=>!(p.source.vis && p.target.vis));
+  memGraphHulls();
+  memGraphLegend();
+  const none = $('mgnone'), anyVis = nodes.some(n=>n.vis);
+  if (none){
+    none.hidden = anyVis;
+    if (!anyVis) none.innerHTML = `<div>nothing to show${state.mem.type?` for type ${esc(state.mem.type)}`:''}${state.mem.hideUnlinked?' with unlinked hidden':''}</div>`;
+  }
+  memG.prioKey = null;
+  if (animate && anyVis) memGraphFit(null, true);
+}
+
+// N-hop neighbourhood of a node through visible nodes: id -> hop count
+function memFocusSet(id, depth){
+  const seen = new Map([[id, 0]]); let frontier = [id];
+  for (let d=1; d<=depth; d++){
+    const next = [];
+    for (const x of frontier) for (const y of memG.near.get(x) || []){
+      if (!seen.has(y) && memG.byId.get(y)?.vis){ seen.set(y, d); next.push(y); }
+    }
+    frontier = next;
+  }
+  return seen;
+}
+function memGraphFocusBar(fnode, focus){
+  const el = $('mgfocus'); if (!el) return;
+  el.hidden = !fnode;
+  if (!fnode) return;
+  el.innerHTML = `<span class="h">local</span><b title="${esc(fnode.name)}">${esc(fnode.label)}</b>
+    <span class="h">${focus.size-1} linked · hops</span>
+    <span class="hops">${[1,2,3].map(d=>`<button type="button" class="${memG.depth===d?'on':''}" data-mg-depth="${d}" title="keep ${d} hop${d>1?'s':''} around it lit">${d}</button>`).join('')}</span>
+    <button type="button" class="x" data-mg-unfocus title="clear focus (Esc)">ESC</button>`;
+}
+function memGraphSetDepth(d){
+  if (!(d>=1 && d<=3) || memG.depth===d) return;
+  memG.depth = d;
+  try { localStorage.setItem('darbar.memDepth', String(d)); } catch {}
+  memGraphRestyle();
+}
+
+// class-only restyle: search, hover, filters and the open drawer change emphasis, never positions
 function memGraphRestyle(){
   const {nodeSel, edgeSel, labels, near} = memG;
   if (!nodeSel || !document.getElementById('mgsvg')?.contains(nodeSel.node())) return;
+  const fk = `${state.mem.type}|${state.mem.hideUnlinked}`;
+  if (fk !== memG.filterKey){ const first = memG.filterKey===null; memG.filterKey = fk; memGraphApplyFilter(!first); }
   const m = memGraphMatches();
   const selName = state.sel?.kind==='mem' ? state.sel.id : null;
-  const hov = memG.hoverId, hp = memG.hoverPair;
+  const fnode = selName ? memG.byName.get(selName) : null;
+  const focus = fnode?.vis ? memFocusSet(fnode.id, memG.depth) : null;
+  memG.focus = focus;
+  const hov = memG.hoverId && memG.byId.get(memG.hoverId)?.vis ? memG.hoverId : null, hp = memG.hoverPair;
   const hn = hov ? near.get(hov) : null;
-  const pairHot = p => (hov && (p.source.id===hov || p.target.id===hov)) || p.k===hp;
+
+  // labels re-place only when the set that must be labelled changes (search, focus, pins)
+  const prio = new Set([...(focus ? focus.keys() : []), ...(m || [])]);
+  for (const n of memG.nodes) if (n.fx!=null && n.vis) prio.add(n.id);
+  const pk = [...prio].sort().join(',');
+  if (pk !== memG.prioKey){ memG.prioKey = pk; memGraphPlace(prio); }
+
+  const inF = id => !focus || focus.has(id);
+  const lit = d => hov && (d.id===hov || hn.has(d.id));
   nodeSel
     .classed('match', d=>!!m && m.has(d.id))
-    .classed('sel', d=>d.name===selName)
+    .classed('sel', d=>d===fnode)
     .classed('hot', d=>d.id===hov)
     .classed('near', d=>!!hn && hn.has(d.id))
-    .classed('dim', d=> hov ? (d.id!==hov && !hn.has(d.id)) : (!!m && !m.has(d.id)));
-  const edgeDim = p => hov ? !pairHot(p) : (!!m && !(m.has(p.source.id) && m.has(p.target.id)));
-  edgeSel.classed('hot', pairHot).classed('dim', edgeDim)
+    .classed('fade', d=>!inF(d.id) && !lit(d))
+    // inside a focus, hover only lights its links; outside one it dims everything it does not touch
+    .classed('dim', d=>inF(d.id) && (hov && !focus ? !lit(d) : (!!m && !m.has(d.id))));
+  const pairHot = p => (hov && (p.source.id===hov || p.target.id===hov)) || p.k===hp;
+  const pairF = p => !!focus && focus.has(p.source.id) && focus.has(p.target.id);
+  edgeSel.classed('hot', pairHot).classed('fe', p=>pairF(p) && !pairHot(p))
+    .classed('fade', p=>!!focus && !pairF(p) && !pairHot(p))
+    .classed('dim', p=>!pairHot(p) && !pairF(p) && ((hov || hp) && !focus ? true : (!!m && !(m.has(p.source.id) && m.has(p.target.id)))))
     .each(function(p){
-      const hot = pairHot(p);
-      this.firstChild.setAttribute('marker-end', p.fwd ? `url(#${hot?'mgarrhot':'mgarr'})` : '');
-      this.firstChild.setAttribute('marker-start', p.back ? `url(#${hot?'mgarrhot':'mgarr'})` : '');
+      const arrow = pairHot(p) || pairF(p), id = pairHot(p) ? 'mgarrhot' : 'mgarr';
+      this.firstChild.setAttribute('marker-end', arrow && p.fwd ? `url(#${id})` : '');
+      this.firstChild.setAttribute('marker-start', arrow && p.back ? `url(#${id})` : '');
     });
   labels.classed('hot', pairHot);
+  memG.svg.node().classList.toggle('focusing', !!focus);
+  memGraphFocusBar(focus ? fnode : null, focus);
+
+  // a new focus (node or depth) brings its neighbourhood into view; clearing it keeps the view
+  const fkey = focus ? `${fnode.id}|${memG.depth}` : null;
+  if (fkey !== memG.focusKey){
+    memG.focusKey = fkey;
+    if (focus) memGraphReveal([...focus.keys()].map(id=>memG.byId.get(id)));
+  }
   const vn = $('memvn'); if (vn && state.mem.mode==='graph') vn.textContent = memGraphCountText();
 }
 
@@ -2617,6 +2934,7 @@ function renderContent(){
         <div class="filters memtypes" id="memtypes"></div>
         <button class="pbtn" type="button" id="memglobal" title="add global memory (shared by every project) to this project's own"></button>
         <button class="pbtn" type="button" id="memsup"></button>
+        <button class="pbtn" type="button" id="memunlinked" title="hide nodes with no links (graph only)"></button>
         <button class="pbtn" type="button" id="memexport">Export .md</button>`;
     }
     const graphMode = state.mem.mode==='graph';
@@ -2630,6 +2948,9 @@ function renderContent(){
     $('memglobal').setAttribute('aria-pressed', String(state.mem.scope==='all'));
     $('memsup').textContent = (state.mem.includeSuperseded?'✓ ':'') + 'superseded';
     $('memsup').setAttribute('aria-pressed', String(state.mem.includeSuperseded));
+    $('memunlinked').hidden = !graphMode;
+    $('memunlinked').textContent = (state.mem.hideUnlinked?'✓ ':'') + 'hide unlinked';
+    $('memunlinked').setAttribute('aria-pressed', String(state.mem.hideUnlinked));
     if (graphMode && !state.mem.forbidden && !state.mem.error) renderMemGraph(el);
     else el.innerHTML = renderMemResults();
   }
@@ -3004,12 +3325,16 @@ document.addEventListener('click', e=>{
   const cp = e.target.closest('[data-copy]');
   if (cp){ copyLink(cp); return; }
   // ---------- memory tab (DAR-283) ----------
+  const mgDepth = e.target.closest('[data-mg-depth]');
+  if (mgDepth){ memGraphSetDepth(Number(mgDepth.dataset.mgDepth)); return; }
+  if (e.target.closest('[data-mg-unfocus]')){ clearSel(); return; }
   const memRow = e.target.closest('[data-mem-row]');
   if (memRow){ e.preventDefault(); openMemNode(memRow.dataset.memRow); return; }
   const memType = e.target.closest('[data-mem-type]');
-  if (memType){ state.mem.type = memType.dataset.memType; renderContent(); loadMemory(); return; }
+  // graph mode filters what is drawn (no refetch, no relayout); the list refetches by type
+  if (memType){ state.mem.type = memType.dataset.memType; renderContent(); if (state.mem.mode!=='graph') loadMemory(); return; }
   const memLegend = e.target.closest('[data-mem-legend]');
-  if (memLegend){ const t = memLegend.dataset.memLegend; state.mem.type = state.mem.type===t ? '' : t; renderContent(); loadMemory(); return; }
+  if (memLegend){ const t = memLegend.dataset.memLegend; state.mem.type = state.mem.type===t ? '' : t; renderContent(); if (state.mem.mode!=='graph') loadMemory(); return; }
   const memMode = e.target.closest('[data-mem-mode]');
   if (memMode){
     state.mem.mode = memMode.dataset.memMode;
@@ -3023,6 +3348,11 @@ document.addEventListener('click', e=>{
   }
   const mg = e.target.closest('[data-mg]');
   if (mg){ memGraphZoom(mg.dataset.mg); return; }
+  if (e.target.closest('#memunlinked')){
+    state.mem.hideUnlinked = !state.mem.hideUnlinked;
+    try { localStorage.setItem('darbar.memHideUnlinked', state.mem.hideUnlinked ? '1' : '0'); } catch {}
+    renderContent(); return;
+  }
   if (e.target.closest('#memsup')){ state.mem.includeSuperseded = !state.mem.includeSuperseded; renderContent(); loadMemory(); return; }
   if (e.target.closest('#memexport')){ exportMemory(); return; }
   if (e.target.closest('#memobsadd')){
@@ -3063,6 +3393,9 @@ document.addEventListener('keydown', e=>{
     if (e.key==='Enter'){ e.preventDefault(); const r = palResults()[state.pal.sel]; if (r) palGo(r); return; }
     return;
   }
+  // 1-3 set the local graph's hop depth while a memory node is in focus
+  if (/^[123]$/.test(e.key) && state.view==='memory' && state.sel?.kind==='mem' && !e.metaKey && !e.ctrlKey && !e.altKey
+    && !e.target.closest?.('input,textarea,select,[contenteditable]')){ memGraphSetDepth(Number(e.key)); return; }
   if (e.key==='Escape') clearSel();
 });
 
