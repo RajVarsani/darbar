@@ -37,6 +37,7 @@ def claude_md(name, role, cfg):
     names = list(tools["claude"])
     for m in role["mcp"]:                       # MCP scope = the server's tool names, in `tools`
         names += cfg.get("mcp", {}).get(m, {}).get("claude_tools", [])
+    names += role.get("claude_extra_tools", [])
     fm = [f"name: {name}", f"description: {role['description']}", f"model: {tier['claude']}",
           f"effort: {role['effort']}", f"maxTurns: {role['max_turns']}",
           "tools: [" + ", ".join(f'"{t}"' for t in names) + "]"]
