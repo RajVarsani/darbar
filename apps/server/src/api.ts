@@ -1276,7 +1276,10 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
     if (o.model !== undefined && !model) return { error: 't3.model must be a non-empty string', status: 400 };
     // `since` is the server's clock: rows filed before the outbox was switched on are never sent
     const since = o.enabled ? (p.t3?.enabled && p.t3.since ? p.t3.since : new Date()) : p.t3?.since;
-    set.t3 = { enabled: o.enabled, ...(dir ? { dir } : {}), ...(model ? { model } : {}), ...(since ? { since } : {}) };
+    const effDir = dir ?? p.t3?.dir;
+    const effModel = model ?? p.t3?.model;
+    if (o.enabled && !effDir) return { error: 't3.dir is required to enable the outbox', status: 400 };
+    set.t3 = { enabled: o.enabled, ...(effDir ? { dir: effDir } : {}), ...(effModel ? { model: effModel } : {}), ...(since ? { since } : {}) };
   }
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
   const linearUrl = strOrNull(b.linearUrl);
