@@ -141,6 +141,10 @@ export type ProjectProxy = { prefix: string; target: string; public: string[]; e
 // as the ownership token so we never delete a prefix somebody else now holds.
 export type PublishedRoute = { prefix: string; target: string; public: string[] };
 
+// DAR-323. Opt-in hand-off of new feedback to ONE T3 Code thread per project (apps/server/src/t3.ts).
+// `since` is stamped by the server when the flag first turns on, so rows filed earlier are never sent.
+export type ProjectT3 = { enabled: boolean; dir?: string; model?: string; since?: Date };
+
 export type Project = {
   _id?: ObjectId;
   name: string;
@@ -154,7 +158,9 @@ export type Project = {
   agents?: ProjectAgent[];
   proxy?: ProjectProxy;
   proxyPublished?: PublishedRoute[];
-  /** DAR-398: the T3 thread that works this project and its open-in-T3 link */
+  /** DAR-323: feedback outbox to T3 Code; absent = off */
+  t3?: ProjectT3;
+  /** DAR-398: the T3 thread that works this project (the outbox saves it) and its open-in-T3 link */
   t3ThreadId?: string | null;
   t3Link?: string | null;
   /** external mirror: when set, the console card opens this Linear view instead of the native
@@ -349,9 +355,15 @@ export type FeedbackDoc = {
    */
   idempotencyKey?: string;
   slack: SlackRef | null;
-  /** DAR-398: the T3 thread working this row and its link */
+  /** DAR-398/323: the T3 thread this row was sent to (or is being worked in) and its link */
   t3ThreadId?: string | null;
   t3Link?: string | null;
+  /** DAR-323: set once the outbox has delivered the row; its presence is the idempotency mark */
+  t3SentAt?: Date | null;
+  /** DAR-323: how many of `additions` have been forwarded to the thread */
+  t3AdditionsSent?: number;
+  /** DAR-323: last failed delivery, cleared on success */
+  t3Error?: string | null;
   status: FeedbackStatus;
   resolution: string | null;
   resolvedTaskId: ObjectId | null;

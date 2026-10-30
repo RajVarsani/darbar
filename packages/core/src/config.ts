@@ -49,9 +49,15 @@ export const config = {
   // directory to notice a new one. One stat, not a read: the full parse only happens when the
   // directory's mtime actually moved.
   inboxParkedTickMs: 10_000,
-  // DAR-398: where T3 Code keeps its state, and the origin its thread links point at
+  // ---------- DAR-323: feedback outbox to T3 Code ----------
+  // kill switch: DARBAR_T3=off stops every send (rows stay unsent and go out when it is back on)
+  t3Enabled: (env.DARBAR_T3 || 'on').toLowerCase() !== 'off',
   t3Home: env.T3CODE_HOME || `${env.HOME || ''}/.t3`,
+  t3Cli: env.T3_CLI || `${env.T3CODE_HOME || `${env.HOME || ''}/.t3`}/bin/t3`,
   t3Origin: env.T3_ORIGIN || 'http://127.0.0.1:3773',
+  t3Model: env.T3_MODEL || 'claude-opus-5-5', // T3 needs --model with --provider; Claude's current default
+  t3TimeoutMs: Number(env.T3_TIMEOUT_MS || 60_000),
+  t3SweepMs: Number(env.T3_SWEEP_MS || 30_000),
   eventsBoardLimit: 50,
   capIdLen: 21,
   serverIdleTimeout: 120,

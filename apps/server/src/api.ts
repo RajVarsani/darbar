@@ -7,7 +7,7 @@ import { Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpis
 import { emit, subscribe } from './sse';
 import { nudge, waitForNudge } from './inbox';
 import * as linearSync from './linear-sync';
-import { t3LinkFor } from './t3';
+import { kickT3, setT3Logger, t3LinkFor } from './t3';
 import { config, pathPatternError, PATH_PATTERN_FORM, isParkId, MEMORY_NODE_TYPES, slugify } from '@darbar/core';
 import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus, MemoryNode, MemoryEdge, MemoryEdgeSource, MemoryNodeType, MemoryObservation } from '@darbar/core';
 
@@ -174,6 +174,7 @@ const CONFIG_VOCAB: FieldVocab = {
   pipeline: 'lanes are edited one at a time under /api/projects/:ref/pipeline/lanes, autoAdvance at PATCH /api/projects/:ref/pipeline, or wholesale with PATCH /api/projects/:ref {"pipeline": {…}}',
   agents: 'agents are edited one at a time under /api/projects/:ref/agents, or wholesale with PATCH /api/projects/:ref {"agents": […]}',
   proxy: 'the share is edited at PATCH /api/projects/:ref/proxy and published at PATCH /api/projects/:ref/proxy/enabled, or wholesale with PATCH /api/projects/:ref {"proxy": {…}}',
+  t3: 'PATCH /api/projects/:ref {"t3": {"enabled": true, "dir": "/abs/path"}} opts the project into the feedback outbox to T3 Code (null clears it)',
   t3ThreadId: 'PATCH /api/projects/:ref {"t3ThreadId": "…"}; the link is built for you',
   t3Link: 'PATCH /api/projects/:ref {"t3Link": "http://…"}',
   linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} makes this project LINEAR-NATIVE: Linear becomes the board of record for tasks and the console card opens that view (null clears it). Rows keep being written here; with LINEAR_API_KEY set the server mirrors them to Linear itself',
@@ -230,6 +231,9 @@ const FEEDBACK_VOCAB: FieldVocab = {
   // DAR-398: applied by POST /feedback and PATCH /feedback only
   t3ThreadId: 'the T3 thread working a row is stamped when it is filed or on PATCH /feedback/:shortId {"t3ThreadId": …}; an append does not change it',
   t3Link: 'the T3 thread working a row is stamped when it is filed or on PATCH /feedback/:shortId {"t3ThreadId": …}; an append does not change it',
+  t3SentAt: 'owned by the T3 outbox: it marks the row as delivered and is what makes the hand-off happen once',
+  t3AdditionsSent: 'owned by the T3 outbox',
+  t3Error: 'owned by the T3 outbox',
   slack: 'the slack thread a row belongs to is set when it is filed; it is where every reply about it is posted',
   project: 'feedback cannot move between projects',
   projectId: 'feedback cannot move between projects',
@@ -271,6 +275,7 @@ async function logEvent(projectId: ObjectId, text: string, taskId?: ObjectId | n
   const p = await Projects.findOne({ _id: projectId }, { projection: { capId: 1 } });
   if (p) emit(p.capId, await boardTick(p.capId, projectId, text));
 }
+setT3Logger((projectId, text) => logEvent(projectId, text));
 
 // DAR-398. t3ThreadId names the T3 Code thread working a row; t3Link is its open-in-T3 URL. Send the
 // id alone and the server builds the link (it knows T3's environment id, the caller does not).
@@ -1223,7 +1228,7 @@ type ConfigOk = { doc: Project; warnings: string[] };
 const failed = (r: ConfigFail | ConfigOk): r is ConfigFail => 'error' in r;
 // the whole config surface, in one place: what applyConfig writes, what the 'nothing to update'
 // message lists, and what PROJECT_VOCAB is measured against
-const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy', 'linearUrl', 't3ThreadId', 't3Link'];
+const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy', 'linearUrl', 't3', 't3ThreadId', 't3Link'];
 
 async function applyConfig(p: Project, b: Record<string, unknown>): Promise<ConfigFail | ConfigOk> {
   const warnings: string[] = [];
@@ -1257,10 +1262,22 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
     return { error: `${badFields}. If you are editing a project by reading it and sending it back, GET /api/projects/${p.prefix} returns exactly the body this route accepts`, status: 400 };
   }
   const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
-  // DAR-398: the project's T3 thread
+  // DAR-398 / DAR-323: the project's T3 thread, and the opt-in for the feedback outbox
   const t3Ref = readT3Ref(b);
   if ('error' in t3Ref) return { error: t3Ref.error, status: 400 };
   Object.assign(set, t3Ref.set);
+  const unsetT3 = b.t3 === null;
+  if (b.t3 !== undefined && b.t3 !== null) {
+    const o = b.t3 as Record<string, unknown>;
+    if (typeof o !== 'object' || Array.isArray(o) || typeof o.enabled !== 'boolean') return { error: 't3 must be {"enabled": boolean, "dir"?: absolute path, "model"?: string} or null', status: 400 };
+    const dir = o.dir === undefined ? undefined : str(o.dir)?.trim();
+    if (o.dir !== undefined && !(dir && dir.startsWith('/'))) return { error: 't3.dir must be an absolute path', status: 400 };
+    const model = o.model === undefined ? undefined : str(o.model)?.trim();
+    if (o.model !== undefined && !model) return { error: 't3.model must be a non-empty string', status: 400 };
+    // `since` is the server's clock: rows filed before the outbox was switched on are never sent
+    const since = o.enabled ? (p.t3?.enabled && p.t3.since ? p.t3.since : new Date()) : p.t3?.since;
+    set.t3 = { enabled: o.enabled, ...(dir ? { dir } : {}), ...(model ? { model } : {}), ...(since ? { since } : {}) };
+  }
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
   const linearUrl = strOrNull(b.linearUrl);
   if (linearUrl !== undefined) {
@@ -1296,6 +1313,7 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
   // proxy: absent = untouched, null = cleared (route withdrawn), object = replaced wholesale
   let proxyChange: { after: ProjectProxy | null } | undefined;
   const unset: Record<string, ''> = {};
+  if (unsetT3) unset.t3 = '';
   // DAR-266: a set, changed or cleared linearUrl restarts the mirror, so rows filed before it are legacy
   if (set.linearUrl !== undefined && set.linearUrl !== (p.linearUrl ?? null) && p.linearSync) unset.linearSync = '';
   if (b.proxy !== undefined) {
@@ -1459,6 +1477,7 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
       // warn-only check: swallow so the committed update still returns 200
     }
   }
+  if (set.t3) kickT3(p._id!);
   const doc = await Projects.findOne({ _id: p._id });
   return { doc: doc ?? p, warnings };
 }
@@ -2049,6 +2068,7 @@ api.get('/projects/:ref', async (c) => {
     linearUrl: p.linearUrl ?? null,
     repos: p.repos ?? [],
     stakeholders: p.stakeholders ?? [],
+    ...(p.t3 ? { t3: p.t3 } : {}),
     ...(p.t3ThreadId ? { t3ThreadId: p.t3ThreadId, t3Link: p.t3Link ?? null } : {}),
     ...(p.pipeline ? { pipeline: p.pipeline } : {}),
     ...(p.agents ? { agents: p.agents } : {}),
@@ -2072,7 +2092,7 @@ api.get('/projects/:ref/context', async (c) => {
     // arrives HERE through gabbar and the orchestrator drains it into Linear; the darbar project
     // is archived and keeps history plus that pipe.
     linearUrl: p.linearUrl ?? null,
-    t3ThreadId: p.t3ThreadId ?? null, t3Link: p.t3Link ?? null,
+    t3: p.t3 ?? null, t3ThreadId: p.t3ThreadId ?? null, t3Link: p.t3Link ?? null,
     pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy: redactProxy(p.proxy),
     proxyPublished: redactPublished(p.proxyPublished),
     // this is the read every agent takes before working, so it is the right place to learn the work
@@ -2705,6 +2725,7 @@ api.post('/feedback', async (c) => {
   // returns above deliberately do NOT ring: a retry of a write that already landed rang when it
   // landed, and ringing again would wake a session over a row it has possibly already triaged.
   nudge(p._id!.toHexString());
+  kickT3(p._id!); // DAR-323: opted-in projects hand the row to their T3 thread (detached, never blocks the reply)
   return c.json({ ...doc, boardUrl: `${config.baseUrl}/p/${p.capId}` });
 });
 
@@ -3016,6 +3037,7 @@ api.post('/feedback/:shortId/append', async (c) => {
   }
   const what = [note ? 'a note' : '', sent.length ? `${sent.length} attachment(s)` : ''].filter(Boolean).join(' and ');
   await logEvent(fb.projectId, `${fb.shortId}: ${author} appended ${what}${note ? `: ${note.slice(0, 80)}` : ''}`, fb.taskId);
+  if (fb.t3SentAt) kickT3(fb.projectId); // DAR-323: a follow-up on a row already in the T3 thread goes there too
   return c.json({ appended: true, feedback: after, warnings });
 });
 

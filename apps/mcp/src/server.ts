@@ -271,6 +271,20 @@ server.tool('set_slack_channel', 'Bind, rebind or unbind the Slack channel a pro
   },
   ({ project, slackChannel }) => call(`/projects/${px(project)}`, 'PATCH', { slackChannel }));
 
+server.tool('set_t3', 'Opt a project into (or out of) the T3 Code feedback outbox, or set its T3 thread. When enabled, every NEW feedback row (and follow-up appended to one) is sent to ONE T3 thread named "<PREFIX> orchestrator" in `dir`, created on first use. Rows filed before it was enabled are never sent. `t3: null` removes the config. The thread id and link the outbox saves are on the project.',
+  {
+    project: z.string(),
+    enabled: z.boolean().optional().describe('required unless only setting t3ThreadId or clearing with clear'),
+    dir: z.string().optional().describe('absolute path of the T3 project directory; registered in T3 if missing'),
+    model: z.string().optional().describe('model slug for a NEW thread, default claude-opus-5-5; an existing thread keeps its own'),
+    clear: z.boolean().optional().describe('true removes the whole t3 config'),
+    ...T3_REF,
+  },
+  ({ project, enabled, dir, model, clear, t3ThreadId, t3Link }) => call(`/projects/${px(project)}`, 'PATCH', {
+    ...(clear ? { t3: null } : enabled === undefined ? {} : { t3: { enabled, ...(dir ? { dir } : {}), ...(model ? { model } : {}) } }),
+    ...(t3ThreadId !== undefined ? { t3ThreadId } : {}), ...(t3Link !== undefined ? { t3Link } : {}),
+  }));
+
 server.tool('set_linear_url', 'Mark a project as LINEAR-NATIVE, or clear that (null). For such a project, Linear IS the board of record: tasks live there, agents work them there (full CRUD on issues carrying the darbar/<PREFIX> workspace label — and READ-ONLY on any issue without it, those belong to colleagues), and the darbar project is archived, surviving only as history plus the gabbar feedback pipe. The console card opens this URL (the archived native board stays in the card\'s menu) and the URL rides on get_project_context so every agent learns the mode before working. Feedback still arrives HERE via gabbar; the orchestrator drains it into Linear (comment on the relevant ticket, comment on the standing feedback-inbox ticket, or a new labelled issue) and then resolves the darbar row so the reporter\'s Slack thread gets its reply. The URL is a label-filtered view (the darbar/<PREFIX> label), not a Linear project, because rows scatter across the company\'s existing Linear projects. A hand-synced mirror mode preceded this and drifted within two days; do not recreate it.',
   {
     project: z.string(),

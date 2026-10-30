@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { api, reconcileAllProxies } from './api';
 import { startMemoryInboxWatcher } from './memory-inbox';
 import { startLinearSync } from './linear-sync';
+import { startT3Outbox } from './t3';
 import { initDb, config, db } from '@darbar/core';
 
 const app = new Hono();
@@ -94,6 +95,7 @@ startMemoryInboxWatcher();
 
 // DAR-266: mirror linear-native projects to Linear. No key = one log line and every hook a no-op.
 startLinearSync();
+startT3Outbox();
 
 // Bare SIGTERM with no handler kills immediately and drops in-flight requests (verified).
 // server.stop() drains: stops taking new connections, finishes what's in flight, then resolves.
