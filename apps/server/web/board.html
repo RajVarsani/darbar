@@ -75,6 +75,8 @@
     padding:1px 7px;letter-spacing:.04em}
   .chip.linear{background:var(--ink);color:var(--lime);cursor:pointer}
   .chip.linear:hover{background:var(--lime);color:var(--ink)}
+  a.t3{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--ink);background:var(--beige);border:2px solid var(--ink);padding:0 5px;text-decoration:none;white-space:nowrap}
+  a.t3:hover{background:var(--lime)}
   /* an exposed dev server is the one project fact with a consequence outside the tracker, so it
      is stated on the board surface next to the prefix — not only inside a panel you must open */
   .expomark{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;font-weight:800;
@@ -709,6 +711,7 @@
     <div class="brand"><span class="dot" title="Darbar">D</span></div>
     <div class="crumb"><span id="pname">…</span> <span class="chip" id="pprefix"></span>
       <span class="chip linear" id="plinear" role="link" tabindex="0" title="open in Linear" hidden>LINEAR</span>
+      <a class="chip linear" id="pt3" data-t3 target="_blank" rel="noopener" title="open the project thread in T3" hidden>T3</a>
       <button class="expomark" id="expomark" type="button" data-open-config hidden
         title="this project is configured to expose a dev server to anyone with the link · open project config">shared</button></div>
     <div class="searchwrap">
@@ -819,6 +822,7 @@ const nice = s => String(s||'').replace(/_/g,' ');
 const FB_LABEL = {pending:'NEEDS TRIAGE', triaged:'TRIAGED', accepted:'PROMOTED', in_progress:'BEING FIXED',
   needs_clarification:'WAITING ON AUTHOR', resolved:'RESOLVED', rejected:'NOT ACTIONED'};
 const fbLabel = s => FB_LABEL[s] || nice(s);
+const t3Chip = o => o?.t3Link && /^https?:\/\//i.test(o.t3Link) ? `<a class="t3" data-t3 href="${esc(o.t3Link)}" target="_blank" rel="noopener" title="open in T3">T3 ↗</a>` : '';
 const safeUrl = a => /^(https?:\/\/|\/)/i.test(String(a||'')); // block javascript:/data: schemes
 // escape, then turn known shortIds into drawer links (matched ids are [A-Z0-9-] only, safe post-esc)
 const linkifyIds = s => esc(s).replace(/\b([A-Z]+-FB-\d+|[A-Z]+-\d+)\b/g, id =>
@@ -1355,6 +1359,9 @@ function render(){
   document.title = `${d.project.name} · Darbar`;
   $('pname').textContent = d.project.name;
   $('pprefix').textContent = d.project.prefix;
+  const pt3 = $('pt3');
+  pt3.hidden = !/^https?:\/\//i.test(d.project.t3Link||'');
+  if (!pt3.hidden) pt3.href = d.project.t3Link;
   const pl = $('plinear');
   pl.hidden = !d.project.linearUrl;
   pl.onclick = d.project.linearUrl
@@ -1601,6 +1608,7 @@ function cardHtml(t){
       ${laneChips(t)}
       ${dispatchBadge(t)}
       ${parent?`<span class="id" title="subtask of ${esc(parent.shortId)}">└ ${esc(parent.shortId)}</span>`:''}
+      ${t3Chip(t)}
     </div>
     <div class="ttl">${esc(t.title)}</div>
     <div class="kfoot">
@@ -1698,6 +1706,7 @@ function taskRowHtml(t, isSub){
       ${t.type&&t.type!=='feature'?`<span class="typ typ-${esc(t.type)}">${esc(t.type)}</span>`:''}
       ${dispatchBadge(t)}
       ${laneChips(t)}
+      ${t3Chip(t)}
       ${t.assignee?`<span class="who ${esc(t.assigneeType)}"><span class="a">${esc(initials(t.assignee))}</span>${esc(t.assignee)}</span>`:''}
       <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span>
     </span></div>`;
@@ -2916,7 +2925,7 @@ function renderContent(){
           <div class="fsub"><span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span>
             <span class="typ typ-${esc(f.type)}">${esc(f.type)}</span>
             ${f.taskShortId?`<span class="id">on ${esc(f.taskShortId)}</span>`:'<span class="id">project-level</span>'}
-            ${f.attachments?.length?`<span class="id">[${f.attachments.length} img]</span>`:''}</div></span>
+            ${f.attachments?.length?`<span class="id">[${f.attachments.length} img]</span>`:''}${t3Chip(f)}</div></span>
         <span style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
           <span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>
           <span class="time" title="${new Date(f.createdAt).toLocaleString('en-GB')}">${relTime(f.createdAt)}</span></span>
@@ -3047,7 +3056,7 @@ function renderDrawer(){
     const laneInfo = t.type==='review' ? pipeLanes().find(l=>l.lane===t.lane) : null;
     dr.innerHTML = `
       <div class="dhead">${backBtn}<span class="id">${esc(t.shortId)}</span>
-        <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span><span class="grow"></span>${closeBtn}</div>
+        <span class="pill st-${esc(t.status)}">${esc(nice(t.status))}</span>${t3Chip(t)}<span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
         ${parent?`<div class="note">${t.type==='review'?'review lane of':'subtask of'} <a href="#" data-go-task="${esc(parent.shortId)}">${esc(parent.shortId)} · ${esc(parent.title)}</a></div>`:''}
         <div class="dbadges"><span class="typ typ-${esc(t.type||'feature')}">${esc(t.type||'feature')}</span></div>
@@ -3095,7 +3104,7 @@ function renderDrawer(){
       ? FLOW.slice(0,2).map(s=>`<span class="step hit">${fbLabel(s)}</span><span class="arrow">→</span>`).join('')+`<span class="step bad">${fbLabel('rejected')}</span>`
       : FLOW.map((s,i)=>`<span class="step ${i<idx?'hit':i===idx?(s==='resolved'?'hit':'now'):''}">${fbLabel(s)}</span>`).join('<span class="arrow">→</span>');
     dr.innerHTML = `
-      <div class="dhead">${backBtn}<span class="id">${esc(f.shortId)}</span><span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span><span class="grow"></span>${closeBtn}</div>
+      <div class="dhead">${backBtn}<span class="id">${esc(f.shortId)}</span><span class="pill st-${esc(f.status)}">${esc(fbLabel(f.status))}</span>${t3Chip(f)}<span class="grow"></span>${closeBtn}</div>
       <div class="dbody">
         <div class="dbadges">
           <span class="who ${esc(f.authorType)}"><span class="a">${esc(initials(f.author))}</span>${esc(f.author)}</span>
@@ -3273,6 +3282,7 @@ document.addEventListener('drop', async e=>{
 
 // ---------- events ----------
 document.addEventListener('click', e=>{
+  if (e.target.closest('[data-t3]')){ e.stopPropagation(); return; }
   if (e.target.closest('#qbtn')){ openPal(); return; }
   if (e.target.closest('[data-open-config]')){ select('config'); return; }
   const pr = e.target.closest('[data-pal-row]');

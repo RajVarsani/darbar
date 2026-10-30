@@ -49,6 +49,9 @@ export const config = {
   // directory to notice a new one. One stat, not a read: the full parse only happens when the
   // directory's mtime actually moved.
   inboxParkedTickMs: 10_000,
+  // DAR-398: where T3 Code keeps its state, and the origin its thread links point at
+  t3Home: env.T3CODE_HOME || `${env.HOME || ''}/.t3`,
+  t3Origin: env.T3_ORIGIN || 'http://127.0.0.1:3773',
   eventsBoardLimit: 50,
   capIdLen: 21,
   serverIdleTimeout: 120,

@@ -7,6 +7,7 @@ import { Projects, Tasks, Feedback, Events, MemoryNodes, MemoryEdges, MemoryEpis
 import { emit, subscribe } from './sse';
 import { nudge, waitForNudge } from './inbox';
 import * as linearSync from './linear-sync';
+import { t3LinkFor } from './t3';
 import { config, pathPatternError, PATH_PATTERN_FORM, isParkId, MEMORY_NODE_TYPES, slugify } from '@darbar/core';
 import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus, MemoryNode, MemoryEdge, MemoryEdgeSource, MemoryNodeType, MemoryObservation } from '@darbar/core';
 
@@ -173,6 +174,8 @@ const CONFIG_VOCAB: FieldVocab = {
   pipeline: 'lanes are edited one at a time under /api/projects/:ref/pipeline/lanes, autoAdvance at PATCH /api/projects/:ref/pipeline, or wholesale with PATCH /api/projects/:ref {"pipeline": {…}}',
   agents: 'agents are edited one at a time under /api/projects/:ref/agents, or wholesale with PATCH /api/projects/:ref {"agents": […]}',
   proxy: 'the share is edited at PATCH /api/projects/:ref/proxy and published at PATCH /api/projects/:ref/proxy/enabled, or wholesale with PATCH /api/projects/:ref {"proxy": {…}}',
+  t3ThreadId: 'PATCH /api/projects/:ref {"t3ThreadId": "…"}; the link is built for you',
+  t3Link: 'PATCH /api/projects/:ref {"t3Link": "http://…"}',
   linearUrl: 'PATCH /api/projects/:ref {"linearUrl": "https://linear.app/…"} makes this project LINEAR-NATIVE: Linear becomes the board of record for tasks and the console card opens that view (null clears it). Rows keep being written here; with LINEAR_API_KEY set the server mirrors them to Linear itself',
 };
 // what a granular project route is measured against: the server-owned fields plus the config doors.
@@ -224,6 +227,9 @@ const FEEDBACK_VOCAB: FieldVocab = {
   taskRef: 'the task a row was FILED ON is set at create (POST /feedback {"taskRef": …}); to link the task that FIXES it send resolvedTaskRef',
   taskId: 'the task a row was FILED ON is set at create (POST /feedback {"taskRef": …}); to link the task that FIXES it send resolvedTaskRef',
   taskShortId: 'the task a row was FILED ON is set at create (POST /feedback {"taskRef": …}); to link the task that FIXES it send resolvedTaskRef',
+  // DAR-398: applied by POST /feedback and PATCH /feedback only
+  t3ThreadId: 'the T3 thread working a row is stamped when it is filed or on PATCH /feedback/:shortId {"t3ThreadId": …}; an append does not change it',
+  t3Link: 'the T3 thread working a row is stamped when it is filed or on PATCH /feedback/:shortId {"t3ThreadId": …}; an append does not change it',
   slack: 'the slack thread a row belongs to is set when it is filed; it is where every reply about it is posted',
   project: 'feedback cannot move between projects',
   projectId: 'feedback cannot move between projects',
@@ -264,6 +270,25 @@ async function logEvent(projectId: ObjectId, text: string, taskId?: ObjectId | n
   await Events.insertOne({ projectId, taskId: taskId ?? null, text, at: new Date() });
   const p = await Projects.findOne({ _id: projectId }, { projection: { capId: 1 } });
   if (p) emit(p.capId, await boardTick(p.capId, projectId, text));
+}
+
+// DAR-398. t3ThreadId names the T3 Code thread working a row; t3Link is its open-in-T3 URL. Send the
+// id alone and the server builds the link (it knows T3's environment id, the caller does not).
+// null clears both. Returns the fields to $set, or an error sentence.
+function readT3Ref(b: Record<string, unknown>): { set: Record<string, unknown> } | { error: string } {
+  const bad = typeErrors(b, { t3ThreadId: 'string|null', t3Link: 'string|null' });
+  if (bad.length) return { error: bad.join(' | ') };
+  const set: Record<string, unknown> = {};
+  const id = typeof b.t3ThreadId === 'string' ? b.t3ThreadId.trim() : b.t3ThreadId;
+  const link = typeof b.t3Link === 'string' ? b.t3Link.trim() : b.t3Link;
+  if (typeof link === 'string' && link && !/^https?:\/\//.test(link)) return { error: 't3Link must be an http(s) URL or null' };
+  if (id !== undefined) {
+    set.t3ThreadId = id || null;
+    set.t3Link = id ? (link || t3LinkFor(id as string)) : null;
+  } else if (link !== undefined) {
+    set.t3Link = link || null;
+  }
+  return { set };
 }
 
 // ---------- DAR-254: the tick carries the change, not a bell ----------
@@ -1198,7 +1223,7 @@ type ConfigOk = { doc: Project; warnings: string[] };
 const failed = (r: ConfigFail | ConfigOk): r is ConfigFail => 'error' in r;
 // the whole config surface, in one place: what applyConfig writes, what the 'nothing to update'
 // message lists, and what PROJECT_VOCAB is measured against
-const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy', 'linearUrl'];
+const CONFIG_FIELDS = ['charter', 'slackChannel', 'repos', 'stakeholders', 'pipeline', 'agents', 'proxy', 'linearUrl', 't3ThreadId', 't3Link'];
 
 async function applyConfig(p: Project, b: Record<string, unknown>): Promise<ConfigFail | ConfigOk> {
   const warnings: string[] = [];
@@ -1232,6 +1257,10 @@ async function applyConfig(p: Project, b: Record<string, unknown>): Promise<Conf
     return { error: `${badFields}. If you are editing a project by reading it and sending it back, GET /api/projects/${p.prefix} returns exactly the body this route accepts`, status: 400 };
   }
   const charter = str(b.charter); if (charter !== undefined) set.charter = charter;
+  // DAR-398: the project's T3 thread
+  const t3Ref = readT3Ref(b);
+  if ('error' in t3Ref) return { error: t3Ref.error, status: 400 };
+  Object.assign(set, t3Ref.set);
   const slackChannel = strOrNull(b.slackChannel); if (slackChannel !== undefined) set.slackChannel = slackChannel;
   const linearUrl = strOrNull(b.linearUrl);
   if (linearUrl !== undefined) {
@@ -2020,6 +2049,7 @@ api.get('/projects/:ref', async (c) => {
     linearUrl: p.linearUrl ?? null,
     repos: p.repos ?? [],
     stakeholders: p.stakeholders ?? [],
+    ...(p.t3ThreadId ? { t3ThreadId: p.t3ThreadId, t3Link: p.t3Link ?? null } : {}),
     ...(p.pipeline ? { pipeline: p.pipeline } : {}),
     ...(p.agents ? { agents: p.agents } : {}),
   });
@@ -2042,6 +2072,7 @@ api.get('/projects/:ref/context', async (c) => {
     // arrives HERE through gabbar and the orchestrator drains it into Linear; the darbar project
     // is archived and keeps history plus that pipe.
     linearUrl: p.linearUrl ?? null,
+    t3ThreadId: p.t3ThreadId ?? null, t3Link: p.t3Link ?? null,
     pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy: redactProxy(p.proxy),
     proxyPublished: redactPublished(p.proxyPublished),
     // this is the read every agent takes before working, so it is the right place to learn the work
@@ -2106,6 +2137,7 @@ function boardProject(p: Project) {
     name: p.name, prefix: p.prefix, repos: p.repos, stakeholders: p.stakeholders,
     pipeline: p.pipeline ?? null, agents: p.agents ?? [], proxy, proxyPublished,
     baseUrl: config.baseUrl, charter: (p.charter ?? '').slice(0, 401),
+    t3Link: p.t3Link ?? null,
   };
 }
 
@@ -2183,6 +2215,8 @@ api.post('/tasks', async (c) => {
   // create-time fields, so they are excluded from the refusal; the server-owned rest is refused.
   const badFields = notApplied(b, TASK_VOCAB, ['parentTaskRef', 'project', 'origin', 'lane']);
   if (badFields) return c.json({ error: badFields }, 400);
+  const t3Ref = readT3Ref(b);
+  if ('error' in t3Ref) return c.json({ error: t3Ref.error }, 400);
   const p = await resolveProject(str(b.project) ?? '');
   if (!p) return c.json({ error: 'project not found' }, 404);
   let parentTaskId: ObjectId | null = null;
@@ -2213,6 +2247,7 @@ api.post('/tasks', async (c) => {
     commits: [],
     blocker: strOrNull(b.blocker) ?? null,
     notes: str(b.notes) ?? '',
+    ...t3Ref.set,
     dispatchedAt: null, // filing a task is not dispatching it; only the dispatch PATCH stamps this
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -2438,6 +2473,9 @@ api.patch('/tasks/:ref', async (c) => {
   }
   if (badTypes.length) return c.json({ error: badTypes.join(' | ') }, 400);
   const set: Record<string, unknown> = {};
+  const t3Ref = readT3Ref(b);
+  if ('error' in t3Ref) return c.json({ error: t3Ref.error }, 400);
+  Object.assign(set, t3Ref.set);
   for (const k of ['title', 'description', 'status', 'notes', 'type'] as const) {
     const v = str(b[k]); if (v !== undefined) set[k] = v;
   }
@@ -2521,8 +2559,10 @@ api.post('/feedback', async (c) => {
   if (!b) return c.json({ error: 'invalid json body' }, 400);
   // DAR-208 sweep: a `status` or a `resolution` sent at filing time was dropped under a 200, so a
   // caller who thought they were filing something already triaged filed a pending row instead
-  const badFields = notApplied(b, FEEDBACK_VOCAB, ['taskRef', 'project', 'type', 'body', 'author', 'authorType', 'attachments', 'slack', 'idempotencyKey']);
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['taskRef', 'project', 'type', 'body', 'author', 'authorType', 'attachments', 'slack', 'idempotencyKey', 't3ThreadId', 't3Link']);
   if (badFields) return c.json({ error: badFields }, 400);
+  const t3Ref = readT3Ref(b);
+  if ('error' in t3Ref) return c.json({ error: t3Ref.error }, 400);
   // author gets a type check here, not just the str()-and-refuse further down: str() collapses a
   // WRONG type and an ABSENT field into the same "nothing", so {author: 42} on a gated project fell
   // through to the "author required" sentence (wrong: the caller sent something, it was the wrong
@@ -2636,6 +2676,7 @@ api.post('/feedback', async (c) => {
     body: str(b.body) ?? '',
     attachments: strArr(b.attachments),
     ...(idempotencyKey ? { idempotencyKey } : {}),
+    ...t3Ref.set,
     slack: slack && str(slack.channel) && str(slack.ts)
       ? { channel: slack.channel as string, ts: slack.ts as string, user: str(slack.user) ?? '' }
       : null,
@@ -2708,14 +2749,16 @@ api.patch('/feedback/:shortId', async (c) => {
   // status, resolution, type and resolvedTaskRef, so an image or a corrected body sent with a status
   // change vanished under a 200. The body stays UNREPLACEABLE, deliberately, and the append route
   // named in FEEDBACK_VOCAB is how a row grows without anyone's words being rewritten under them.
-  const badFields = notApplied(b, FEEDBACK_VOCAB, ['status', 'resolution', 'resolvedTaskRef', 'type'], fb as unknown as Record<string, unknown>);
+  const badFields = notApplied(b, FEEDBACK_VOCAB, ['status', 'resolution', 'resolvedTaskRef', 'type', 't3ThreadId', 't3Link'], fb as unknown as Record<string, unknown>);
   if (badFields) return c.json({ error: badFields }, 400);
+  const t3Ref = readT3Ref(b);
+  if ('error' in t3Ref) return c.json({ error: t3Ref.error }, 400);
   // an unrecognised type was dropped here under a 200, like the status one line up is not
   const type = str(b.type);
   if (b.type !== undefined && !(type && FEEDBACK_TYPES.includes(type))) {
     return c.json({ error: `bad type; use ${FEEDBACK_TYPES.join('|')}` }, 400);
   }
-  const set: Record<string, unknown> = { updatedAt: new Date() };
+  const set: Record<string, unknown> = { updatedAt: new Date(), ...t3Ref.set };
   const next = str(b.status) as FeedbackStatus | undefined;
   if (next) set.status = next;
   const resolution = strOrNull(b.resolution); if (resolution !== undefined) set.resolution = resolution;

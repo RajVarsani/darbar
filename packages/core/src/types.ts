@@ -154,6 +154,9 @@ export type Project = {
   agents?: ProjectAgent[];
   proxy?: ProjectProxy;
   proxyPublished?: PublishedRoute[];
+  /** DAR-398: the T3 thread that works this project and its open-in-T3 link */
+  t3ThreadId?: string | null;
+  t3Link?: string | null;
   /** external mirror: when set, the console card opens this Linear view instead of the native
    *  board. Rows, feedback and the engine stay HERE; the Linear side is a hand-synced copy. */
   linearUrl?: string | null;
@@ -211,6 +214,9 @@ export type Task = {
   commits: string[];
   blocker: string | null;
   notes: string;
+  /** DAR-398: the T3 Code thread working this row, stamped by the agent that claims it */
+  t3ThreadId?: string | null;
+  t3Link?: string | null;
   // when the orchestrator handed this task to an agent. Dispatched and started are different facts:
   // only the agent can report the second, so this one is stamped server-side on the dispatch call and
   // cleared by any status change, i.e. the agent's own report always supersedes it. The board renders
@@ -343,6 +349,9 @@ export type FeedbackDoc = {
    */
   idempotencyKey?: string;
   slack: SlackRef | null;
+  /** DAR-398: the T3 thread working this row and its link */
+  t3ThreadId?: string | null;
+  t3Link?: string | null;
   status: FeedbackStatus;
   resolution: string | null;
   resolvedTaskId: ObjectId | null;

@@ -18,6 +18,14 @@ async function call(path: string, method = 'GET', body?: unknown) {
 
 const server = new McpServer({ name: 'darbar', version: '0.1.0' });
 
+// DAR-398. T3 Code puts T3CODE_THREAD_ID in the env of the Claude session that spawns this process,
+// so a claim made through these tools can name the thread doing the work. The server builds the link.
+const T3_THREAD = process.env.T3CODE_THREAD_ID?.trim() || undefined;
+const T3_REF = {
+  t3ThreadId: z.string().nullable().optional().describe('the T3 Code thread working this row. Stamped for you from T3CODE_THREAD_ID when you claim it; send it only to override, or null to clear'),
+  t3Link: z.string().nullable().optional().describe('open-in-T3 URL; the server builds it from t3ThreadId, so you normally never send this'),
+};
+
 server.tool('get_project_context', 'Fetch a project charter: protocols, repos, stakeholders, the review pipeline (lanes + managers + autoAdvance), the agent registry (lane managers, helpers, orchestrator — each with its standing brief), and the shared-surface proxy (prefix, allowlist, enabled — the upstream target is redacted here, use get_proxy_route for that). Every agent should read this before working, and it is the read side of every config edit tool. `configured` says which surfaces exist at all, since the fields themselves normalise absent to []/null and cannot otherwise be told apart from a surface that was cleared.',
   { project: z.string().describe('project prefix, name, or capId') },
   ({ project }) => call(`/projects/${encodeURIComponent(project)}/context`));
@@ -89,11 +97,11 @@ server.tool('create_task', 'Create a task (or subtask via parentTaskRef). Only t
     project: z.string(), title: z.string(), description: z.string().optional(),
     parentTaskRef: z.string().optional(), assignee: z.string().optional(),
     assigneeType: z.enum(['agent', 'human']).optional(), origin: z.string().optional(),
-    type: TYPE.optional(), status: STATUS.optional(),
+    type: TYPE.optional(), status: STATUS.optional(), ...T3_REF,
     blocker: z.string().optional().describe('why this task cannot be started, when you are filing it already blocked. It is applied at create now; it used to be dropped under a 200, which put blocked cards on the board with no why on them. Changing or clearing it later is update_task {blocker} / {blocker: null}'),
     lanes: z.array(z.string()).optional().describe('review lanes to spawn when this task hits in_review — pick by judgment: code-review for code changes, qa for behavior/outcomes, design-qa only for UI surfaces; [] = explicitly no reviews; omit = code-review alone if the pipeline has that lane, else every configured lane'),
   },
-  (args) => call('/tasks', 'POST', args));
+  (args) => call('/tasks', 'POST', args.status === 'in_progress' && T3_THREAD && args.t3ThreadId === undefined ? { ...args, t3ThreadId: T3_THREAD } : args));
 
 server.tool('update_task', 'Update a task row: status, blocker, notes, dispatched, or append a commit hash. Moving a dev task to in_review auto-spawns the project pipeline review lanes; done is rejected (409) while review children are open; closing the last review child auto-advances the parent when the project has autoAdvance on. origin, parentage, shortId, the project and the commits array are create-time or append-only and are refused here with a 400 rather than accepted and ignored.',
   {
@@ -101,11 +109,12 @@ server.tool('update_task', 'Update a task row: status, blocker, notes, dispatche
     status: STATUS.optional(),
     assignee: z.string().optional(), blocker: z.string().nullable().optional(),
     notes: z.string().optional(), addCommit: z.string().optional(), type: TYPE.optional(),
+    ...T3_REF,
     dispatched: z.boolean().optional().describe('true the moment you hand this task to an agent. The server stamps the time and the board shows the card as dispatched with its age, so work in flight stops reading as idle. The agent PATCHing its own status clears it. Send false only to write off a dispatch that never started'),
     lanes: z.array(z.string()).optional().describe('re-pick review lanes (code-review for code, qa for behavior, design-qa for UI; [] = none); only at backlog/todo/blocked — frozen once a builder holds the row (in_progress) and after (in_review/qa/done/cancelled). Echoing the value back unchanged always passes, so read-then-write still works'),
     reviewAgain: z.boolean().optional().describe('send true ALONGSIDE status=in_review to spawn a SECOND review round on a task whose previous round is fully closed. Without it that move is a 409 naming the closed children, because re-entering in_review used to silently double the round. Only send it when the rework genuinely needs reviewing again; if the round it already had is the answer, leave the row where it is'),
   },
-  ({ taskRef, ...rest }) => call(`/tasks/${taskRef}`, 'PATCH', rest));
+  ({ taskRef, ...rest }) => call(`/tasks/${taskRef}`, 'PATCH', rest.status === 'in_progress' && T3_THREAD && rest.t3ThreadId === undefined ? { ...rest, t3ThreadId: T3_THREAD } : rest));
 
 server.tool('my_tasks', 'Open tasks for an assignee (lane managers and builders start here). Optionally scope by project or lane. Returns a PAGE, not a bare list: {total, returned, offset, limit, truncated, tasks[]}. `total` is how many tasks match the filter in full; `truncated` is true when this page is not all of them, and the reply then carries nextOffset. Never treat the rows as the whole set without checking `truncated` — if it is true, repeat with offset=nextOffset until it is false, or read the whole project in one payload with get_board.',
   {
@@ -295,7 +304,7 @@ server.tool('file_feedback', 'File a NEW finding as feedback (lanes use this). L
   {
     taskRef: z.string().optional(), project: z.string().optional(),
     author: z.string(), type: z.enum(['bug', 'design', 'idea', 'approval']).optional(),
-    body: z.string(),
+    body: z.string(), ...T3_REF,
   },
   (args) => call('/feedback', 'POST', { ...args, authorType: 'agent' }));
 
@@ -323,9 +332,10 @@ server.tool('resolve_feedback', 'Move feedback to a terminal or intermediate sta
     feedbackRef: z.string().describe('short id like TST-FB-1'),
     status: z.enum(['pending', 'triaged', 'accepted', 'in_progress', 'resolved', 'rejected', 'needs_clarification']),
     resolution: z.string().optional().describe('REQUIRED for resolved/rejected/needs_clarification: this exact text is posted to the reporter. What changed for them, why it is not being actioned, or what you need from them. Already-stored text counts, so a status flip after writing the reason is fine'),
+    ...T3_REF,
     resolvedTaskRef: z.string().optional().describe('task this feedback became/was fixed by; the link the ship sweep follows to auto-resolve this row. An id that does not exist is a 404, not a silent unlink'),
   },
-  ({ feedbackRef, ...rest }) => call(`/feedback/${feedbackRef}`, 'PATCH', rest));
+  ({ feedbackRef, ...rest }) => call(`/feedback/${feedbackRef}`, 'PATCH', (rest.status === 'accepted' || rest.status === 'in_progress') && T3_THREAD && rest.t3ThreadId === undefined ? { ...rest, t3ThreadId: T3_THREAD } : rest));
 
 server.tool('list_parked', 'What Gabbar is HOLDING and has not filed: somebody wrote to it about a project, the stakeholder gate refused them, and instead of dropping their words the bot parked them on disk. Held items were made visible so the ORCHESTRATOR could see them, and an orchestrator\'s whole surface is MCP, so without this tool that visibility reaches nobody it was built for.\n\nNOTHING HERE IS FEEDBACK, and that is engineered rather than incidental. A held item never touches Mongo, so it cannot appear on get_board or next_pending_feedback; its id lives in the PARK-* namespace, which cannot collide with a <PREFIX>-FB-<n>; and every row carries filed:false and parked:true in every direction. A parkId is therefore NOT a feedbackRef: PARK-D0AH8292D7Y_1723... handed to get_feedback, resolve_feedback or append_to_feedback is a 404, and that 404 is four layers of defence working, not a lookup to retry another way. Nothing here is in a triage queue, has a feedback id, or has anybody working it. The only route to the board is PROMOTION, which runs back through the same gate and is Gabbar\'s job, not this tool\'s: for cause=stakeholder_gap the fix is a human decision, usually add_stakeholder for that person, after which the sweep promotes what was being held for them; cause=outage means darbar could not answer the gate at all, so it resolves itself on retry and needs nobody.\n\nTWO KINDS ARE HELD AND THEY PROMOTE IN OPPOSITE DIRECTIONS. A report is words nobody has filed, so promoting it CREATES a feedback row. An addition is evidence or a correction for a row that ALREADY EXISTS, so promoting it appends to that row and creates nothing — filing a fresh row for evidence about an existing finding is the exact duplicate that had to be removed once already, so promoting an addition down the report path fixes a loss by rebuilding a bug. Where a row carries `kind`, that is the field that tells them apart, with `appendTo` naming the row an addition belongs on and `addedToRow:false` beside it saying nothing has reached that row yet; an id here is a DESTINATION, never evidence of arrival. Where it does not (older held files, and this reader degrades a missing kind to "report" because that is what every file written before the distinction actually is), read `theirWords` and decide. Never infer "new finding" from the shape of this response.\n\nIT IS A DIRECTORY READ, NOT A QUERY, so the counts are the answer and `items` is a sample of it. `held` is the number that means pending work. Check `truncated` (more PARK-* files on disk than were opened; the cap applies in filename order, which drops the NEWEST) and `unreadable` (files that could not be parsed, counted rather than skipped, because a held report we cannot show is worse than one we know we cannot show) before treating items as everything. A non-null `error` means the directory could not be read AT ALL and must never be read as nothing held; dirPresent:false genuinely is nothing held, and is the ordinary state of a machine where nobody has ever been refused. `ignored` counts .json files that are not PARK-*, which are somebody else\'s files rather than reports we lost.\n\nLocal only, by an explicit check in the route rather than by a config file staying narrow: held words come from somebody the project has not vouched for and carry their slack id, so any request arriving through the share tunnel is refused 403.',
   {
