@@ -55,3 +55,49 @@ export async function existingFeedback(channel: string, threadTs: string | null)
   const fb = f.json as { shortId?: string; status?: string };
   return fb.shortId ? { shortId: fb.shortId, status: fb.status ?? 'unknown' } : null;
 }
+
+/**
+ * DAR-411. A plain human reply under a thread whose ROOT the Gabbar bot itself posted (a loop's
+ * daily report) in a channel bound to a project is filed as pending feedback on that project, so the
+ * project's T3 outbox hands it on. One row per reply, keyed on (channel, reply ts). Files nothing
+ * and posts nothing to slack in any other case. Returns the filed/matched row's shortId, or null.
+ */
+export async function fileLoopThreadReply(
+  client: any,
+  m: { channel: string; ts: string; thread_ts: string; user: string; text?: string },
+  selfUser: string,
+): Promise<string | null> {
+  const text = (m.text || '').trim();
+  if (!selfUser || !text) return null;
+  const list = await fetchDarbar('/projects');
+  if (!list.reachable || !Array.isArray(list.json)) return null;
+  const project = (list.json as unknown as Array<{ prefix?: string; slackChannel?: string | null }>)
+    .find((p) => p.slackChannel === m.channel && p.prefix);
+  if (!project) return null;
+  const root = await client.conversations
+    .replies({ channel: m.channel, ts: m.thread_ts, limit: 1, inclusive: true })
+    .then((r: any) => r?.messages?.[0])
+    .catch(() => null);
+  if (!root || root.ts !== m.thread_ts || root.user !== selfUser) return null;
+  const author = await client.users.info({ user: m.user }).catch(() => null);
+  if (author?.user?.is_bot) return null;
+  const [name, link] = await Promise.all([
+    senderName(client, m.user),
+    client.chat.getPermalink({ channel: m.channel, message_ts: m.ts }).then((r: any) => r?.permalink as string | undefined).catch(() => undefined),
+  ]);
+  const f = await fetchDarbar('/feedback', 'POST', {
+    project: project.prefix,
+    type: 'feature',
+    body: `${text}\n\n(reply in a Gabbar-posted Slack thread: channel ${m.channel}, thread_ts ${m.thread_ts}, reply ts ${m.ts}${link ? `, ${link}` : ''}. Reply in that thread, not in the channel.)`,
+    author: name,
+    slack: { channel: m.channel, ts: m.ts, user: m.user },
+    idempotencyKey: `gabbar:${m.channel}:${m.ts}:loop-reply`,
+  });
+  if (!f.reachable) {
+    console.error(`gabbar: loop-thread reply ${m.channel}/${m.ts} not filed: ${f.detail}`);
+    return null;
+  }
+  const fb = f.json as { shortId?: string; error?: string };
+  if (!fb.shortId) console.error(`gabbar: loop-thread reply ${m.channel}/${m.ts} refused: ${fb.error}`);
+  return fb.shortId ?? null;
+}

@@ -5,7 +5,7 @@ import { App } from '@slack/bolt';
 import path from 'node:path';
 import { config } from '@darbar/core';
 import { escalateStaleParked, runAgent, runWithMessageBudget, type AgentContext } from './agent';
-import { existingFeedback, senderName } from './lookups';
+import { existingFeedback, fileLoopThreadReply, senderName } from './lookups';
 import { NO_ATTACHMENTS, prepareAttachments, safeName, type Attachments, type Upload } from './media';
 
 if (!config.slackBotToken || !config.slackAppToken) {
@@ -318,7 +318,11 @@ app.message(async (args: any) => {
   if (m.subtype || m.user === SELF_USER || (!m.user && m.bot_id)) return;
   if (SELF_USER && (m.text || '').includes(`<@${SELF_USER}>`)) return; // app_mention owns mentions
   if (!(m.thread_ts && m.thread_ts !== m.ts)) return;
-  if (!(await existingFeedback(m.channel, m.thread_ts))) return;
+  if (!(await existingFeedback(m.channel, m.thread_ts))) {
+    // DAR-411: not a feedback thread; a plain reply under Gabbar's own post in a project channel is filed directly
+    await fileLoopThreadReply(args.client, m, SELF_USER).catch((e) => console.error('gabbar: loop-thread filing failed:', e));
+    return;
+  }
   await safeHandle(args);
 });
 app.event('app_mention', async (args: any) => { await safeHandle(args); });
