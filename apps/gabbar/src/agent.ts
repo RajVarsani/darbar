@@ -455,7 +455,7 @@ async function prJoinAllowedHere(channel: string, projectRef: string): Promise<b
   if (!f.reachable || !Array.isArray(f.json)) return false;
   const bound = (f.json as unknown as Array<{ _id?: string; prefix?: string; capId?: string; slackChannel?: string | null }>)
     .find((p) => p.slackChannel === channel);
-  if (!bound) return true;
+  if (!bound) return false; // fail closed: no project bound to this channel
   const ref = projectRef.toLowerCase();
   return [bound._id, bound.prefix, bound.capId].some((x) => x && String(x).toLowerCase() === ref);
 }

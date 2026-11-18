@@ -47,7 +47,7 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: stri
 const { stakeholderGate, reopenFeedback } = await import('./agent');
 const { prThreadFor } = await import('./lookups');
 afterAll(() => { globalThis.fetch = realFetch; rmSync(RIG, { recursive: true, force: true }); });
-beforeEach(() => { calls.length = 0; roster = []; stakeholderPost = 200; projects = []; });
+beforeEach(() => { calls.length = 0; roster = []; stakeholderPost = 200; projects = [{ prefix: 'ONCALL', slackChannel: 'C1' }]; });
 
 const PR = { url: 'https://github.com/Saturn-Fintech/chat/pull/181' };
 const mkCtx = (ts: string, over: Record<string, unknown>) => ({
@@ -122,6 +122,13 @@ test('a name clash with a DIFFERENT slack id is a different person: no PATCH, pa
 test('channel bound to a DIFFERENT project: parked, no stakeholder POST', async () => {
   projects = [{ prefix: 'OTHER', _id: 'o1', slackChannel: 'C1' }];
   const g = await file(mkCtx('100.7', {}));
+  expect(g.ok).toBe(false);
+  expect(calls.some((c) => c.path.endsWith('/stakeholders'))).toBe(false);
+});
+
+test('channel bound to NO project fails closed: parked, no stakeholder POST', async () => {
+  projects = [{ prefix: 'OTHER', _id: 'o1', slackChannel: 'C9' }];
+  const g = await file(mkCtx('100.11', {}));
   expect(g.ok).toBe(false);
   expect(calls.some((c) => c.path.endsWith('/stakeholders'))).toBe(false);
 });
