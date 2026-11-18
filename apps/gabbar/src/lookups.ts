@@ -107,6 +107,7 @@ const PR_URL = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
 /** DAR-413. The first PR url in a message POSTED BY selfUser in this thread, else null. Only slack's own `user` field counts. */
 export async function prThreadFor(client: any, channel: string, threadTs: string | null, selfUser: string): Promise<{ url: string } | null> {
   if (!threadTs || !selfUser) return null;
+  // signal is only "Gabbar posted a PR link in this thread", nothing stronger
   const msgs: Array<{ user?: string; text?: string }> = await client.conversations
     .replies({ channel, ts: threadTs, limit: 200 })
     .then((r: any) => r?.messages ?? [])

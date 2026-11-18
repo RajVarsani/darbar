@@ -22,6 +22,7 @@ Object.assign(config, { slackApiBase: STUB_SLACK, apiUrl: STUB_API, gabbarOwnerI
 const calls: Array<{ method: string; path: string; body: any }> = [];
 let roster: Array<{ name: string; slackUserId?: string }> = [];
 let stakeholderPost = 200;
+let projects: unknown = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: string }) => {
   const url = String(input);
@@ -31,6 +32,9 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: stri
   const p = url.slice(STUB_API.length);
   calls.push({ method, path: p, body: init?.body ? JSON.parse(init.body) : null });
   const ok = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status });
+  if (method === 'GET' && p === '/projects') return ok(projects);
+  if (method === 'GET' && p === '/feedback/ONCALL-FB-1') return ok({ projectId: 'ONCALL' });
+  if (method === 'PATCH' && p === '/feedback/ONCALL-FB-1') return ok({ status: 'pending' });
   if (method === 'GET' && p === '/projects/ONCALL/context') return ok({ name: 'On-call', stakeholders: roster });
   if (method === 'POST' && p === '/projects/ONCALL/stakeholders') {
     if (stakeholderPost < 300) roster.push({ name: calls.at(-1)!.body.name, slackUserId: calls.at(-1)!.body.slackUserId });
@@ -40,10 +44,10 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: stri
   return ok({ error: 'not found' }, 404);
 }) as typeof globalThis.fetch;
 
-const { stakeholderGate } = await import('./agent');
+const { stakeholderGate, reopenFeedback } = await import('./agent');
 const { prThreadFor } = await import('./lookups');
 afterAll(() => { globalThis.fetch = realFetch; rmSync(RIG, { recursive: true, force: true }); });
-beforeEach(() => { calls.length = 0; roster = []; stakeholderPost = 200; });
+beforeEach(() => { calls.length = 0; roster = []; stakeholderPost = 200; projects = []; });
 
 const PR = { url: 'https://github.com/Saturn-Fintech/chat/pull/181' };
 const mkCtx = (ts: string, over: Record<string, unknown>) => ({
@@ -113,4 +117,28 @@ test('a name clash with a DIFFERENT slack id is a different person: no PATCH, pa
   stakeholderPost = 409;
   expect((await file(mkCtx('100.4', {}))).ok).toBe(false);
   expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+});
+
+test('channel bound to a DIFFERENT project: parked, no stakeholder POST', async () => {
+  projects = [{ prefix: 'OTHER', _id: 'o1', slackChannel: 'C1' }];
+  const g = await file(mkCtx('100.7', {}));
+  expect(g.ok).toBe(false);
+  expect(calls.some((c) => c.path.endsWith('/stakeholders'))).toBe(false);
+});
+
+test('channel bound to the target project (by prefix) still joins', async () => {
+  projects = [{ prefix: 'ONCALL', slackChannel: 'C1' }];
+  expect((await file(mkCtx('100.8', {}))).ok).toBe(true);
+});
+
+test('unreadable /projects fails closed: parked, nothing added', async () => {
+  projects = { error: 'x' };
+  expect((await file(mkCtx('100.9', {}))).ok).toBe(false);
+  expect(calls.some((c) => c.path.endsWith('/stakeholders'))).toBe(false);
+});
+
+test('reopen by a joining reviewer carries the reviewerNote', async () => {
+  const out = JSON.parse(await reopenFeedback(mkCtx('100.10', { existingFeedback: { shortId: 'ONCALL-FB-1', status: 'resolved' } }), 'ONCALL-FB-1'));
+  expect(out.status).toBe('pending');
+  expect(out.reviewerNote).toContain('pr-reviewer');
 });

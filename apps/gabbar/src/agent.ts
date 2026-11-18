@@ -242,7 +242,7 @@ async function slackPost(method: string, body: Record<string, unknown>): Promise
   return (await r.json().catch(() => ({}))) as Record<string, unknown>;
 }
 
-async function notifyOwnerGated(ctx: AgentContext, headline: string, said: string) {
+export async function notifyOwnerGated(ctx: AgentContext, headline: string, said: string) {
   const info = `${ctx.senderName} (<@${ctx.senderId}>) ${headline} they said: "${(said || '(no text)').slice(0, 300)}"`;
   try {
     if (ctx.channelType === 'im') {
@@ -449,6 +449,17 @@ async function joinAsPrReviewer(ctx: AgentContext, projectRef: string, projectNa
   return true;
 }
 
+// DAR-413. A channel bound to a project only admits PR reviewers onto THAT project; an unbound channel allows the resolved one. Unreadable /projects fails closed.
+async function prJoinAllowedHere(channel: string, projectRef: string): Promise<boolean> {
+  const f = await fetchDarbar('/projects');
+  if (!f.reachable || !Array.isArray(f.json)) return false;
+  const bound = (f.json as unknown as Array<{ _id?: string; prefix?: string; capId?: string; slackChannel?: string | null }>)
+    .find((p) => p.slackChannel === channel);
+  if (!bound) return true;
+  const ref = projectRef.toLowerCase();
+  return [bound._id, bound.prefix, bound.capId].some((x) => x && String(x).toLowerCase() === ref);
+}
+
 const joinedNote = (g: { joinedAs?: string; projectName: string | null }) =>
   g.joinedAs ? { reviewerNote: `the sender was just added as a ${g.joinedAs} on ${g.projectName} because they replied in a PR thread you posted. say so in one short clause in your reply.` } : {};
 
@@ -468,7 +479,7 @@ export async function stakeholderGate(
   let v = await verifyStakeholder(ctx, target);
   if (v.ok) return { ok: true, projectRef: v.projectRef, projectName: v.projectName };
   // DAR-413: a non-stakeholder replying in a thread where Gabbar posted a PR link is a PR reviewer
-  if (!v.ok && v.kind === 'not_stakeholder' && v.projectRef && ctx.prThread && ctx.threadTs) {
+  if (!v.ok && v.kind === 'not_stakeholder' && v.projectRef && ctx.prThread && ctx.threadTs && await prJoinAllowedHere(ctx.channel, v.projectRef)) {
     if (await joinAsPrReviewer(ctx, v.projectRef, v.projectName)) {
       v = await verifyStakeholder(ctx, target);
       if (v.ok) return { ok: true, projectRef: v.projectRef, projectName: v.projectName, joinedAs: 'pr-reviewer' };
@@ -1193,7 +1204,8 @@ export async function reopenFeedback(ctx: AgentContext, feedbackRef: unknown): P
   // must never be copied into a parked item or a new row (see GateIntent).
   const gate = await stakeholderGate(ctx, { feedbackRef: tracked.shortId }, { kind: 'reopen', feedbackShortId: tracked.shortId });
   if (!gate.ok) return gate.result;
-  return mc(`/feedback/${encodeURIComponent(tracked.shortId)}`, 'PATCH', { status: 'pending' });
+  const res = await mc(`/feedback/${encodeURIComponent(tracked.shortId)}`, 'PATCH', { status: 'pending' });
+  return JSON.stringify({ ...JSON.parse(res), ...joinedNote(gate) });
 }
 
 function buildTools(ctx: AgentContext) {
