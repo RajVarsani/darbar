@@ -107,3 +107,10 @@ test('prThreadFor only counts a PR url in a message posted by Gabbar', async () 
   expect(await prThreadFor(mk(bot), 'C1', '1', 'UGABBAR')).toEqual({ url: 'https://github.com/Saturn-Fintech/chat/pull/181' });
   expect(await prThreadFor(mk(bot), 'C1', null, 'UGABBAR')).toBe(null);
 });
+
+test('a name clash with a DIFFERENT slack id is a different person: no PATCH, parked as before', async () => {
+  roster = [{ name: 'Bharat', slackUserId: 'U0SOMEONEELSE' }];
+  stakeholderPost = 409;
+  expect((await file(mkCtx('100.4', {}))).ok).toBe(false);
+  expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+});

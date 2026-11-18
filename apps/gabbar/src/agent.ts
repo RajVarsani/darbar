@@ -433,6 +433,12 @@ async function joinAsPrReviewer(ctx: AgentContext, projectRef: string, projectNa
   const base = `/projects/${encodeURIComponent(projectRef)}/stakeholders`;
   let r = await fetchDarbar(base, 'POST', { name: ctx.senderName, slackUserId: ctx.senderId, role: 'pr-reviewer' });
   if (r.reachable && r.status === 409) {
+    // same name already on the roster: claim it only if it has no slack id; a different id is a different person
+    const pc = await fetchDarbar(`/projects/${encodeURIComponent(projectRef)}/context`);
+    const roster = pc.reachable && Array.isArray((pc.json as { stakeholders?: unknown }).stakeholders)
+      ? ((pc.json as { stakeholders: Array<{ name?: string; slackUserId?: string }> }).stakeholders) : [];
+    const same = roster.find((s) => (s.name ?? '').trim().toLowerCase() === ctx.senderName.trim().toLowerCase());
+    if (!same || (same.slackUserId && same.slackUserId !== ctx.senderId)) return false;
     r = await fetchDarbar(`${base}/${encodeURIComponent(ctx.senderName)}`, 'PATCH', { slackUserId: ctx.senderId });
   }
   if (!r.reachable || r.status < 200 || r.status >= 300) return false;
