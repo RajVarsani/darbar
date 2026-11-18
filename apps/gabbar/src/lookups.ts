@@ -101,3 +101,20 @@ export async function fileLoopThreadReply(
   if (!fb.shortId) console.error(`gabbar: loop-thread reply ${m.channel}/${m.ts} refused: ${fb.error}`);
   return fb.shortId ?? null;
 }
+
+const PR_URL = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
+
+/** DAR-413. The first PR url in a message POSTED BY selfUser in this thread, else null. Only slack's own `user` field counts. */
+export async function prThreadFor(client: any, channel: string, threadTs: string | null, selfUser: string): Promise<{ url: string } | null> {
+  if (!threadTs || !selfUser) return null;
+  const msgs: Array<{ user?: string; text?: string }> = await client.conversations
+    .replies({ channel, ts: threadTs, limit: 200 })
+    .then((r: any) => r?.messages ?? [])
+    .catch(() => []);
+  for (const m of msgs) {
+    if (m.user !== selfUser) continue;
+    const hit = (m.text || '').match(PR_URL);
+    if (hit) return { url: hit[0] };
+  }
+  return null;
+}

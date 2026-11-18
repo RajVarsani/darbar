@@ -5,7 +5,7 @@ import { App } from '@slack/bolt';
 import path from 'node:path';
 import { config } from '@darbar/core';
 import { escalateStaleParked, runAgent, runWithMessageBudget, type AgentContext } from './agent';
-import { existingFeedback, fileLoopThreadReply, senderName } from './lookups';
+import { existingFeedback, fileLoopThreadReply, prThreadFor, senderName } from './lookups';
 import { NO_ATTACHMENTS, prepareAttachments, safeName, type Attachments, type Upload } from './media';
 
 if (!config.slackBotToken || !config.slackAppToken) {
@@ -259,11 +259,12 @@ async function handleMessage({ message, event, client, say }: any) {
   void thinkingOn(client, m.channel, threadTs ?? m.ts, isIm)
     .then((shown) => { if (!shown && !isIm) hourglassOn(client, m.channel, m.ts); });
 
-  const [name, attach, history, fb] = await Promise.all([
+  const [name, attach, history, fb, prThread] = await Promise.all([
     senderName(client, m.user),
     pullFiles(m.files),
     buildHistory(client, m.channel, threadTs, m.ts),
     existingFeedback(m.channel, threadTs),
+    prThreadFor(client, m.channel, threadTs, SELF_USER),
   ]);
   if (!text && attach.items.length === 0) {
     // files-only message whose downloads all failed: resolve the ack, don't vanish
@@ -285,6 +286,7 @@ async function handleMessage({ message, event, client, say }: any) {
     attach, // the encoded blocks the model sees, plus the inventory generated from them
     messageText: text, // the sender's own words, kept verbatim for a parked report
     existingFeedback: fb,
+    prThread,
   };
 
   const reply = await runAgent(ctx, history, text);

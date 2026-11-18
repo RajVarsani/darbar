@@ -219,6 +219,7 @@ export type AgentContext = {
   attach: Attachments; // the encoded image blocks the model sees, plus the inventory built FROM them
   messageText: string; // the sender's own words, verbatim, for the parked-report record
   existingFeedback: { shortId: string; status: string } | null; // thread ↔ feedback mapping, pre-resolved
+  prThread?: { url: string } | null; // set by the transport only: a Gabbar-posted message in this thread carries a PR url (DAR-413)
 };
 
 // ---------- stakeholder gate (enforced in code, not just the prompt) ----------
@@ -267,7 +268,7 @@ async function notifyOwnerGated(ctx: AgentContext, headline: string, said: strin
 // against the darbar that just failed. Both fields are null on the owner short-circuit below, where
 // no resolution ever happens, and the caller falls back to what it was given.
 type GateResult =
-  | { ok: true; projectRef: string | null; projectName: string | null }
+  | { ok: true; projectRef: string | null; projectName: string | null; joinedAs?: string }
   | { ok: false; result: string };
 
 type Verdict =
@@ -427,6 +428,24 @@ function causeFor(kind: Exclude<Verdict, { ok: true }>['kind']): ParkCause {
   return 'bad_reference'; // bad_ref, and a project darbar says does not exist
 }
 
+// DAR-413. Adds ctx's sender to the project roster as pr-reviewer; false on any failure (caller then parks as before).
+async function joinAsPrReviewer(ctx: AgentContext, projectRef: string, projectName: string | null): Promise<boolean> {
+  const base = `/projects/${encodeURIComponent(projectRef)}/stakeholders`;
+  let r = await fetchDarbar(base, 'POST', { name: ctx.senderName, slackUserId: ctx.senderId, role: 'pr-reviewer' });
+  if (r.reachable && r.status === 409) {
+    r = await fetchDarbar(`${base}/${encodeURIComponent(ctx.senderName)}`, 'PATCH', { slackUserId: ctx.senderId });
+  }
+  if (!r.reachable || r.status < 200 || r.status >= 300) return false;
+  await fetchDarbar('/events', 'POST', {
+    project: projectRef,
+    text: `${ctx.senderName} joined as pr-reviewer via PR thread ${ctx.channel}/${ctx.threadTs} (${ctx.prThread?.url})`,
+  });
+  return true;
+}
+
+const joinedNote = (g: { joinedAs?: string; projectName: string | null }) =>
+  g.joinedAs ? { reviewerNote: `the sender was just added as a ${g.joinedAs} on ${g.projectName} because they replied in a PR thread you posted. say so in one short clause in your reply.` } : {};
+
 /**
  * Exported for parked-append.test.ts. "A refusal holds what the sender wrote" is decided here and
  * nowhere else, and the three intents now answer it three different ways, so the test asserts what
@@ -440,8 +459,15 @@ export async function stakeholderGate(
   // owner always allowed, and nothing is resolved on this path, so a caller that needs a project
   // has only what it was given
   if (ctx.senderId === config.gabbarOwnerId) return { ok: true, projectRef: null, projectName: null };
-  const v = await verifyStakeholder(ctx, target);
+  let v = await verifyStakeholder(ctx, target);
   if (v.ok) return { ok: true, projectRef: v.projectRef, projectName: v.projectName };
+  // DAR-413: a non-stakeholder replying in a thread where Gabbar posted a PR link is a PR reviewer
+  if (!v.ok && v.kind === 'not_stakeholder' && v.projectRef && ctx.prThread && ctx.threadTs) {
+    if (await joinAsPrReviewer(ctx, v.projectRef, v.projectName)) {
+      v = await verifyStakeholder(ctx, target);
+      if (v.ok) return { ok: true, projectRef: v.projectRef, projectName: v.projectName, joinedAs: 'pr-reviewer' };
+    }
+  }
   const where = v.projectName ?? '(project could not be resolved)';
   // ONLY a stakeholder gap needs a human right now, so only it pings. An outage pings nobody: it
   // resolves by itself, the sweep retries it on the sender's next message, and the escalation
@@ -1081,7 +1107,7 @@ export async function fileFeedback(
   // retire the held copy rather than leave a duplicate of tracked work sitting in the queue.
   const filed = f.json as { shortId?: string };
   if (filed.shortId) markSuperseded(ctx.channel, ctx.messageTs, String(filed.shortId));
-  return JSON.stringify(f.json);
+  return JSON.stringify({ ...f.json, ...joinedNote(gate) });
 }
 
 /**
@@ -1134,7 +1160,7 @@ export async function addToFeedback(ctx: AgentContext, feedbackRef: unknown, not
   // (a refusal the model then retried after the roster changed). It landed, so retire the
   // held copy rather than leave the sweep about to add the same words a second time.
   if ((f.json as { appended?: boolean }).appended === true) markSuperseded(ctx.channel, ctx.messageTs, id, id);
-  return JSON.stringify(f.json);
+  return JSON.stringify({ ...f.json, ...joinedNote(gate) });
 }
 
 /**
