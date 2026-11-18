@@ -46,6 +46,7 @@ beforeEach(() => {
 
 const { fileLoopThreadReply } = await import('./lookups');
 const { listParked } = await import('./parked');
+const { promoteParked } = await import('./agent');
 Object.assign(config, { gabbarOwnerId: 'U000000STUBOWNER', slackBotToken: 'xoxb-stub' });
 const SELF = 'UGABBAR';
 const mkClient = (rootUser: string, isBot = false) => ({
@@ -101,11 +102,44 @@ test('roster-refused reply (400) is parked as a stakeholder gap and the owner is
   expect(pings[0]!.body.text).toContain(id!);
 });
 
-test('author name is the sender own slack name, not a roster lookup', async () => {
+test('author is the roster name, not the slack name', async () => {
   const client = mkClient(SELF);
-  client.users.info = async () => ({ user: { is_bot: false, profile: { display_name: '' }, real_name: 'Tanisha Real' } } as any);
+  client.users.info = async () => ({ user: { is_bot: false, profile: { display_name: '' }, real_name: 'Tanisha Kumar' } } as any);
   await fileLoopThreadReply(client, reply, SELF);
-  expect(posts()[0]!.body.author).toBe('Tanisha Real');
+  expect(posts()[0]!.body.author).toBe('Tanisha');
+});
+
+test('a sender not on the roster falls back to their slack name', async () => {
+  const client = mkClient(SELF);
+  client.users.info = async () => ({ user: { is_bot: false, profile: { display_name: '' }, real_name: 'Stranger Real' } } as any);
+  await fileLoopThreadReply(client, { ...reply, user: 'U9' }, SELF);
+  expect(posts()[0]!.body.author).toBe('Stranger Real');
+});
+
+test('promoting a loop-reply park presents the loop-reply key and the reply ts', async () => {
+  feedbackRes = () => new Response(JSON.stringify({ error: 'refused' }), { status: 400 });
+  await fileLoopThreadReply(mkClient(SELF), reply, SELF);
+  const item = listParked()[0]!;
+  expect(item.idempotencyKey).toBe('gabbar:C1:100.2:loop-reply');
+  expect(item.rowTs).toBe('100.2');
+  calls.length = 0;
+  feedbackRes = () => new Response(JSON.stringify({ shortId: 'FFERR-FB-2', idempotent: true }), { status: 200 });
+  const r = await promoteParked(item, 'gabbar', { project: 'FFERR' });
+  expect(r.ok && r.alreadyThere).toBe(true);
+  const p = posts()[0]!;
+  expect(p.body.idempotencyKey).toBe('gabbar:C1:100.2:loop-reply');
+  expect(p.body.slack.ts).toBe('100.2');
+});
+
+test('a parked file without the new fields promotes with the old key and thread root', async () => {
+  feedbackRes = () => new Response(JSON.stringify({ error: 'refused' }), { status: 400 });
+  await fileLoopThreadReply(mkClient(SELF), reply, SELF);
+  const { idempotencyKey, rowTs, ...old } = listParked()[0]!;
+  calls.length = 0;
+  feedbackRes = () => new Response(JSON.stringify({ shortId: 'FFERR-FB-3' }), { status: 200 });
+  await promoteParked(old as any, 'gabbar', { project: 'FFERR' });
+  expect(posts()[0]!.body.idempotencyKey).toBe('gabbar:C1:100.2:file');
+  expect(posts()[0]!.body.slack.ts).toBe('100.1');
 });
 
 test('unreachable darbar on the POST parks as outage with no owner ping', async () => {

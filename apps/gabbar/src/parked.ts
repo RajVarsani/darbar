@@ -99,6 +99,8 @@ export type ParkedItem = {
   escalations: number;
   promotion: { at: string; feedbackShortId: string; promotedBy: string } | null;
   supersededBy: string | null;
+  idempotencyKey?: string;
+  rowTs?: string;
 };
 
 const idSafe = (s: string): string => s.replace(/[^A-Za-z0-9]+/g, '_');
@@ -185,6 +187,10 @@ export type ParkInput = {
   gateKind: string;
   gateDetail: string;
   cause: ParkCause;
+  /** key the original write used, when it was not writeKey(slack,'file') */
+  idempotencyKey?: string;
+  /** slack ts the filed row should carry, when it is not the thread root/ts */
+  rowTs?: string;
 };
 
 /**
@@ -219,6 +225,8 @@ function hold(input: ParkInput, kind: ParkedKind, appendTo: string | null): Park
     escalations: existing?.escalations ?? 0,
     promotion: null,
     supersededBy: null,
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    ...(input.rowTs ? { rowTs: input.rowTs } : {}),
   };
   try {
     writeItem(item);

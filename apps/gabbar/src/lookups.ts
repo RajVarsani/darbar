@@ -75,10 +75,11 @@ export async function fileLoopThreadReply(
   const list = await fetchDarbar('/projects');
   const listed = list.reachable && Array.isArray(list.json);
   const project = listed
-    ? (list.json as unknown as Array<{ prefix?: string; name?: string; slackChannel?: string | null }>)
+    ? (list.json as unknown as Array<{ prefix?: string; name?: string; slackChannel?: string | null; stakeholders?: Array<{ name?: string; slackUserId?: string }> }>)
       .find((p) => p.slackChannel === m.channel && p.prefix) ?? null
     : null;
   if (listed && !project) return null;
+  const rosterName = project?.stakeholders?.find((s) => s.slackUserId === m.user && s.name)?.name;
   const bodyOf = (link?: string) =>
     `${text}\n\n(reply in a Gabbar-posted Slack thread: channel ${m.channel}, thread_ts ${m.thread_ts}, reply ts ${m.ts}${link ? `, ${link}` : ''}. Reply in that thread, not in the channel.)`;
   const park = (cause: 'stakeholder_gap' | 'outage', gateKind: string, gateDetail: string, name: string, body: string) => {
@@ -89,13 +90,14 @@ export async function fileLoopThreadReply(
       projectRef: project?.prefix ?? null, projectName: project?.name ?? null, taskRef: null,
       feedbackType: 'feature', body, rawMessage: text, attachments: [], mediaNotes: [],
       gateKind, gateDetail, cause,
+      idempotencyKey: `gabbar:${m.channel}:${m.ts}:loop-reply`, rowTs: m.ts,
     });
     console.error(`gabbar: loop-thread reply ${at} parked as ${item.parkId} (${cause}): ${gateDetail}`);
     return { item, fresh };
   };
   const unread = (what: string, e: unknown) => {
     console.error(`gabbar: loop-thread ${what} failed for ${at}:`, e);
-    return park('outage', 'slack_read_failed', `${what} failed: ${String(e)}`, m.user, bodyOf()).item.parkId;
+    return park('outage', 'slack_read_failed', `${what} failed: ${String(e)}`, rosterName ?? m.user, bodyOf()).item.parkId;
   };
 
   let root: any;
@@ -112,7 +114,8 @@ export async function fileLoopThreadReply(
     return unread('users.info', e);
   }
   if (who?.user?.is_bot) return null;
-  const name: string = who?.user?.profile?.display_name || who?.user?.real_name || m.user;
+  // roster name first: the server's author check matches it exactly
+  const name: string = rosterName ?? (who?.user?.profile?.display_name || who?.user?.real_name || m.user);
   const link: string | undefined = await client.chat.getPermalink({ channel: m.channel, message_ts: m.ts })
     .then((r: any) => r?.permalink as string | undefined)
     .catch((e: unknown) => { console.error(`gabbar: loop-thread getPermalink failed for ${at}:`, e); return undefined; });

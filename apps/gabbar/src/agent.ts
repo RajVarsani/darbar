@@ -634,13 +634,13 @@ export async function promoteParked(
     author: item.author.name,
     authorType: 'human',
     attachments: item.attachments,
-    slack: { channel: item.slack.channel, ts: item.slack.threadTs ?? item.slack.ts, user: item.author.slackUserId },
+    slack: { channel: item.slack.channel, ts: item.rowTs ?? (item.slack.threadTs ?? item.slack.ts), user: item.author.slackUserId },
     // DAR-229. THE SAME KEY THE ORIGINAL ATTEMPT SENT, rebuilt from the slack message on the record
     // rather than stored, so a held item written before keys existed gets the right one too. A hold
     // whose first write actually landed resolves to that row instead of filing it twice, and the
     // body above, which is a provenance wrapper written later, does not overwrite the words the
     // sender's own attempt put there: an idempotent repeat writes nothing and returns what exists.
-    idempotencyKey: writeKey(item.slack, 'file'),
+    idempotencyKey: item.idempotencyKey ?? writeKey(item.slack, 'file'), // loop-reply parks carry their own key
   })) as { shortId?: string; boardUrl?: string; error?: string; idempotent?: boolean };
   if (!res.shortId) return { ok: false, error: res.error ?? 'darbar refused the filing' };
   markPromoted(item.parkId, res.shortId, promotedBy);
