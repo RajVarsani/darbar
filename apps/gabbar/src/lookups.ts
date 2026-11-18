@@ -5,7 +5,8 @@
 // nothing can drive them without connecting to the real workspace, and DAR-235 was a bug in exactly
 // these two calls that survived a fix and a review because neither could be exercised. The transport
 // still owns them, it just imports them now.
-import { fetchDarbar } from './agent';
+import { fetchDarbar, notifyOwnerGated, type AgentContext } from './agent';
+import { parkIdFor, parkReport, readParked } from './parked';
 
 /**
  * DAR-235. Both of these used a RAW fetch: no AbortSignal, no per-request timeout, no budget. They
@@ -60,7 +61,8 @@ export async function existingFeedback(channel: string, threadTs: string | null)
  * DAR-411. A plain human reply under a thread whose ROOT the Gabbar bot itself posted (a loop's
  * daily report) in a channel bound to a project is filed as pending feedback on that project, so the
  * project's T3 outbox hands it on. One row per reply, keyed on (channel, reply ts). Files nothing
- * and posts nothing to slack in any other case. Returns the filed/matched row's shortId, or null.
+ * in any other case. A reply darbar refuses or cannot take, or one whose slack reads fail, is PARKED
+ * (parked.ts), never dropped. Returns the row's shortId, a PARK- id when held, or null.
  */
 export async function fileLoopThreadReply(
   client: any,
@@ -69,37 +71,77 @@ export async function fileLoopThreadReply(
 ): Promise<string | null> {
   const text = (m.text || '').trim();
   if (!selfUser || !text) return null;
+  const at = `${m.channel}/${m.ts}`;
   const list = await fetchDarbar('/projects');
-  if (!list.reachable || !Array.isArray(list.json)) return null;
-  const project = (list.json as unknown as Array<{ prefix?: string; slackChannel?: string | null }>)
-    .find((p) => p.slackChannel === m.channel && p.prefix);
-  if (!project) return null;
-  const root = await client.conversations
-    .replies({ channel: m.channel, ts: m.thread_ts, limit: 1, inclusive: true })
-    .then((r: any) => r?.messages?.[0])
-    .catch(() => null);
+  const listed = list.reachable && Array.isArray(list.json);
+  const project = listed
+    ? (list.json as unknown as Array<{ prefix?: string; name?: string; slackChannel?: string | null }>)
+      .find((p) => p.slackChannel === m.channel && p.prefix) ?? null
+    : null;
+  if (listed && !project) return null;
+  const bodyOf = (link?: string) =>
+    `${text}\n\n(reply in a Gabbar-posted Slack thread: channel ${m.channel}, thread_ts ${m.thread_ts}, reply ts ${m.ts}${link ? `, ${link}` : ''}. Reply in that thread, not in the channel.)`;
+  const park = (cause: 'stakeholder_gap' | 'outage', gateKind: string, gateDetail: string, name: string, body: string) => {
+    const id = parkIdFor(m.channel, m.ts);
+    const fresh = !readParked(id);
+    const item = parkReport({
+      channel: m.channel, ts: m.ts, threadTs: m.thread_ts, authorId: m.user, authorName: name,
+      projectRef: project?.prefix ?? null, projectName: project?.name ?? null, taskRef: null,
+      feedbackType: 'feature', body, rawMessage: text, attachments: [], mediaNotes: [],
+      gateKind, gateDetail, cause,
+    });
+    console.error(`gabbar: loop-thread reply ${at} parked as ${item.parkId} (${cause}): ${gateDetail}`);
+    return { item, fresh };
+  };
+  const unread = (what: string, e: unknown) => {
+    console.error(`gabbar: loop-thread ${what} failed for ${at}:`, e);
+    return park('outage', 'slack_read_failed', `${what} failed: ${String(e)}`, m.user, bodyOf()).item.parkId;
+  };
+
+  let root: any;
+  try {
+    root = await client.conversations.replies({ channel: m.channel, ts: m.thread_ts, limit: 1, inclusive: true }).then((r: any) => r?.messages?.[0]);
+  } catch (e) {
+    return unread('conversations.replies', e);
+  }
   if (!root || root.ts !== m.thread_ts || root.user !== selfUser) return null;
-  const author = await client.users.info({ user: m.user }).catch(() => null);
-  if (author?.user?.is_bot) return null;
-  const [name, link] = await Promise.all([
-    senderName(client, m.user),
-    client.chat.getPermalink({ channel: m.channel, message_ts: m.ts }).then((r: any) => r?.permalink as string | undefined).catch(() => undefined),
-  ]);
+  let who: any;
+  try {
+    who = await client.users.info({ user: m.user });
+  } catch (e) {
+    return unread('users.info', e);
+  }
+  if (who?.user?.is_bot) return null;
+  const name: string = who?.user?.profile?.display_name || who?.user?.real_name || m.user;
+  const link: string | undefined = await client.chat.getPermalink({ channel: m.channel, message_ts: m.ts })
+    .then((r: any) => r?.permalink as string | undefined)
+    .catch((e: unknown) => { console.error(`gabbar: loop-thread getPermalink failed for ${at}:`, e); return undefined; });
+  const body = bodyOf(link);
+
+  if (!project) {
+    return park('outage', 'unreachable', list.reachable ? 'projects list unreadable' : list.detail, name, body).item.parkId;
+  }
   const f = await fetchDarbar('/feedback', 'POST', {
     project: project.prefix,
     type: 'feature',
-    body: `${text}\n\n(reply in a Gabbar-posted Slack thread: channel ${m.channel}, thread_ts ${m.thread_ts}, reply ts ${m.ts}${link ? `, ${link}` : ''}. Reply in that thread, not in the channel.)`,
+    body,
     author: name,
     slack: { channel: m.channel, ts: m.ts, user: m.user },
     idempotencyKey: `gabbar:${m.channel}:${m.ts}:loop-reply`,
   });
-  if (!f.reachable) {
-    console.error(`gabbar: loop-thread reply ${m.channel}/${m.ts} not filed: ${f.detail}`);
-    return null;
-  }
+  if (!f.reachable) return park('outage', 'write_failed', f.detail, name, body).item.parkId;
   const fb = f.json as { shortId?: string; error?: string };
-  if (!fb.shortId) console.error(`gabbar: loop-thread reply ${m.channel}/${m.ts} refused: ${fb.error}`);
-  return fb.shortId ?? null;
+  if (fb.shortId) return fb.shortId;
+  const gap = f.status === 400;
+  const { item, fresh } = park(gap ? 'stakeholder_gap' : 'outage', gap ? 'not_stakeholder' : 'write_failed', `${f.status}: ${fb.error ?? 'refused'}`, name, body);
+  if (gap && fresh) {
+    await notifyOwnerGated(
+      { senderId: m.user, senderName: name, channel: m.channel, channelType: 'channel', threadTs: m.thread_ts, messageTs: m.ts } as AgentContext,
+      `replied in a Gabbar-posted thread on *${project.name ?? project.prefix}* but is not on its roster. nothing was filed. their reply is parked as \`${item.parkId}\`, add them as a stakeholder and it files on their next message to me.`,
+      text,
+    );
+  }
+  return item.parkId;
 }
 
 const PR_URL = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
