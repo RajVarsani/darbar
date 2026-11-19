@@ -1,7 +1,7 @@
 import { MongoClient, ObjectId } from 'mongodb';
 import type { Collection } from 'mongodb';
 import { config } from './config';
-import type { Project, Task, FeedbackDoc, EventDoc, MemoryNode, MemoryEdge, MemoryEpisode } from './types';
+import type { CtxWatchState, Project, Task, FeedbackDoc, EventDoc, MemoryNode, MemoryEdge, MemoryEpisode } from './types';
 
 const client = new MongoClient(config.mongoUri);
 export const db = client.db(config.dbName);
@@ -10,6 +10,7 @@ export const Projects = db.collection<Project>('projects');
 export const Tasks = db.collection<Task>('tasks');
 export const Feedback = db.collection<FeedbackDoc>('feedback');
 export const Events = db.collection<EventDoc>('events');
+export const CtxWatch = db.collection<CtxWatchState>('ctxwatch');
 export const MemoryNodes = db.collection<MemoryNode>('memory_nodes');
 export const MemoryEdges = db.collection<MemoryEdge>('memory_edges');
 export const MemoryEpisodes = db.collection<MemoryEpisode>('memory_episodes');

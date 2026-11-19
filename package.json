@@ -14,7 +14,9 @@
     "mcp": "bun --env-file=.env apps/mcp/src/server.ts",
     "tunnel": "sh scripts/tunnel.sh",
     "typecheck": "bunx tsc --noEmit",
-    "clean-test-dbs": "bun run --filter @darbar/server clean-test-dbs"
+    "clean-test-dbs": "bun run --filter @darbar/server clean-test-dbs",
+    "ctxwatch": "bun run --filter @darbar/ctxwatch dev",
+    "ctxwatch:optout": "bun --env-file=.env apps/ctxwatch/src/optout.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",

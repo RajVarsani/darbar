@@ -10,6 +10,7 @@ Mission control for agent-orchestrated projects: live boards + human feedback pi
 | `apps/server` | Hono API + SSE + capability-URL boards on `127.0.0.1:4899` | `src/server.ts` |
 | `apps/gabbar` | Slack Socket Mode intake bot (writes pending feedback, nothing else) | `src/bot.ts` |
 | `apps/proxy` | Dynamic front door on `127.0.0.1:4800`; the tunnel fronts ONLY this | `src/server.ts` |
+| `apps/ctxwatch` | T3 context meter: `NN% ·` title prefix, handoff + fresh resume at the threshold | `src/watcher.ts` |
 | `apps/mcp` | stdio MCP tools wrapping the API (spawned by Claude sessions) | `src/server.ts` |
 | `packages/core` | Shared config + Mongo collections + types (`@darbar/core`) | `src/index.ts` |
 

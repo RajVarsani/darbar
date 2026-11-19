@@ -9,6 +9,12 @@
         "typescript": "^5.5.0",
       },
     },
+    "apps/ctxwatch": {
+      "name": "@darbar/ctxwatch",
+      "dependencies": {
+        "@darbar/core": "workspace:*",
+      },
+    },
     "apps/gabbar": {
       "name": "@darbar/gabbar",
       "dependencies": {
@@ -51,6 +57,8 @@
     "@babel/runtime": ["@babel/runtime@7.29.7", "", {}, "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw=="],
 
     "@darbar/core": ["@darbar/core@workspace:packages/core"],
+
+    "@darbar/ctxwatch": ["@darbar/ctxwatch@workspace:apps/ctxwatch"],
 
     "@darbar/gabbar": ["@darbar/gabbar@workspace:apps/gabbar"],
 

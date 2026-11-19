@@ -58,6 +58,25 @@ export const config = {
   t3Model: env.T3_MODEL || 'claude-opus-5-5', // T3 needs --model with --provider; Claude's current default
   t3TimeoutMs: Number(env.T3_TIMEOUT_MS || 60_000),
   t3SweepMs: Number(env.T3_SWEEP_MS || 30_000),
+  // ---------- DAR-419: context watcher (apps/ctxwatch) ----------
+  // kill switch: CTXWATCH=off stops every title write and every send; DARBAR_T3=off stops it too
+  ctxwatchEnabled: (env.CTXWATCH || 'on').toLowerCase() !== 'off' && (env.DARBAR_T3 || 'on').toLowerCase() !== 'off',
+  ctxwatchThreshold: Number(env.CTXWATCH_THRESHOLD || 80), // percent of the context window
+  ctxwatchBucketStep: Number(env.CTXWATCH_BUCKET_STEP || 5), // the title only changes when the bucket does
+  ctxwatchPollMs: Number(env.CTXWATCH_POLL_MS || 15_000),
+  ctxwatchPhasePollMs: Number(env.CTXWATCH_PHASE_POLL_MS || 2_000), // while a handoff run is pending
+  ctxwatchActiveHours: Number(env.CTXWATCH_ACTIVE_HOURS || 72), // threads untouched for longer are ignored
+  ctxwatchMinGapMs: Number(env.CTXWATCH_MIN_GAP_MS || 600_000), // loop guard: no second handoff on a thread inside this gap
+  ctxwatchHandoffMsg: env.CTXWATCH_HANDOFF_MSG || 'run /darbar-handoff now',
+  ctxwatchResumeMsg: env.CTXWATCH_RESUME_MSG || '/darbar-resume',
+  ctxwatchOnlyThreads: (env.CTXWATCH_ONLY_THREADS || '').split(',').map((s) => s.trim()).filter(Boolean), // allowlist; empty = every thread
+  ctxwatchSkipThreads: (env.CTXWATCH_SKIP_THREADS || '').split(',').map((s) => s.trim()).filter(Boolean), // per-thread opt-out
+  // only used when T3 reports no window for a turn: { "<model>": tokens }
+  ctxwatchWindows: (() => { try { return JSON.parse(env.CTXWATCH_WINDOWS || '{}') as Record<string, number>; } catch { return {}; } })(),
+  ctxwatchEventProject: env.CTXWATCH_EVENT_PROJECT || 'DAR', // board that receives the watcher's events
+  ctxwatchRetries: Number(env.CTXWATCH_RETRIES || 4),
+  ctxwatchBackoffMs: Number(env.CTXWATCH_BACKOFF_MS || 1_000),
+  t3StateDb: env.T3_STATE_DB || `${env.T3CODE_HOME || `${env.HOME || ''}/.t3`}/userdata/statev2.sqlite`,
   eventsBoardLimit: 50,
   capIdLen: 21,
   serverIdleTimeout: 120,

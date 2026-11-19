@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PREFIX="${DARBAR_LABEL_PREFIX:-com.$(id -un).darbar}"
 DEST="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
-AGENTS=(server proxy gabbar tunnel backup watchdog)
+AGENTS=(server proxy gabbar ctxwatch tunnel backup watchdog)
 
 if [ "${1:-}" = "--uninstall" ]; then
   for a in "${AGENTS[@]}"; do

@@ -69,3 +69,16 @@ if [ -f "$HB" ]; then
     clear_fails gabbar
   fi
 fi
+
+# ---- ctxwatch (DAR-419): heartbeat is touched every poll; only checked once the agent is installed ----
+HB="$ROOT/data/ctxwatch-heartbeat.json"
+if [ -f "$HB" ] && launchctl print "gui/$(id -u)/com.rajvarsani.darbar-ctxwatch" >/dev/null 2>&1; then
+  age=$(( $(date +%s) - $(stat -f %m "$HB") ))
+  if [ "$age" -gt 300 ]; then
+    n=$(bump ctxwatch)
+    log "ctxwatch heartbeat stale ${age}s ($n/$FAILS_BEFORE_RESTART)"
+    [ "$n" -ge "$FAILS_BEFORE_RESTART" ] && restart ctxwatch com.rajvarsani.darbar-ctxwatch "watcher loop silent for ${age}s"
+  else
+    clear_fails ctxwatch
+  fi
+fi

@@ -567,3 +567,23 @@ export function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
+
+// ---------- DAR-419: context watcher state (apps/ctxwatch) ----------
+// One doc per T3 thread. `firedSession` is the provider session the rule already fired for; a fresh
+// context gets a new provider thread id, which is what re-arms it.
+export type CtxWatchPhase = 'idle' | 'handoff_pending' | 'handoff_sent' | 'resume_pending' | 'resume_sent' | 'halted';
+export type CtxWatchState = {
+  _id?: ObjectId;
+  threadId: string;
+  optOut?: boolean;
+  phase: CtxWatchPhase;
+  firedSession?: string | null;
+  firedAt?: Date | null;
+  handoffRunId?: string | null;
+  resumeRunId?: string | null;
+  queueBefore?: string[]; // user's queued run ids when the current insert began
+  lastBucket?: number | null;
+  lastPct?: number | null;
+  lastError?: string | null;
+  updatedAt: Date;
+};

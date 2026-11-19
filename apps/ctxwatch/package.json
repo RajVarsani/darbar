@@ -1,0 +1,11 @@
+{
+  "name": "@darbar/ctxwatch",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@darbar/core": "workspace:*"
+  },
+  "scripts": {
+    "dev": "bun --env-file=../../.env src/watcher.ts"
+  }
+}
