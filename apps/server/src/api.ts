@@ -8,10 +8,12 @@ import { emit, subscribe } from './sse';
 import { nudge, waitForNudge } from './inbox';
 import * as linearSync from './linear-sync';
 import { kickT3, setT3Logger, t3LinkFor } from './t3';
+import { ctxGate } from './ctx-gate';
 import { config, pathPatternError, PATH_PATTERN_FORM, isParkId, MEMORY_NODE_TYPES, slugify } from '@darbar/core';
 import type { FeedbackDoc, ParkedRead, ParkedSummary, Pipeline, Project, ProjectAgent, ProjectProxy, PublishedRoute, Stakeholder, Task, TaskStatus, TaskType, FeedbackStatus, MemoryNode, MemoryEdge, MemoryEdgeSource, MemoryNodeType, MemoryObservation } from '@darbar/core';
 
 export const api = new Hono();
+api.route('/ctx', ctxGate); // DAR-419 handoff gate
 // DAR-266: the Linear mirror logs through the same event feed and runs the same ship cascade
 linearSync.configureLinearHooks({ logEvent, transition: (t, set, opts) => transitionTask(t, set, opts) });
 

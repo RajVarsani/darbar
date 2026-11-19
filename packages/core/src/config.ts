@@ -67,6 +67,7 @@ export const config = {
   ctxwatchPhasePollMs: Number(env.CTXWATCH_PHASE_POLL_MS || 2_000), // while a handoff run is pending
   ctxwatchActiveHours: Number(env.CTXWATCH_ACTIVE_HOURS || 72), // threads untouched for longer are ignored
   ctxwatchMinGapMs: Number(env.CTXWATCH_MIN_GAP_MS || 600_000), // loop guard: no second handoff on a thread inside this gap
+  ctxwatchGateWaitMs: Number(env.CTXWATCH_GATE_WAIT_MS || 30_000), // how long the gate call waits for the resume to be queued
   ctxwatchHandoffMsg: env.CTXWATCH_HANDOFF_MSG || 'run /darbar-handoff now',
   ctxwatchResumeMsg: env.CTXWATCH_RESUME_MSG || '/darbar-resume',
   ctxwatchOnlyThreads: (env.CTXWATCH_ONLY_THREADS || '').split(',').map((s) => s.trim()).filter(Boolean), // allowlist; empty = every thread

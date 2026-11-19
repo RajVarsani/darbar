@@ -579,6 +579,8 @@ export type CtxWatchState = {
   phase: CtxWatchPhase;
   firedSession?: string | null;
   firedAt?: Date | null;
+  gateAt?: Date | null; // the handoff run called /api/ctx/handoff-done
+  retryAfter?: string | null; // re-armed after a handoff that did not finish: wait for a turn newer than this
   handoffRunId?: string | null;
   resumeRunId?: string | null;
   queueBefore?: string[]; // user's queued run ids when the current insert began

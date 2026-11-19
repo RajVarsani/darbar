@@ -7,7 +7,7 @@ let db: Database | null = null;
 const open = () => (db ??= new Database(config.t3StateDb, { readonly: true }));
 
 export type ThreadRow = { id: string; title: string; relationship: string | null };
-export type Usage = { session: string; used: number; max: number; pct: number; model: string | null };
+export type Usage = { at: string; session: string; used: number; max: number; pct: number; model: string | null };
 
 export function liveThreads(sinceIso: string): ThreadRow[] {
   const rows = open().query(
@@ -20,18 +20,18 @@ export function liveThreads(sinceIso: string): ThreadRow[] {
 
 export function latestUsage(threadId: string): Usage | null {
   const r = open().query(
-    `SELECT provider_thread_id AS session,
+    `SELECT provider_thread_id AS session, COALESCE(started_at, completed_at) AS at,
             json_extract(payload_json,'$.tokenUsage.usedTokens') AS used,
             json_extract(payload_json,'$.tokenUsage.maxTokens') AS max,
             json_extract(payload_json,'$.model') AS model
        FROM orchestration_v2_projection_provider_turns
       WHERE thread_id = ? AND json_extract(payload_json,'$.tokenUsage.usedTokens') IS NOT NULL
       ORDER BY COALESCE(started_at, completed_at) DESC LIMIT 1`,
-  ).get(threadId) as { session: string; used: number; max: number | null; model: string | null } | null;
+  ).get(threadId) as { session: string; at: string; used: number; max: number | null; model: string | null } | null;
   if (!r) return null;
   const max = r.max && r.max > 0 ? r.max : (r.model ? config.ctxwatchWindows[r.model] : 0) ?? 0;
   if (!max) return null;
-  return { session: r.session, used: r.used, max, pct: (r.used / max) * 100, model: r.model };
+  return { at: r.at, session: r.session, used: r.used, max, pct: (r.used / max) * 100, model: r.model };
 }
 
 export function runStatus(runId: string): string | null {

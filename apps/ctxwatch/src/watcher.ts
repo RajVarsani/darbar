@@ -6,7 +6,7 @@ import { config, initDb, CtxWatch, Events, Projects } from '@darbar/core';
 import type { ObjectId } from '@darbar/core';
 import type { CtxWatchState } from '@darbar/core';
 import { callTool } from './t3mcp';
-import { bucketOf, titleFor } from './pure';
+import { bucketOf, labelFor, titleFor } from './pure';
 import { insertAtFront, QueueViolation, requestKey } from './insert';
 import { currentTitle, latestUsage, liveThreads, runStatus, type Usage } from './usage';
 
@@ -41,49 +41,76 @@ async function syncTitle(st: CtxWatchState, pct: number) {
   if (!title) return;
   const fresh = bucketOf(pct, config.ctxwatchBucketStep);
   const bucket = st.lastBucket != null && st.lastBucket === fresh ? st.lastBucket : fresh;
-  const want = titleFor(title, bucket);
+  const want = titleFor(title, bucket, labelFor(st, runStatus(st.resumeRunId ?? '')));
   if (want !== title) await callTool('t3_thread_update', { threadId: st.threadId, action: 'rename', title: want });
   if (st.lastBucket !== bucket || st.lastPct !== pct) await save(st, { lastBucket: bucket, lastPct: pct });
 }
 
+const handoffMessage = (threadId: string) =>
+  `${config.ctxwatchHandoffMsg}\n\n` +
+  'Your LAST step, and only after /darbar-handoff has FULLY succeeded, is to call the darbar gate. Run exactly this shell command:\n' +
+  `curl -fsS -X POST ${config.apiUrl}/ctx/handoff-done -H 'content-type: application/json' -d '${JSON.stringify({ threadId })}'\n` +
+  'Do nothing after that call. If the handoff failed or was incomplete, do NOT call it.';
+
 async function startHandoff(st: CtxWatchState, u: Usage) {
-  const run = await insertAtFront(st.threadId, config.ctxwatchHandoffMsg, requestKey(st.threadId, u.session, 'handoff'), false);
+  const run = await insertAtFront(st.threadId, handoffMessage(st.threadId), requestKey(st.threadId, u.session, `handoff${st.firedAt?.getTime()}`), false);
   await save(st, { phase: 'handoff_sent', handoffRunId: run, lastError: null });
   await board(st.threadId, `context ${u.pct.toFixed(1)}% >= ${config.ctxwatchThreshold}%: queued handoff run ${run} ahead of the user's queue`);
 }
+// the gate was called while the handoff run is still active: the resume goes in now, so T3 starts it next
 async function startResume(st: CtxWatchState) {
-  const run = await insertAtFront(st.threadId, config.ctxwatchResumeMsg, requestKey(st.threadId, st.firedSession ?? '', 'resume'), true);
+  await save(st, { phase: 'resume_pending' });
+  const run = await insertAtFront(st.threadId, config.ctxwatchResumeMsg, requestKey(st.threadId, st.firedSession ?? '', `resume${st.firedAt?.getTime()}`), true);
   await save(st, { phase: 'resume_sent', resumeRunId: run, lastError: null });
-  await board(st.threadId, `handoff finished: queued fresh-context resume run ${run} ahead of the user's queue`);
+  await board(st.threadId, `handoff gate called: queued fresh-context resume run ${run} ahead of the user's queue`);
+}
+// no clear happened (or none will): allow another try on the next turn, still behind the loop guard
+async function rearm(st: CtxWatchState, u: Usage, why: string) {
+  await save(st, { phase: 'idle', firedSession: null, gateAt: null, retryAfter: u.at, lastError: why });
+  await board(st.threadId, `${why}; no clear, will retry after the next turn`);
 }
 
+const ACTIVE = new Set(['preparing', 'starting', 'running', 'waiting']);
+
 async function advance(st: CtxWatchState, u: Usage) {
-  if (st.phase === 'halted' && st.firedSession !== u.session) await save(st, { phase: 'idle' });
   switch (st.phase) {
-    case 'idle':
-      if (u.pct >= config.ctxwatchThreshold && st.firedSession !== u.session) {
-        const gap = st.firedAt ? Date.now() - st.firedAt.getTime() : Infinity;
-        if (gap < config.ctxwatchMinGapMs) { // a fresh context that starts above the threshold would loop forever
-          const msg = `loop guard: new session already above the threshold within ${Math.round(config.ctxwatchMinGapMs / 1000)}s of the last handoff, not firing`;
-          if (st.lastError !== msg) { await save(st, { lastError: msg }); await board(st.threadId, msg); }
-          return;
-        }
-        await save(st, { phase: 'handoff_pending', firedSession: u.session, firedAt: new Date(), handoffRunId: null, resumeRunId: null });
-        await startHandoff(st, u);
-      }
+    case 'halted':
+      if (st.firedSession !== u.session) await save(st, { phase: 'idle' });
       return;
+    case 'idle': {
+      if (u.pct < config.ctxwatchThreshold || st.firedSession === u.session) return;
+      if (st.retryAfter && u.at <= st.retryAfter) return;
+      const gap = st.firedAt ? Date.now() - st.firedAt.getTime() : Infinity;
+      if (gap < config.ctxwatchMinGapMs) { // a fresh context that starts above the threshold would loop forever
+        const msg = `loop guard: above the threshold within ${Math.round(config.ctxwatchMinGapMs / 1000)}s of the last handoff, not firing`;
+        if (st.lastError !== msg) { await save(st, { lastError: msg }); await board(st.threadId, msg); }
+        return;
+      }
+      await save(st, { phase: 'handoff_pending', firedSession: u.session, firedAt: new Date(), gateAt: null, retryAfter: null, handoffRunId: null, resumeRunId: null });
+      return startHandoff(st, u);
+    }
     case 'handoff_pending': return startHandoff(st, u);
     case 'handoff_sent': {
       const s = runStatus(st.handoffRunId ?? '');
-      if (s === 'completed') { await save(st, { phase: 'resume_pending' }); return startResume(st); }
-      if (s && TERMINAL_BAD.has(s)) { await save(st, { phase: 'halted' }); await board(st.threadId, `handoff run ${st.handoffRunId} ended ${s}; NOT clearing the context`); }
+      if (st.gateAt && s && ACTIVE.has(s)) return startResume(st);
+      if (s === 'completed') return rearm(st, u, st.gateAt ? 'handoff completed before the gate was honoured' : `handoff run ${st.handoffRunId} completed without calling the gate`);
+      if (s && TERMINAL_BAD.has(s)) return rearm(st, u, `handoff run ${st.handoffRunId} ended ${s}`);
       return;
     }
-    case 'resume_pending': return startResume(st);
+    case 'resume_pending': {
+      const s = runStatus(st.handoffRunId ?? '');
+      if (s && ACTIVE.has(s)) return startResume(st);
+      return rearm(st, u, `handoff run ${st.handoffRunId} is ${s ?? 'gone'} before the resume could be queued`);
+    }
     case 'resume_sent': {
-      const s = runStatus(st.resumeRunId ?? '');
-      if (s === 'completed') { await save(st, { phase: 'idle' }); await board(st.threadId, `fresh context running (resume run ${st.resumeRunId} completed)`); }
-      else if (s && TERMINAL_BAD.has(s)) { await save(st, { phase: 'halted' }); await board(st.threadId, `resume run ${st.resumeRunId} ended ${s}`); }
+      const h = runStatus(st.handoffRunId ?? '');
+      const r = runStatus(st.resumeRunId ?? '');
+      if (h && TERMINAL_BAD.has(h) && r === 'queued') { // handoff died after the gate: take our own resume back
+        await callTool('t3_queue', { action: 'cancel', threadId: st.threadId, queuedRunId: st.resumeRunId });
+        return rearm(st, u, `handoff run ${st.handoffRunId} ended ${h} after the gate; cancelled the queued resume`);
+      }
+      if (r === 'completed') { await save(st, { phase: 'idle' }); await board(st.threadId, `fresh context running (resume run ${st.resumeRunId} completed)`); }
+      else if (r && TERMINAL_BAD.has(r)) { await save(st, { phase: 'halted' }); await board(st.threadId, `resume run ${st.resumeRunId} ended ${r}`); }
       return;
     }
   }
@@ -124,7 +151,7 @@ async function tick() {
 // while a handoff or resume run is pending the next step must land within seconds, or the user's
 // first queued message would start in the old context
 async function fastTick() {
-  for (const st of await CtxWatch.find({ phase: { $in: ['handoff_pending', 'handoff_sent', 'resume_pending', 'resume_sent'] } }).toArray()) await visit(st.threadId, false);
+  for (const st of await CtxWatch.find({ phase: { $in: ['handoff_pending', 'handoff_sent', 'resume_pending', 'resume_sent'] } }).toArray()) await visit(st.threadId, true);
 }
 
 if (!config.ctxwatchEnabled) { console.log('ctxwatch off: CTXWATCH=off or DARBAR_T3=off'); process.exit(0); }

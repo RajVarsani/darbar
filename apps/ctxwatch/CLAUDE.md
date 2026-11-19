@@ -12,8 +12,13 @@ Per-thread context meter and auto handoff for T3 Code, for every agent and model
   user's runs, then `checkQueue` (pure.ts) against the snapshot taken before. Any difference halts the thread + event.
 - State per thread in Mongo `ctxwatch` (phase, firedSession). Send idempotency: `clientRequestId` hashed from
   (thread, session, kind), so a restart mid-insert cannot double-send. `CTXWATCH_MIN_GAP_MS` stops a clear loop.
-- Known limit: T3 starts the user's first queued run the instant the handoff run completes, so that one message runs in
-  the old context; the resume lands before the rest. Nothing is lost or reordered.
+- Gate: the handoff message tells the agent its LAST step is `curl -X POST <api>/ctx/handoff-done` (route in
+  apps/server/src/ctx-gate.ts, MCP tool `ctx_handoff_done`). The route flags the Mongo state doc and waits; the
+  watcher (500ms poll) queues the fresh-context resume ahead of the user's runs while the handoff run is still active, so
+  T3 starts it next and all user messages run fresh. No gate (failed, stopped, completed without it) = no resume, no clear,
+  re-armed for the next newer turn behind the loop guard. If the handoff dies after the gate, the queued resume is cancelled.
+- Title prefix states: `NN% ·` normal, `NN% handoff ·` queued/running, `NN% safe ·` gate called until the resume starts,
+  `NN% no-handoff ·` failed/stopped/no gate until the next attempt.
 - Off switches: `CTXWATCH=off`, `DARBAR_T3=off`, `CTXWATCH_SKIP_THREADS`, `bun run ctxwatch:optout <thread>`.
   `CTXWATCH_ONLY_THREADS` limits it to listed threads (use it for any low-threshold test).
 - Events go straight into Mongo `events` on the `CTXWATCH_EVENT_PROJECT` board (no SSE push; refresh the board).

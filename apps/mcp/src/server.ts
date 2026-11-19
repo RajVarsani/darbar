@@ -276,6 +276,10 @@ server.tool('set_slack_channel', 'Bind, rebind or unbind the Slack channel a pro
   },
   ({ project, slackChannel }) => call(`/projects/${px(project)}`, 'PATCH', { slackChannel }));
 
+server.tool('ctx_handoff_done', 'The LAST step of an automated context handoff (DAR-419): call it only after /darbar-handoff has fully succeeded, and do nothing after it. It queues the fresh-context /darbar-resume ahead of the user\'s queued messages before it returns. If the handoff failed, do NOT call it: no clear then happens, which is safe.',
+  { threadId: z.string().optional().describe('T3 thread id; defaults to T3CODE_THREAD_ID') },
+  ({ threadId }) => call('/ctx/handoff-done', 'POST', { threadId: threadId ?? T3_THREAD }));
+
 server.tool('set_t3', 'Opt a project into (or out of) the T3 Code feedback outbox, or set its T3 thread. When enabled, every NEW feedback row (and follow-up appended to one) is sent to ONE T3 thread named "<PREFIX> orchestrator" in `dir`, created on first use. Rows filed before it was enabled are never sent. `t3: null` removes the config. The thread id and link the outbox saves are on the project.',
   {
     project: z.string(),
